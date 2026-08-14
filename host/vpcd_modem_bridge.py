@@ -30,6 +30,13 @@ IMEI_RE = re.compile(rb'(?<!\d)(\d{15})(?!\d)')
 ICCID_RE = re.compile(rb'(?<!\d)(89\d{17,20})(?!\d)')
 LOGICAL_CHANNEL_CAPACITY = 3
 LOGICAL_CHANNEL_ROLES = ("pin", "swu", "ims")
+# A slot pcscd never opens a socket for is a normal steady state, not an incident: the reader
+# may expose fewer slots than the modem offers. Retrying every second and logging every attempt
+# turned that into a permanent write stream — one line per slot per second, forever, on hosts
+# whose storage is an SD card. Retries back off to a minute and only the first failure of an
+# outage is logged, so a genuinely broken slot is still visible without the repetition.
+SLOT_RETRY_SECONDS = 1.0
+SLOT_RETRY_CEILING_SECONDS = 60.0
 
 
 class ModemError(RuntimeError):
@@ -256,11 +263,14 @@ def recv_exact(sock, size):
 
 
 def serve_slot(card, host, port, slot, channel, atr, debug):
+    delay = SLOT_RETRY_SECONDS
+    reported = ""
     while True:
         sock = None
         try:
             sock = socket.create_connection((host, port), timeout=10)
             sock.settimeout(None)
+            delay, reported = SLOT_RETRY_SECONDS, ""
             print(
                 "[bridge] slot %d connected to %s:%d on channel %d"
                 % (slot, host, port, channel),
@@ -298,14 +308,19 @@ def serve_slot(card, host, port, slot, channel, atr, debug):
                 response = card.transmit(payload, channel)
                 sock.sendall(struct.pack(">H", len(response)) + response)
         except (ConnectionRefusedError, ConnectionResetError, OSError) as exc:
-            print("[bridge] slot %d disconnected: %s" % (slot, exc), flush=True)
+            # Repeating an unchanged reason says nothing the first line did not, so only a
+            # new one is printed. Debug mode keeps every attempt for a live investigation.
+            if debug or str(exc) != reported:
+                reported = str(exc)
+                print("[bridge] slot %d disconnected: %s" % (slot, exc), flush=True)
         finally:
             if sock is not None:
                 try:
                     sock.close()
                 except OSError:
                     pass
-        time.sleep(1)
+        time.sleep(delay)
+        delay = min(delay * 2, SLOT_RETRY_CEILING_SECONDS)
 
 
 def write_metadata(path, data):

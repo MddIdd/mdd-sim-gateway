@@ -21,6 +21,12 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 - Stopped reporting "this card is not an eUICC" for a reader that simply holds no card, and
   added `install.sh diagnose`: one masked report covering reader definitions, live readers,
   bridges, sockets, orchestrator state and an lpac read per module reader.
+- A VPCD slot that pcscd never opens a socket for no longer writes a log line every second for
+  as long as the bridge runs. A reader can expose fewer slots than the modem offers, so this is
+  a normal steady state rather than an incident, and the unbounded repetition was a continuous
+  write stream on hosts whose storage is an SD card. Retries now back off to one minute and only
+  a changed reason is reported, so a genuinely broken slot stays visible without the repetition.
+
 - A modem that ModemManager declines to manage no longer costs VoWiFi as well. After three
   minutes without a claim the bridge drives the serial port directly, so SIM access keeps
   working; cellular data and flight mode stay unavailable because both need a ModemManager

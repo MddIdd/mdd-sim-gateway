@@ -7,7 +7,7 @@ from host import mdd_orchestrator
 from host.mdd_orchestrator import Orchestrator
 from host.vpcd_modem_bridge import (ModemError, ModemManagerCard,
                                     allocate_logical_channels,
-                                    logical_channel_metadata)
+                                    logical_channel_metadata, serve_slot)
 
 
 class ModemBackendTests(unittest.TestCase):
@@ -62,6 +62,48 @@ class ModemBackendTests(unittest.TestCase):
         with patch.object(mdd_orchestrator, "run", side_effect=fake_run):
             self.assertEqual(Orchestrator.modemmanager_modem_for_tty("/dev/ttyUSB2"),
                              "/org/freedesktop/ModemManager1/Modem/2")
+
+    def test_a_slot_pcscd_never_opens_stops_logging_and_backs_off(self):
+        """A reader can expose fewer slots than the modem offers. Retrying that every
+        second and logging each attempt writes to the journal forever, which matters on
+        hosts whose storage is an SD card."""
+        attempts, sleeps, lines = [], [], []
+
+        def refuse(address, timeout=None):
+            attempts.append(address)
+            if len(attempts) >= 6:
+                raise KeyboardInterrupt
+            raise ConnectionRefusedError("[Errno 111] Connection refused")
+
+        with patch("host.vpcd_modem_bridge.socket.create_connection", side_effect=refuse), \
+                patch("host.vpcd_modem_bridge.time.sleep", side_effect=sleeps.append), \
+                patch("builtins.print", side_effect=lambda *a, **k: lines.append(a[0])):
+            with self.assertRaises(KeyboardInterrupt):
+                serve_slot(None, "127.0.0.1", 36221, 2, 3, b"", False)
+
+        self.assertEqual(len(lines), 1, "an unchanged reason must be reported once")
+        self.assertIn("Connection refused", lines[0])
+        self.assertEqual(sleeps, [1.0, 2.0, 4.0, 8.0, 16.0])
+
+    def test_a_new_failure_reason_is_always_reported(self):
+        reasons = ["[Errno 111] Connection refused", "[Errno 111] Connection refused",
+                   "timed out"]
+        lines = []
+
+        def fail(address, timeout=None):
+            if not reasons:
+                raise KeyboardInterrupt
+            raise OSError(reasons.pop(0))
+
+        with patch("host.vpcd_modem_bridge.socket.create_connection", side_effect=fail), \
+                patch("host.vpcd_modem_bridge.time.sleep"), \
+                patch("builtins.print", side_effect=lambda *a, **k: lines.append(a[0])):
+            with self.assertRaises(KeyboardInterrupt):
+                serve_slot(None, "127.0.0.1", 36221, 2, 3, b"", False)
+
+        self.assertEqual(len(lines), 2)
+        self.assertIn("timed out", lines[1])
+
 
 if __name__ == "__main__":
     unittest.main()

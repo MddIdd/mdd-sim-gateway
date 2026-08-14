@@ -837,8 +837,10 @@ ensure_vpcd_host() {
   download_verified \
     "https://github.com/frankmorgner/vsmartcard/archive/refs/tags/virtualsmartcard-${VPCD_VERSION}.tar.gz" \
     "$tmp/vsmartcard.tar.gz" "$VPCD_SHA256"
-  # Only src/ifd-vpcd is built. The rest of the tree is the Python virtual card, the Android
-  # relay and pcsc-relay — none of which this gateway uses, and each dragging in its own deps.
+  # Only the driver and the library it links against are built. The rest of the tree is the
+  # Python virtual card, the Android relay and pcsc-relay — none of which this gateway uses,
+  # and each dragging in its own dependencies. src/vpcd must come first: src/ifd-vpcd links
+  # libvpcd.la and its makefile has no rule to build it.
   ( cd "$tmp" \
     && tar xf vsmartcard.tar.gz \
     && cd "vsmartcard-virtualsmartcard-${VPCD_VERSION}/virtualsmartcard" \
@@ -847,6 +849,7 @@ ensure_vpcd_host() {
                    --enable-serialdropdir="$drivers_dir" \
                    --enable-vpcdslots="$VPCD_SLOTS" \
                    --disable-dependency-tracking >/dev/null \
+    && make -C src/vpcd >/dev/null \
     && make -C src/ifd-vpcd >/dev/null \
     && make -C src/ifd-vpcd install >/dev/null \
   ) || { rm -rf "$tmp"; warn "could not build the virtual smart-card driver; the packaged two-slot driver stays in place and a module's third logical channel will be unavailable"; return 1; }

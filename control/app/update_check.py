@@ -82,6 +82,23 @@ def _version_tuple(value: str) -> tuple[int, ...]:
         return (0,)
 
 
+def _stargazers(session, headers: dict, repository_name: str) -> int | None:
+    """Star count for the console's repository link, or None if it cannot be read.
+
+    Deliberately folded into the release check rather than served from the status endpoint:
+    that endpoint answers every page load and must not wait on GitHub. Failure is silent —
+    a decorative count must never turn a working update check into a visible error.
+    """
+    try:
+        response = session.get(f"https://api.github.com/repos/{repository_name}",
+                               headers=headers, timeout=8)
+        response.raise_for_status()
+        count = int(response.json().get("stargazers_count"))
+    except (requests.RequestException, OSError, ValueError, TypeError):
+        return None
+    return count if count >= 0 else None
+
+
 def check(force: bool = False) -> dict:
     global _cache
     now = time.time()
@@ -115,6 +132,7 @@ def check(force: bool = False) -> dict:
             "published_at": str(payload.get("published_at") or ""),
             "notes": str(payload.get("body") or "")[:4000],
         })
+        result["stars"] = _stargazers(session, headers, repository_name)
     except requests.HTTPError as exc:
         code = exc.response.status_code if exc.response is not None else 0
         if code in {401, 404}:

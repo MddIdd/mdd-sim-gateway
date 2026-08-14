@@ -8,6 +8,8 @@ import tarfile
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
+import requests
 from pathlib import Path
 from unittest.mock import patch
 
@@ -216,3 +218,46 @@ class OrchestratorUpdateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StarCountTests(unittest.TestCase):
+    """The count decorates a link. It must never turn a working update check into an error,
+    and an unreadable count must stay absent rather than being reported as zero."""
+
+    def test_a_failed_star_lookup_leaves_the_release_check_intact(self):
+        session = SimpleNamespace(get=lambda *a, **k: (_ for _ in ()).throw(
+            requests.RequestException("offline")))
+        self.assertIsNone(update_check._stargazers(session, {}, "owner/repo"))
+
+    def test_a_star_count_is_read_from_the_repository_endpoint(self):
+        calls = []
+
+        class Response:
+            @staticmethod
+            def raise_for_status():
+                return None
+
+            @staticmethod
+            def json():
+                return {"stargazers_count": 13300}
+
+        def get(url, **kwargs):
+            calls.append(url)
+            return Response()
+
+        value = update_check._stargazers(SimpleNamespace(get=get), {}, "owner/repo")
+        self.assertEqual(value, 13300)
+        self.assertEqual(calls, ["https://api.github.com/repos/owner/repo"])
+
+    def test_a_malformed_star_count_is_absent_rather_than_zero(self):
+        class Response:
+            @staticmethod
+            def raise_for_status():
+                return None
+
+            @staticmethod
+            def json():
+                return {"stargazers_count": None}
+
+        self.assertIsNone(update_check._stargazers(
+            SimpleNamespace(get=lambda *a, **k: Response()), {}, "owner/repo"))

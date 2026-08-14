@@ -134,6 +134,10 @@ a { color: inherit; }
 .u-project-meta svg { width:18px; height:18px; }
 .u-repo-actions { display:flex; align-items:center; gap:2px; }
 .u-project-meta .u-star-link:hover { color:#d97706; background:#f59e0b18; }
+/* The count makes this link wider than the square icon buttons beside it, so it opts out of
+   their fixed width rather than stretching them. */
+.u-project-meta .u-star-link { width:auto; gap:4px; padding:0 7px 0 5px; }
+.u-project-meta .u-star-link b { font-size:11px; font-weight:700; letter-spacing:.2px; }
 .u-project-meta .u-version { display:flex; align-items:center; gap:6px; width:auto; height:28px; padding:0 6px; text-decoration:none; }
 .u-version.has-update { color:#dc2626; font-weight:750; }.u-version.has-update i { width:7px; height:7px; border-radius:50%; background:#ef4444; box-shadow:0 0 0 4px #ef444422; }
 .u-modal-backdrop { position:fixed; inset:0; z-index:50; display:flex; align-items:center; justify-content:center; padding:20px; background:#0008; }

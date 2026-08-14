@@ -47,6 +47,10 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   beside the support-bundle download that asks for the bundle to be attached. Reporting a fault
   previously meant finding the repository first, and the bundle — the one artefact that answers
   most host-side questions on its own — was easy to miss.
+- Showed the repository's star count beside the console's Star link, abbreviated the way
+  GitHub abbreviates it. The count rides on the existing release check, so it inherits that
+  check's cache and proxy setting and the status endpoint every page load hits stays local.
+  A count that cannot be read is omitted rather than shown as zero.
 - Laid the messages allowance panel out as a scrollable six-column grid, so its fields stay on
   one row instead of wrapping into a column on the message page's narrower card.
 - Added a host-side section to the redacted support bundle. The host orchestrator now publishes

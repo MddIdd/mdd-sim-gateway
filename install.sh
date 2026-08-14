@@ -810,9 +810,15 @@ installed_vpcd_slots() {
 # unreachable until the driver itself is replaced. Idempotent via a slot-tagged marker beside the
 # driver; a distro reinstall drops the marker and the next run rebuilds.
 ensure_vpcd_host() {
-  drivers_dir=/usr/lib/pcsc/drivers/serial
+  # Ask pcsc-lite where its drivers live rather than assuming, the way the CCID build does.
+  # Debian keeps this out of the multiarch tree today, but a distribution that does not would
+  # otherwise get a driver installed somewhere pcscd never looks — and the only symptom would
+  # be the two-slot behaviour this exists to fix, with the build reporting success.
+  drivers_dir=$(pkg-config libpcsclite --variable usbdropdir 2>/dev/null || true)
+  [ -n "$drivers_dir" ] && drivers_dir="$drivers_dir/serial"
+  # Fall back to wherever the packaged driver already sits, then to the historical path.
   [ -d "$drivers_dir" ] || drivers_dir=$(dirname "$(find /usr/lib /usr/local/lib -name 'libifdvpcd.so*' -print -quit 2>/dev/null || true)" 2>/dev/null)
-  [ -n "$drivers_dir" ] && [ "$drivers_dir" != "." ] || drivers_dir=/usr/lib/pcsc/drivers/serial
+  [ -n "$drivers_dir" ] && [ -d "$drivers_dir" ] || drivers_dir=/usr/lib/pcsc/drivers/serial
   vpcd_marker="$drivers_dir/.mdd-vpcd-slots-${VPCD_SLOTS}"
   if [ -f "$vpcd_marker" ]; then
     info "virtual smart-card driver already provides $VPCD_SLOTS slots ($drivers_dir)"
@@ -1193,6 +1199,14 @@ cmd_status() {
   if have sing-box; then printf '  sing-box  %s\n' "$(sing-box version 2>/dev/null | head -1)"; else printf '  sing-box  (not installed)\n'; fi
   if have xray; then printf '  Xray-core  %s\n' "$(xray version 2>/dev/null | head -1)"; else printf '  Xray-core  (not installed)\n'; fi
   if have mmcli; then printf '  ModemManager  %s\n' "$(mmcli --version 2>/dev/null | head -1)"; else printf '  ModemManager  (not installed)\n'; fi
+  # Slot count decides whether a module's third logical channel exists at all, and the build
+  # that raises it only warns when it fails — so it has to be visible without reading a log.
+  vpcd_slots=$(installed_vpcd_slots)
+  case "$vpcd_slots" in
+    0) printf '  virtual reader driver  (not installed)\n' ;;
+    2) printf '  virtual reader driver  %s slots — run `%s vpcd` for a third logical channel\n' "$vpcd_slots" "$0" ;;
+    *) printf '  virtual reader driver  %s slots\n' "$vpcd_slots" ;;
+  esac
   if [ -x "$MDD_DATA_DIR/lpac/lpac" ]; then printf '  lpac  installed\n'; else printf '  lpac  (not installed)\n'; fi
 }
 

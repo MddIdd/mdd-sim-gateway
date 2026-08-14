@@ -43,6 +43,11 @@ except ImportError:  # pragma: no cover - installer provides PyYAML
 BASE_VPCD_PORT = 0x3C00
 VPCD_PORT_STRIDE = 0x100
 VPCD_PORT_SLOTS = 64
+# Slots the upstream libifdvpcd is compiled for (--enable-vpcdslots, default 2). Assumed when
+# the installer has not recorded a rebuilt driver, because asking for slots the driver does not
+# have is what leaves a bridge thread dialling a socket that never appears.
+VPCD_PACKAGED_SLOTS = 2
+VPCD_DRIVER_DIRS = ("/usr/lib", "/usr/local/lib")
 # The reader definition shipped by the vsmartcard-vpcd package, renamed out of the way
 # (pcsc-lite skips dot files) rather than deleted, so an operator can restore it.
 DISTRO_VPCD_READER = "vpcd"
@@ -719,6 +724,22 @@ class Orchestrator:
         """
         first_seen = self._unclaimed_since.setdefault(tty, time.time())
         return time.time() - first_seen
+
+    def driver_slots(self) -> int:
+        """Slots the installed libifdvpcd was compiled for.
+
+        The installer records this beside the driver when it builds one; without that marker
+        the packaged build is in place, which upstream compiles for two. Guessing higher
+        would recreate the very symptom this exists to avoid, so the fallback is the
+        conservative one.
+        """
+        for parent in (Path(item) for item in VPCD_DRIVER_DIRS):
+            for marker in parent.glob("**/.mdd-vpcd-slots-*"):
+                try:
+                    return max(1, int(marker.name.rsplit("-", 1)[1]))
+                except (IndexError, ValueError):
+                    continue
+        return VPCD_PACKAGED_SLOTS
 
     def virtualization(self) -> str:
         """Cached hypervisor/container label; deployments differ mostly in this one word."""
@@ -2020,7 +2041,10 @@ class Orchestrator:
             if base not in ports:
                 base = next(port for port in ports if port not in used)
             used.add(base); assignments[modem["id"]] = {**modem, "base_port": base}
-        slots = max(1, min(3, int(hardware.get("vpcd_slots") or 3)))
+        # Never ask for more slots than the installed driver was compiled with: the count is a
+        # build-time constant, and a slot with no socket behind it leaves a bridge thread
+        # dialling a port pcscd will never listen on for the life of the process.
+        slots = max(1, min(self.driver_slots(), int(hardware.get("vpcd_slots") or 3)))
         # Keep reader definitions stable for every detected modem. A capability toggle only
         # starts/stops that modem's bridge; it must not restart pcscd and disturb other lines.
         reader_config = "\n".join(self.reader_stanza(m, assignments[m["id"]]["base_port"])

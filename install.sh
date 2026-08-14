@@ -94,6 +94,17 @@ PCSC_SOURCE_BUILT=0
 CCID_VERSION="${CCID_VERSION:-1.6.2}"
 CCID_SHA256="6d5e6a6884090831ed155ee75cbc03aed252bd8158d94f507a94f05ebaba296c"
 
+# Virtual smart-card driver, built from source because the packaged one is compiled for two
+# slots. A module's SIM is exposed as one virtual reader per logical channel, and this gateway
+# uses three (PIN keeper, SWu tunnel, IMS), so on the distro build the third channel has no
+# socket behind it: its bridge thread dials a port pcscd never listens on and the channel is
+# simply unavailable. The count is a compile-time constant (--enable-vpcdslots, upstream
+# default 2), so a rebuild is the only way to raise it. Same upstream release Debian packages
+# as 3.3+dfsg, so this changes the slot count and nothing else.
+VPCD_VERSION="${VPCD_VERSION:-0.8}"
+VPCD_SHA256="b428c399d5f014a350db0e8e5947ce69392429cc1aebdf3830af3c7f8078b18f"
+VPCD_SLOTS="${VPCD_SLOTS:-4}"
+
 # Host-side runtime dependencies. Versions and hashes are pinned so an upstream replacement
 # cannot silently change what this root installer executes. Override only for a reviewed release.
 SINGBOX_VERSION="${MDD_SINGBOX_VERSION:-1.13.15}"
@@ -783,6 +794,79 @@ restore_packaged_vpcd_reader() {
   systemctl restart pcscd.service >/dev/null 2>&1 || true
 }
 
+# Slot count of the installed libifdvpcd, read from the constant the build compiles in. Used to
+# decide whether a rebuild is needed and to tell the orchestrator what it may ask for; a driver
+# that cannot be inspected is reported as the upstream default rather than guessed upwards.
+installed_vpcd_slots() {
+  lib=$(find /usr/local/lib /usr/lib -name 'libifdvpcd.so*' -print -quit 2>/dev/null || true)
+  [ -n "$lib" ] || { printf '0'; return; }
+  marker=$(find /usr/local/lib /usr/lib -name ".mdd-vpcd-slots-*" -print -quit 2>/dev/null || true)
+  case "$marker" in *.mdd-vpcd-slots-*) printf '%s' "${marker##*-}"; return ;; esac
+  printf '2'
+}
+
+# Build + install libifdvpcd with enough slots for this gateway's logical channels. The packaged
+# driver is compiled for two and the count has no runtime override, so the third channel is
+# unreachable until the driver itself is replaced. Idempotent via a slot-tagged marker beside the
+# driver; a distro reinstall drops the marker and the next run rebuilds.
+ensure_vpcd_host() {
+  drivers_dir=/usr/lib/pcsc/drivers/serial
+  [ -d "$drivers_dir" ] || drivers_dir=$(dirname "$(find /usr/lib /usr/local/lib -name 'libifdvpcd.so*' -print -quit 2>/dev/null || true)" 2>/dev/null)
+  [ -n "$drivers_dir" ] && [ "$drivers_dir" != "." ] || drivers_dir=/usr/lib/pcsc/drivers/serial
+  vpcd_marker="$drivers_dir/.mdd-vpcd-slots-${VPCD_SLOTS}"
+  if [ -f "$vpcd_marker" ]; then
+    info "virtual smart-card driver already provides $VPCD_SLOTS slots ($drivers_dir)"
+    return 0
+  fi
+  info "building the virtual smart-card driver from source for $VPCD_SLOTS slots…"
+  if   have apt-get; then
+    pkg_install autoconf automake libtool pkg-config gcc make wget ca-certificates help2man
+    [ -f /usr/include/PCSC/pcsclite.h ] || pkg_install libpcsclite-dev
+  elif have dnf || have yum; then
+    pkg_install autoconf automake libtool pkgconf-pkg-config gcc make wget help2man
+    [ -f /usr/include/PCSC/pcsclite.h ] || pkg_install pcsc-lite-devel
+  elif have pacman;  then pkg_install autoconf automake libtool pkgconf gcc make wget help2man
+  elif have zypper;  then
+    pkg_install autoconf automake libtool pkg-config gcc make wget help2man
+    [ -f /usr/include/PCSC/pcsclite.h ] || pkg_install pcsc-lite-devel
+  elif have apk;     then
+    pkg_install autoconf automake libtool pkgconfig gcc make wget musl-dev help2man
+    [ -f /usr/include/PCSC/pcsclite.h ] || pkg_install pcsc-lite-dev
+  fi
+  tmp=$(mktemp -d)
+  download_verified \
+    "https://github.com/frankmorgner/vsmartcard/archive/refs/tags/virtualsmartcard-${VPCD_VERSION}.tar.gz" \
+    "$tmp/vsmartcard.tar.gz" "$VPCD_SHA256"
+  # Only src/ifd-vpcd is built. The rest of the tree is the Python virtual card, the Android
+  # relay and pcsc-relay — none of which this gateway uses, and each dragging in its own deps.
+  ( cd "$tmp" \
+    && tar xf vsmartcard.tar.gz \
+    && cd "vsmartcard-virtualsmartcard-${VPCD_VERSION}/virtualsmartcard" \
+    && autoreconf -vif . >/dev/null 2>&1 \
+    && ./configure --enable-serialconfdir=/etc/reader.conf.d \
+                   --enable-serialdropdir="$drivers_dir" \
+                   --enable-vpcdslots="$VPCD_SLOTS" \
+                   --disable-dependency-tracking >/dev/null \
+    && make -C src/ifd-vpcd >/dev/null \
+    && make -C src/ifd-vpcd install >/dev/null \
+  ) || { rm -rf "$tmp"; warn "could not build the virtual smart-card driver; the packaged two-slot driver stays in place and a module's third logical channel will be unavailable"; return 1; }
+  rm -rf "$tmp"
+  # configure installs its own reader definition; this gateway writes per-modem ones instead.
+  disable_packaged_vpcd_reader
+  rm -f "$drivers_dir/.mdd-vpcd-slots-"* 2>/dev/null || true
+  touch "$vpcd_marker" 2>/dev/null || true
+  if have apt-mark; then apt-mark hold vsmartcard-vpcd >/dev/null 2>&1 || true; fi
+  if have systemctl; then
+    # Same maintenance marker the orchestrator publishes, so the control plane does not read
+    # this planned enumeration gap as readers being unplugged and stop healthy engines.
+    install -d -m 0700 "$MDD_DATA_DIR/orchestrator"
+    : > "$MDD_DATA_DIR/orchestrator/pcsc-maintenance"
+    chmod 0600 "$MDD_DATA_DIR/orchestrator/pcsc-maintenance" 2>/dev/null || true
+    systemctl restart pcscd 2>/dev/null || true
+  fi
+  info "virtual smart-card driver installed with $VPCD_SLOTS slots ($drivers_dir)"
+}
+
 # Country routes and USB modem serial ports live in the host namespace even when the manager is
 # containerized, so this small privileged service is installed in both deployment modes.
 run_orchestrator() {
@@ -796,6 +880,8 @@ run_orchestrator() {
   VPCD_LIB=$(find /usr/local/lib /usr/lib -name libifdvpcd.so -print -quit 2>/dev/null || true)
   [ -n "$VPCD_LIB" ] && info "virtual smart-card driver: $VPCD_LIB" \
     || warn "libifdvpcd.so not found; native readers work, modem virtual slots will stay unavailable"
+  # The packaged driver only has two slots, one short of the logical channels a module needs.
+  [ -n "$VPCD_LIB" ] && ensure_vpcd_host
   disable_packaged_vpcd_reader
   have sing-box || die "sing-box installation failed"
   have xray || die "Xray-core installation failed"

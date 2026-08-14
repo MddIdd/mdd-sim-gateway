@@ -6,6 +6,12 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- A module's third logical channel works on a stock host. The virtual smart-card driver
+  compiles its slot count in — upstream ships two — while a module needs three readers, one per
+  logical channel, so the third had no socket behind it and its bridge thread dialled a port
+  pcscd never listened on. The installer now builds the driver with four slots, and the
+  orchestrator never requests more than the installed driver reports, so a host that skips or
+  fails that build degrades to two working channels instead of one permanently dead one.
 - Stopped the `vsmartcard-vpcd` package's own reader definition from taking the port this
   gateway gives a cellular module. Both used vpcd's default, only one could bind it, and
   directory order decided which — so on some hosts every module reader vanished while two

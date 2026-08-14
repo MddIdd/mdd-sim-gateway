@@ -544,6 +544,52 @@ modem.3gpp.registration-state : unknown
             self.assertFalse(device["transitioning"])
             self.assertIn("ModemManager did not create a modem", device["error"])
 
+    def test_a_bridge_never_asks_for_slots_the_driver_lacks(self):
+        """Slot count is compiled into libifdvpcd, so a configured three against a packaged
+        two-slot driver leaves one bridge thread dialling a socket that never appears."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            app = Orchestrator(root / "data", root, dry_run=False)
+            app.root.mkdir(parents=True)
+            commands = []
+
+            def spawn(command):
+                commands.append(command)
+                return SimpleNamespace(poll=lambda: None, pid=9)
+
+            def reconcile():
+                with patch.object(app, "usb_modems",
+                                  return_value=[{"id": "a", "name": "A", "tty": "/dev/ttyUSB2"}]), \
+                        patch("host.mdd_orchestrator.run",
+                              return_value=SimpleNamespace(returncode=0, stdout="", stderr="")), \
+                        patch("host.mdd_orchestrator.subprocess.Popen", side_effect=spawn), \
+                        patch.dict("os.environ",
+                                   {"MDD_VPCD_READER_CONFIG": str(root / "readers.conf")}):
+                    app.reconcile_hardware({"hardware": {"auto_detect": True, "vpcd_slots": 3}},
+                                           {"a": {"vowifi_enabled": True}})
+                return commands[-1][commands[-1].index("--slots") + 1]
+
+            with patch.object(app, "driver_slots", return_value=2):
+                self.assertEqual(reconcile(), "2")
+            app.bridges.clear()
+            with patch.object(app, "driver_slots", return_value=4):
+                # The configured value still caps it; a wider driver does not widen the request.
+                self.assertEqual(reconcile(), "3")
+
+    def test_driver_slots_reads_the_installer_marker_and_falls_back_conservatively(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            app = Orchestrator(root / "data", root, dry_run=True)
+            drivers = root / "usr" / "lib" / "pcsc" / "drivers" / "serial"
+            drivers.mkdir(parents=True)
+
+            with patch.object(mdd_orchestrator, "VPCD_DRIVER_DIRS", (str(root / "usr/lib"),)):
+                # No marker: the packaged build is in place and guessing higher is what
+                # leaves a bridge thread dialling a socket that never appears.
+                self.assertEqual(app.driver_slots(), mdd_orchestrator.VPCD_PACKAGED_SLOTS)
+                drivers.joinpath(".mdd-vpcd-slots-4").touch()
+                self.assertEqual(app.driver_slots(), 4)
+
     def test_replug_retires_the_degraded_verdict(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

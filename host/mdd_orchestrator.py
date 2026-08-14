@@ -48,6 +48,11 @@ VPCD_PORT_SLOTS = 64
 # have is what leaves a bridge thread dialling a socket that never appears.
 VPCD_PACKAGED_SLOTS = 2
 VPCD_DRIVER_DIRS = ("/usr/lib", "/usr/local/lib")
+# Logical channels the bridge implements, one per slot. It rejects anything above this on its
+# command line, so a larger configured or driver-provided count must not reach it: the bridge
+# would exit at startup and be respawned every cycle. The installer deliberately builds the
+# driver with a spare slot, so this is the binding limit rather than the driver's.
+VPCD_CHANNEL_CAPACITY = 3
 # The reader definition shipped by the vsmartcard-vpcd package, renamed out of the way
 # (pcsc-lite skips dot files) rather than deleted, so an operator can restore it.
 DISTRO_VPCD_READER = "vpcd"
@@ -2044,7 +2049,8 @@ class Orchestrator:
         # Never ask for more slots than the installed driver was compiled with: the count is a
         # build-time constant, and a slot with no socket behind it leaves a bridge thread
         # dialling a port pcscd will never listen on for the life of the process.
-        slots = max(1, min(self.driver_slots(), int(hardware.get("vpcd_slots") or 3)))
+        slots = max(1, min(VPCD_CHANNEL_CAPACITY, self.driver_slots(),
+                           int(hardware.get("vpcd_slots") or VPCD_CHANNEL_CAPACITY)))
         # Keep reader definitions stable for every detected modem. A capability toggle only
         # starts/stops that modem's bridge; it must not restart pcscd and disturb other lines.
         reader_config = "\n".join(self.reader_stanza(m, assignments[m["id"]]["base_port"])

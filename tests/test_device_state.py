@@ -1,4 +1,5 @@
 import json
+import re
 import tempfile
 import time
 import unittest
@@ -576,6 +577,33 @@ modem.3gpp.registration-state : unknown
                 # The configured value still caps it; a wider driver does not widen the request.
                 self.assertEqual(reconcile(), "3")
 
+    def test_a_slot_count_above_the_bridge_limit_cannot_reach_it(self):
+        """The bridge rejects more slots than it has logical channels and exits, which the
+        reconcile loop reads as a dead bridge and respawns — every cycle, forever. The
+        installer leaves the driver a spare slot, so this is reachable by configuration."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            app = Orchestrator(root / "data", root, dry_run=False)
+            app.root.mkdir(parents=True)
+            commands = []
+
+            with patch.object(app, "usb_modems",
+                              return_value=[{"id": "a", "name": "A", "tty": "/dev/ttyUSB2"}]), \
+                    patch.object(app, "driver_slots", return_value=4), \
+                    patch("host.mdd_orchestrator.run",
+                          return_value=SimpleNamespace(returncode=0, stdout="", stderr="")), \
+                    patch("host.mdd_orchestrator.subprocess.Popen",
+                          side_effect=lambda command: commands.append(command) or
+                          SimpleNamespace(poll=lambda: None, pid=9)), \
+                    patch.dict("os.environ",
+                               {"MDD_VPCD_READER_CONFIG": str(root / "readers.conf")}):
+                app.reconcile_hardware({"hardware": {"auto_detect": True, "vpcd_slots": 4}},
+                                       {"a": {"vowifi_enabled": True}})
+
+            requested = commands[0][commands[0].index("--slots") + 1]
+            self.assertEqual(requested, str(mdd_orchestrator.VPCD_CHANNEL_CAPACITY))
+            self.assertIn(int(requested), vpcd_modem_bridge_slot_choices())
+
     def test_driver_slots_reads_the_installer_marker_and_falls_back_conservatively(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -714,3 +742,17 @@ class ReaderRecordMigrationTests(unittest.TestCase):
         self.assertEqual(device_state.migrate_reader_records(
             {"reader-new": {"name": self.NAME}}), [])
         self.assertIn("2c7c-0125-1-1.4", device_state.hardware())
+
+
+def vpcd_modem_bridge_slot_choices():
+    """The --slots values the bridge actually accepts, read from its own parser.
+
+    Asserting against the parser rather than a copied literal keeps the orchestrator's cap
+    and the bridge's limit from drifting apart silently.
+    """
+    import argparse
+    from host import vpcd_modem_bridge
+    parser = argparse.ArgumentParser()
+    source = Path(vpcd_modem_bridge.__file__).read_text()
+    match = re.search(r'"--slots".*choices=\(([^)]*)\)', source)
+    return tuple(int(value) for value in match.group(1).split(","))

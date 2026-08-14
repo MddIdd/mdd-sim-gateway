@@ -21,11 +21,6 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 - Stopped reporting "this card is not an eUICC" for a reader that simply holds no card, and
   added `install.sh diagnose`: one masked report covering reader definitions, live readers,
   bridges, sockets, orchestrator state and an lpac read per module reader.
-- A module bridge no longer asks for a third card slot the installed driver does not have. Slot
-  count is a property of the `libifdvpcd` bundle rather than of the reader definition written
-  here, and the packaged build exposes two — so the third slot's thread dialled a port pcscd
-  never listened on, for the life of the bridge. `MDD_VPCD_DRIVER_SLOTS` covers a driver built
-  for more.
 - A VPCD slot that pcscd never opens a socket for no longer writes a log line every second for
   as long as the bridge runs. A reader can expose fewer slots than the modem offers, so this is
   a normal steady state rather than an incident, and the unbounded repetition was a continuous

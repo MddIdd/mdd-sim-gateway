@@ -544,32 +544,6 @@ modem.3gpp.registration-state : unknown
             self.assertFalse(device["transitioning"])
             self.assertIn("ModemManager did not create a modem", device["error"])
 
-    def test_a_bridge_asks_for_no_more_slots_than_the_driver_has(self):
-        """Slot count comes from the installed libifdvpcd bundle, not from the stanza we
-        write. Asking for a third slot the packaged driver does not expose leaves a thread
-        dialling a port pcscd never listens on."""
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            app = Orchestrator(root / "data", root, dry_run=False)
-            app.root.mkdir(parents=True)
-            commands = []
-
-            with patch.object(app, "usb_modems",
-                              return_value=[{"id": "a", "name": "A", "tty": "/dev/ttyUSB2"}]), \
-                    patch("host.mdd_orchestrator.run",
-                          return_value=SimpleNamespace(returncode=0, stdout="", stderr="")), \
-                    patch("host.mdd_orchestrator.subprocess.Popen",
-                          side_effect=lambda command: commands.append(command) or
-                          SimpleNamespace(poll=lambda: None, pid=9)), \
-                    patch.dict("os.environ",
-                               {"MDD_VPCD_READER_CONFIG": str(root / "readers.conf")}):
-                app.reconcile_hardware({"hardware": {"auto_detect": True}},
-                                       {"a": {"vowifi_enabled": True}})
-
-            self.assertEqual(commands[0][commands[0].index("--slots") + 1],
-                             str(mdd_orchestrator.VPCD_DRIVER_SLOTS))
-            self.assertEqual(mdd_orchestrator.VPCD_DRIVER_SLOTS, 2)
-
     def test_replug_retires_the_degraded_verdict(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

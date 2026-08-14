@@ -709,8 +709,17 @@ ensure_control_local_deps() {
 setup_venv() {
   info "creating Python venv + installing control requirements ($VENV_DIR)…"
   [ -d "$VENV_DIR" ] || python3 -m venv "$VENV_DIR"
-  "$VENV_DIR/bin/pip" install --quiet --upgrade pip wheel
-  "$VENV_DIR/bin/pip" install --quiet -r "$REPO_DIR/control/requirements.txt"
+  # Most reloads do not change Python dependencies. Prove the pinned requirements are already
+  # present without consulting an index first: this keeps a release download proxy out of pip's
+  # vendored networking stack and lets a fully provisioned host reload offline. Only a genuinely
+  # missing or changed dependency needs the package index. Do not upgrade pip on every reload;
+  # replacing the installer itself creates needless network and compatibility risk.
+  if "$VENV_DIR/bin/pip" install --quiet --no-index \
+      -r "$REPO_DIR/control/requirements.txt" >/dev/null 2>&1; then
+    info "control requirements already satisfied — reusing the installed packages"
+  else
+    "$VENV_DIR/bin/pip" install --quiet wheel -r "$REPO_DIR/control/requirements.txt"
+  fi
   info "venv ready"
 }
 

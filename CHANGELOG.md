@@ -2,6 +2,15 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [1.3.7] - 2026-08-14
+
+### Fixed
+
+- Reload now checks an existing Python environment against the pinned requirements entirely
+  offline before contacting a package index, and no longer upgrades pip on every run. Updates
+  whose dependencies are already installed therefore cannot fail inside pip merely because the
+  Release download used an HTTP or SOCKS proxy.
+
 ## [1.3.6] - 2026-08-14
 
 ### Fixed

@@ -78,6 +78,16 @@ class RequestApplyTests(unittest.TestCase):
 
 
 class UpdaterTests(unittest.TestCase):
+    def test_reload_reuses_satisfied_python_requirements_offline(self):
+        installer = (Path(__file__).resolve().parent.parent / "install.sh").read_text(
+            encoding="utf-8")
+        offline = 'pip" install --quiet --no-index'
+        online = 'pip" install --quiet wheel -r'
+        self.assertIn(offline, installer)
+        self.assertIn(online, installer)
+        self.assertLess(installer.index(offline), installer.index(online))
+        self.assertNotIn('pip" install --quiet --upgrade pip wheel', installer)
+
     def test_release_archive_checksum_is_required_and_verified(self):
         with tempfile.TemporaryDirectory() as tmp:
             archive = Path(tmp, "mdd-sim-gateway-v9.9.9.tar.gz")

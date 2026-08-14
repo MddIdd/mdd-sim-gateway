@@ -131,8 +131,13 @@ export default function AllowancePanel({ instanceId, mode = 'overview', transpor
       <button className="btn btn-primary" disabled={busy} onClick={query}>{busy ? t('Working…') : t('Query allowance')}</button>
       {mode === 'messages' && <button className="btn btn-ghost" disabled={busy} onClick={() => setEditingRule(!editingRule)}>{t('Query settings')}</button>}
     </div>
-    {!editing && <div className="u-details cols" style={{ marginTop: 10 }}>
-      {FIELDS.map(([key, label]) => <div className="u-detail" key={key}><span>{t(label)}</span><b>{value[key] || (key === 'activated_at' ? t('Configure to enable reminders') : '—')}</b></div>)}
+    {!editing && <div className="u-details cols" style={compact ? {
+      marginTop: 10, gridTemplateColumns: 'repeat(6, minmax(110px, 1fr))',
+      gap: '0 14px', overflowX: 'auto',
+    } : { marginTop: 10 }}>
+      {FIELDS.map(([key, label]) => <div className="u-detail" key={key} style={compact ? {
+        minWidth: 0, alignItems: 'flex-start', flexDirection: 'column', justifyContent: 'center', gap: 3,
+      } : undefined}><span>{t(label)}</span><b style={compact ? { textAlign: 'left' } : undefined}>{value[key] || (key === 'activated_at' ? t('Configure to enable reminders') : '—')}</b></div>)}
     </div>}
     {mode === 'overview' && editing && <div style={{ marginTop: 10 }}>
       <div className="u-details cols">{FIELDS.map(([key, label]) => <label className="u-detail" key={key}><span>{t(label)}</span><input type={key === 'activated_at' ? 'date' : 'text'} value={draft[key] || ''} maxLength={160} onChange={event => setDraft(current => ({ ...current, [key]: event.target.value }))} /></label>)}</div>

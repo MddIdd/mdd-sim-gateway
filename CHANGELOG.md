@@ -32,7 +32,6 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   a normal steady state rather than an incident, and the unbounded repetition was a continuous
   write stream on hosts whose storage is an SD card. Retries now back off to one minute and only
   a changed reason is reported, so a genuinely broken slot stays visible without the repetition.
-
 - A modem that ModemManager declines to manage no longer costs VoWiFi as well. After three
   minutes without a claim the bridge drives the serial port directly, so SIM access keeps
   working; cellular data and flight mode stay unavailable because both need a ModemManager
@@ -44,6 +43,12 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+- Added a route from the console to this project's issue tracker: a sidebar entry, and a prompt
+  beside the support-bundle download that asks for the bundle to be attached. Reporting a fault
+  previously meant finding the repository first, and the bundle — the one artefact that answers
+  most host-side questions on its own — was easy to miss.
+- Laid the messages allowance panel out as a scrollable six-column grid, so its fields stay on
+  one row instead of wrapping into a column on the message page's narrower card.
 - Added a host-side section to the redacted support bundle. The host orchestrator now publishes
   the state only it can see — detected virtualization, whether the ModemManager unit is reported
   active, the discovered modems and their ttys, VPCD port assignments, live bridge processes and

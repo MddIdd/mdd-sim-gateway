@@ -84,7 +84,9 @@ DEFAULTS = {
         # logical slots; native PC/SC readers pass through untouched.
         "hardware": {
             "auto_detect": True,
-            "vpcd_slots": 3,
+            # The packaged libifdvpcd exposes two slots per reader, so a third one has no
+            # socket behind it and its bridge thread dials a port nothing listens on.
+            "vpcd_slots": 2,
             "modem_profiles": [
                 {"name": "DJI/Quectel EC25", "vid": "2c7c", "pid": "0125",
                  "at_interface": 2},

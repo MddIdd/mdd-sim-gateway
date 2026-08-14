@@ -43,6 +43,10 @@ except ImportError:  # pragma: no cover - installer provides PyYAML
 BASE_VPCD_PORT = 0x3C00
 VPCD_PORT_STRIDE = 0x100
 VPCD_PORT_SLOTS = 64
+# Slots the packaged libifdvpcd bundle exposes per reader. A bridge opens one connection per
+# slot, so asking for more than the driver has leaves a thread dialling a port pcscd never
+# listens on. Raise MDD_VPCD_DRIVER_SLOTS only alongside a driver built for more.
+VPCD_DRIVER_SLOTS = max(1, min(3, int(os.environ.get("MDD_VPCD_DRIVER_SLOTS", "2"))))
 # The reader definition shipped by the vsmartcard-vpcd package, renamed out of the way
 # (pcsc-lite skips dot files) rather than deleted, so an operator can restore it.
 DISTRO_VPCD_READER = "vpcd"
@@ -2020,7 +2024,10 @@ class Orchestrator:
             if base not in ports:
                 base = next(port for port in ports if port not in used)
             used.add(base); assignments[modem["id"]] = {**modem, "base_port": base}
-        slots = max(1, min(3, int(hardware.get("vpcd_slots") or 3)))
+        # How many slots a reader really has is a property of the installed libifdvpcd
+        # bundle, not of the stanza written here, and the packaged build exposes two. Asking
+        # for a third gives its bridge thread a port pcscd never listens on.
+        slots = max(1, min(3, int(hardware.get("vpcd_slots") or VPCD_DRIVER_SLOTS)))
         # Keep reader definitions stable for every detected modem. A capability toggle only
         # starts/stops that modem's bridge; it must not restart pcscd and disturb other lines.
         reader_config = "\n".join(self.reader_stanza(m, assignments[m["id"]]["base_port"])

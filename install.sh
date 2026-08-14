@@ -1325,6 +1325,14 @@ cmd_reset_admin() {
 #   patch2    compatibility fix only (02) — synthesize missing ATR TCK for HSIC reader.
 #   patchprime SCR Prime device-table support only (03).
 #   patchall  all three patches (01 + 02 + 03).
+cmd_vpcd() {
+  # Also reachable as part of install/reload. Exposed on its own because that build is the one
+  # step that warns instead of aborting, so an operator who missed the warning — or who is on a
+  # host where it first failed for a missing dependency — needs a way to retry just this.
+  need_root
+  ensure_vpcd_host
+}
+
 cmd_patch() {
   need_root
   ensure_ccid_host slot 01_hsic_slot_status.patch
@@ -1598,6 +1606,7 @@ ${B}MDD Sim Gateway installer${N}
   $0 diagnose             print a masked card-path report (readers, bridges, lpac, logs)
   $0 reset-admin          reset the local administrator (old credential file is backed up)
   $0 logs                 follow control-plane logs
+  $0 vpcd                 rebuild the virtual smart-card driver with enough card slots
   $0 build-lpac [--lpac-src PATH] [--dest DIR]   compile lpac into data/lpac (local eSIM LPA)
   $0 patch                build + install the CCID driver with the base HSIC fix (01) — opt-in,
                           for the HSIC 1d99:0016 reader (safe for every card, incl. physical eSIM)
@@ -1657,6 +1666,7 @@ case "$CMD" in
   patch)              cmd_patch ;;
   patch2)             cmd_patch2 ;;
   patchprime)         cmd_patchprime ;;
+  vpcd)               cmd_vpcd ;;
   patchall)           cmd_patchall ;;
   "")                 cmd_auto ;;
   -h|--help|help)     usage ;;

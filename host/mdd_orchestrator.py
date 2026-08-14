@@ -266,6 +266,11 @@ EXIT_RANK_WARMUP_SECONDS = float(os.environ.get("MDD_EXIT_RANK_WARMUP", "25"))
 # waking on the base interval to stat the input documents so an operator action is never
 # delayed by more than one base tick.
 IDLE_INTERVAL_SECONDS = float(os.environ.get("MDD_IDLE_INTERVAL", "15"))
+# How long a tty may stay unclaimed before the bridge stops waiting for ModemManager and talks
+# to the serial port itself. ModemManager needs on the order of ten to thirty seconds to probe
+# an EC25-class module, so this is set far beyond any healthy first pass: reaching it means
+# ModemManager has decided not to manage this hardware, not that it is still working on it.
+MM_CLAIM_GRACE_SECONDS = float(os.environ.get("MDD_MM_CLAIM_GRACE", "180"))
 COUNTRY_PROXY_LISTEN = os.environ.get("MDD_COUNTRY_PROXY_LISTEN", "172.17.0.1")
 COUNTRY_PROXY_PORT_BASE = int(os.environ.get("MDD_COUNTRY_PROXY_PORT_BASE", "22000"))
 
@@ -500,6 +505,10 @@ class Orchestrator:
         # Populated only while a tty stays unclaimed; a healthy gateway pays nothing for it.
         self._claim_evidence: dict = {}
         self._virtualization: str | None = None
+        # tty -> when it was first seen unclaimed, for the grace period below.
+        self._unclaimed_since: dict[str, float] = {}
+        # device id -> why its bridge talks to the serial port instead of ModemManager.
+        self._degraded: dict[str, str] = {}
 
     @staticmethod
     def service_active(name: str) -> bool:
@@ -610,7 +619,13 @@ class Orchestrator:
             # The bridge is no longer a VoWiFi actual: it runs for every present modem so
             # the card stays reachable. Comparing it against the VoWiFi switch would park
             # every switched-off modem in "stopping" forever.
-            device_transitioning = bool(transitioning or (
+            #
+            # A modem bridged over the serial port is a settled outcome too, not work in
+            # progress. Leaving it marked transitioning is what made a modem ModemManager
+            # refused read as an indefinite spinner with no explanation; the reason belongs
+            # in the error field instead.
+            degraded = self._degraded.get(device_id, "")
+            device_transitioning = bool(transitioning or (not degraded and
                 present and (target_data_active != observed_data_active or
                              (backend_active and radio_enabled is not None and
                               bool(wanted.get("flight_mode")) == radio_enabled) or
@@ -626,11 +641,16 @@ class Orchestrator:
                 "actual": {"cellular_backend_active": backend_active,
                            "cellular_radio_enabled": radio_enabled,
                            "flight_mode_active": radio_enabled is False,
-                           "vowifi_bridge_active": vowifi_actual},
+                           "vowifi_bridge_active": vowifi_actual,
+                           # Which path is carrying SIM traffic, so a modem serving VoWiFi
+                           # without any cellular capability is not read as half-broken.
+                           "vowifi_backend": ("direct-serial" if degraded else
+                                              "modemmanager" if vowifi_actual else "")},
                 "cellular": cellular_state,
                 "present": present,
                 "transitioning": device_transitioning,
-                "error": error or ("device is not connected" if not present else ""),
+                "error": (error or ("device is not connected" if not present else "")
+                          or degraded),
             }
         atomic_json(self.device_status_path, {
             "version": 2, "updated_at": int(time.time()), "devices": devices,
@@ -690,6 +710,16 @@ class Orchestrator:
             # USB serial ports disappear and return after the module reboot.
             time.sleep(12)
 
+    def claim_wait(self, tty: str) -> float:
+        """Seconds this tty has been continuously unclaimed by ModemManager.
+
+        The clock starts on the first cycle that finds it unclaimed, so a modem still being
+        probed is never mistaken for one ModemManager has refused. It is reset the moment a
+        claim succeeds, and a replug retires the entry with the rest of the device state.
+        """
+        first_seen = self._unclaimed_since.setdefault(tty, time.time())
+        return time.time() - first_seen
+
     def virtualization(self) -> str:
         """Cached hypervisor/container label; deployments differ mostly in this one word."""
         if self._virtualization is None:
@@ -714,9 +744,18 @@ class Orchestrator:
             detail = run(["mmcli", "-m", obj, "--output-keyvalue"])
             ports[obj] = [line.strip() for line in (detail.stdout or "").splitlines()
                           if re.search(r"\.(?:ports|state)\b", line)]
-        return {"observed_at": int(time.time()), "unclaimed_ttys": sorted(ttys),
-                "mmcli_list_returncode": listing.returncode,
-                "modem_objects": objects, "modem_ports": ports}
+        evidence = {"observed_at": int(time.time()), "unclaimed_ttys": sorted(ttys),
+                    "mmcli_list_returncode": listing.returncode,
+                    "modem_objects": objects, "modem_ports": ports}
+        if not objects:
+            # ModemManager knowing about no modem at all is a refusal, and it only ever
+            # explains itself in its own journal — which the control-plane container cannot
+            # read. Without this the bundle shows an empty list and no reason for it.
+            journal = run(["journalctl", "-u", "ModemManager.service", "-n", "40",
+                           "--no-pager", "-p", "warning"])
+            evidence["modemmanager_journal"] = [
+                line for line in (journal.stdout or "").splitlines() if line.strip()]
+        return evidence
 
     def publish_host_diagnostics(self, discovered: list[dict], assignments: dict,
                                  mm_active: bool, cellular_required: bool,
@@ -739,6 +778,9 @@ class Orchestrator:
                 "required": cellular_required,
                 "applied": self.applied_cellular_backend,
                 "unclaimed": self._claim_evidence,
+                "claim_grace_seconds": MM_CLAIM_GRACE_SECONDS,
+                # Modems whose bridge gave up on ModemManager and drives the tty itself.
+                "degraded_to_direct_serial": dict(self._degraded),
             },
             "discovered_modems": discovered,
             "assignments": assignments,
@@ -1954,9 +1996,17 @@ class Orchestrator:
         hardware = (desired.get("hardware") or {})
         if not hardware.get("auto_detect", True):
             # Nothing is managed, so any retained claim failure describes a past cycle.
-            self._claim_evidence = {}
+            self._claim_evidence, self._degraded, self._unclaimed_since = {}, {}, {}
             return {}
         modems = self.usb_modems(hardware)
+        # A replug retires both the grace clock and the degraded verdict, so re-seating a
+        # modem is the operator's way to ask for ModemManager to be tried again.
+        live_ttys = {modem["tty"] for modem in modems}
+        live_ids = {modem["id"] for modem in modems}
+        self._unclaimed_since = {tty: seen for tty, seen in self._unclaimed_since.items()
+                                 if tty in live_ttys}
+        self._degraded = {device_id: reason for device_id, reason in self._degraded.items()
+                          if device_id in live_ids}
         old = read_json(self.hw_state_path).get("assignments") or {}
         ports = [BASE_VPCD_PORT + i * VPCD_PORT_STRIDE for i in range(VPCD_PORT_SLOTS)]
         # A port saved by a release that started at vpcd's own default is migrated here:
@@ -2025,17 +2075,36 @@ class Orchestrator:
                        "--metadata-file", str(metadata), "--hardware-id", modem["id"]]
             if through_modemmanager:
                 mm_modem = self.modemmanager_modem_for_tty(modem["tty"])
-                if not mm_modem:
+                if mm_modem:
+                    self._unclaimed_since.pop(modem["tty"], None)
+                    self._degraded.pop(modem["id"], None)
+                    command += ["--modemmanager", mm_modem, "--identity-refresh", "60"]
+                elif self.claim_wait(modem["tty"]) < MM_CLAIM_GRACE_SECONDS:
                     self.log(f"waiting for ModemManager to claim {modem['tty']}")
                     unclaimed.append(modem["tty"])
                     continue
-                command += ["--modemmanager", mm_modem, "--identity-refresh", "60"]
+                else:
+                    unclaimed.append(modem["tty"])
+                    if modem["id"] not in self._degraded:
+                        self.log(f"ModemManager has not claimed {modem['tty']} in "
+                                 f"{int(MM_CLAIM_GRACE_SECONDS)}s; bridging this modem over "
+                                 f"the serial port directly. VoWiFi works; cellular data and "
+                                 f"flight mode do not, because they need a ModemManager modem.")
+                    self._degraded[modem["id"]] = (
+                        "ModemManager did not create a modem for this hardware, so VoWiFi is "
+                        "bridged over the serial port directly. Cellular data and flight mode "
+                        "are unavailable until ModemManager claims it.")
             if not self.dry_run:
                 self.bridges[modem["id"]] = subprocess.Popen(command)
                 self.bridge_ports[modem["id"]] = assignments[modem["id"]]["base_port"]
         # One capture per cycle rather than one per modem: this is the state an operator has to
-        # be asked for by hand today, and asking costs a support round trip.
-        self._claim_evidence = self.claim_evidence(unclaimed) if unclaimed else {}
+        # be asked for by hand today, and asking costs a support round trip. Once a bridge has
+        # degraded it holds the port exclusively and nothing further can change, so the capture
+        # taken at that moment is retained rather than re-derived on every idle cycle.
+        if unclaimed:
+            self._claim_evidence = self.claim_evidence(unclaimed)
+        elif not self._degraded:
+            self._claim_evidence = {}
         atomic_json(self.hw_state_path, {"updated_at": int(time.time()), "assignments": assignments})
         return assignments
 

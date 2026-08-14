@@ -493,6 +493,73 @@ modem.3gpp.registration-state : unknown
             # Identity lines are not port lines and must not ride along into the bundle.
             self.assertNotIn("123456789012345", json.dumps(document))
 
+    def test_a_modem_modemmanager_refuses_still_gets_a_vowifi_bridge(self):
+        """ModemManager cannot create a modem without a net port, which a container never
+        has. Waiting forever costs the operator VoWiFi as well as the 4G that was already
+        impossible, so the bridge eventually drives the serial port itself."""
+        def fake_run(args, **kwargs):
+            if args[:2] == ["mmcli", "-L"]:
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            if args[0] == "journalctl":
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout="Failed to find a net port in the QMI modem\n", stderr="")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            app = Orchestrator(root / "data", root, dry_run=False)
+            app.root.mkdir(parents=True)
+            modems = [{"id": "a", "name": "A", "tty": "/dev/ttyUSB2"}]
+            commands = []
+
+            def spawn(command):
+                commands.append(command)
+                return SimpleNamespace(poll=lambda: None, pid=7)
+
+            with patch.object(app, "usb_modems", return_value=modems), patch(
+                    "host.mdd_orchestrator.run", side_effect=fake_run), patch(
+                    "host.mdd_orchestrator.subprocess.Popen", side_effect=spawn), patch.dict(
+                    "os.environ", {"MDD_VPCD_READER_CONFIG": str(root / "readers.conf")}):
+                desired = {"hardware": {"auto_detect": True}}
+                wanted = {"a": {"vowifi_enabled": True}}
+                app.reconcile_hardware(desired, wanted, through_modemmanager=True)
+                # Still inside the grace period: ModemManager may simply be probing.
+                self.assertEqual(commands, [])
+                self.assertNotIn("a", app.bridges)
+
+                app._unclaimed_since["/dev/ttyUSB2"] -= (
+                    mdd_orchestrator.MM_CLAIM_GRACE_SECONDS + 1)
+                assignments = app.reconcile_hardware(desired, wanted,
+                                                     through_modemmanager=True)
+                app.publish_device_status(wanted, assignments)
+
+            self.assertIn("a", app.bridges)
+            self.assertNotIn("--modemmanager", commands[0])
+            self.assertIn("/dev/ttyUSB2", commands[0])
+            device = device_state._read(str(app.device_status_path), {})["devices"]["a"]
+            self.assertEqual(device["actual"]["vowifi_backend"], "direct-serial")
+            self.assertTrue(device["actual"]["vowifi_bridge_active"])
+            # The reason replaces the indefinite spinner this state used to render as.
+            self.assertFalse(device["transitioning"])
+            self.assertIn("ModemManager did not create a modem", device["error"])
+
+    def test_replug_retires_the_degraded_verdict(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            app = Orchestrator(root / "data", root, dry_run=True)
+            app.root.mkdir(parents=True)
+            app._degraded = {"a": "gave up"}
+            app._unclaimed_since = {"/dev/ttyUSB2": 0.0}
+
+            with patch.object(app, "usb_modems", return_value=[]), patch(
+                    "host.mdd_orchestrator.run",
+                    return_value=SimpleNamespace(returncode=0, stdout="", stderr="")):
+                app.reconcile_hardware({"hardware": {"auto_detect": True}}, {})
+
+            self.assertEqual(app._degraded, {})
+            self.assertEqual(app._unclaimed_since, {})
+
     def test_claimed_tty_leaves_no_stale_unclaimed_evidence(self):
         detail = ("modem.generic.ports.value[1]            : ttyUSB2 (at)\n")
 

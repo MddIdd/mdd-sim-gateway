@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import collections
 import hashlib
 import ipaddress
 import json
@@ -481,12 +482,24 @@ class Orchestrator:
         self.data_attempt_at: dict[str, float] = {}
         self.applied_timezone = ""
         self.obsolete_services_retired = False
-        config_path = Path(os.environ.get("MDD_VPCD_READER_CONFIG", "/etc/reader.conf.d/mdd-sim-gateway-modems"))
-        try: self.last_reader_config = config_path.read_text(encoding="utf-8")
+        self.reader_config_path = Path(os.environ.get(
+            "MDD_VPCD_READER_CONFIG", "/etc/reader.conf.d/mdd-sim-gateway-modems"))
+        try: self.last_reader_config = self.reader_config_path.read_text(encoding="utf-8")
         except OSError: self.last_reader_config = ""
         self.stop = False
         # What the previous cycle concluded, for deciding whether this one changed anything.
         self._last_conclusion = ""
+        # ---------------------------------------------------------- support diagnostics
+        # Everything below exists so the redacted support bundle can answer host-side
+        # questions on its own. Without it a modem/ModemManager fault is invisible to the
+        # control plane, which only ever sees the documents this process publishes.
+        self.host_diagnostics_path = self.root / "host-diagnostics.json"
+        # Our own recent output. journalctl is unreachable from the control-plane container,
+        # so the bundle would otherwise carry no trace of what this loop decided.
+        self._log_ring: collections.deque[str] = collections.deque(maxlen=200)
+        # Populated only while a tty stays unclaimed; a healthy gateway pays nothing for it.
+        self._claim_evidence: dict = {}
+        self._virtualization: str | None = None
 
     @staticmethod
     def service_active(name: str) -> bool:
@@ -676,6 +689,66 @@ class Orchestrator:
         if reset:
             # USB serial ports disappear and return after the module reboot.
             time.sleep(12)
+
+    def virtualization(self) -> str:
+        """Cached hypervisor/container label; deployments differ mostly in this one word."""
+        if self._virtualization is None:
+            result = run(["systemd-detect-virt"])
+            self._virtualization = (result.stdout or "").strip() or "none"
+        return self._virtualization
+
+    def claim_evidence(self, ttys: list[str]) -> dict:
+        """Record why ModemManager owns no object for these ttys.
+
+        A bridge that never starts leaves no trace beyond one repeating log line, so the
+        support bundle has to carry what an operator would otherwise be asked to run by
+        hand. Port lines are kept because they are exactly what the claim check matches
+        against; everything else mmcli prints is identity material the bundle must not
+        grow.
+        """
+        listing = run(["mmcli", "-L"])
+        objects = re.findall(r"(/org/freedesktop/ModemManager1/Modem/\d+)",
+                             listing.stdout or "")
+        ports = {}
+        for obj in objects:
+            detail = run(["mmcli", "-m", obj, "--output-keyvalue"])
+            ports[obj] = [line.strip() for line in (detail.stdout or "").splitlines()
+                          if re.search(r"\.(?:ports|state)\b", line)]
+        return {"observed_at": int(time.time()), "unclaimed_ttys": sorted(ttys),
+                "mmcli_list_returncode": listing.returncode,
+                "modem_objects": objects, "modem_ports": ports}
+
+    def publish_host_diagnostics(self, discovered: list[dict], assignments: dict,
+                                 mm_active: bool, cellular_required: bool,
+                                 vowifi_required: bool) -> None:
+        """Publish the host-side view the control plane cannot observe for itself.
+
+        The control plane runs in a container without systemd or the host USB tree, so
+        every fact here would otherwise reach a maintainer only by asking the operator to
+        run commands. Fields are drawn from state this cycle already computed; nothing is
+        collected merely to fill the file.
+        """
+        atomic_json(self.host_diagnostics_path, {
+            "version": 1,
+            "updated_at": int(time.time()),
+            "virtualization": self.virtualization(),
+            "modemmanager": {
+                # The claim check depends on this unit being reported active; a mismatch
+                # against mmcli working by hand is itself the diagnosis.
+                "unit_active": mm_active,
+                "required": cellular_required,
+                "applied": self.applied_cellular_backend,
+                "unclaimed": self._claim_evidence,
+            },
+            "discovered_modems": discovered,
+            "assignments": assignments,
+            "bridges": {hwid: {"pid": proc.pid, "running": proc.poll() is None}
+                        for hwid, proc in self.bridges.items()},
+            "country_egress_required": vowifi_required,
+            "reader_config": {"path": str(self.reader_config_path),
+                              "stanzas": self.last_reader_config.count("FRIENDLYNAME")},
+            "recent_log": list(self._log_ring),
+        })
 
     @staticmethod
     def modemmanager_modem_for_tty(tty: str) -> str:
@@ -1050,7 +1123,11 @@ class Orchestrator:
                 self.cellular_states[device_id] = self.modem_snapshot(modem)
 
     def log(self, message):
-        print(time.strftime("%F %T"), message, flush=True)
+        line = f"{time.strftime('%F %T')} {message}"
+        # Retained as well as printed: journalctl is out of reach from the control-plane
+        # container, so the support bundle would otherwise show no reason for a stall.
+        self._log_ring.append(line)
+        print(line, flush=True)
 
     def reconcile_timezone(self):
         """Apply the validated WebUI timezone to the host without changing its hostname."""
@@ -1875,7 +1952,10 @@ class Orchestrator:
     def reconcile_hardware(self, desired: dict, desired_devices: dict,
                            through_modemmanager=False) -> dict:
         hardware = (desired.get("hardware") or {})
-        if not hardware.get("auto_detect", True): return {}
+        if not hardware.get("auto_detect", True):
+            # Nothing is managed, so any retained claim failure describes a past cycle.
+            self._claim_evidence = {}
+            return {}
         modems = self.usb_modems(hardware)
         old = read_json(self.hw_state_path).get("assignments") or {}
         ports = [BASE_VPCD_PORT + i * VPCD_PORT_STRIDE for i in range(VPCD_PORT_SLOTS)]
@@ -1895,7 +1975,11 @@ class Orchestrator:
         # starts/stops that modem's bridge; it must not restart pcscd and disturb other lines.
         reader_config = "\n".join(self.reader_stanza(m, assignments[m["id"]]["base_port"])
                                   for m in modems)
-        config_path = Path(os.environ.get("MDD_VPCD_READER_CONFIG", "/etc/reader.conf.d/mdd-sim-gateway-modems"))
+        # Resolved per cycle, not cached: the path is an environment override and tests (and
+        # a relocated install) expect a change to take effect without a restart.
+        config_path = Path(os.environ.get(
+            "MDD_VPCD_READER_CONFIG", "/etc/reader.conf.d/mdd-sim-gateway-modems"))
+        self.reader_config_path = config_path
         legacy_config = config_path.with_name("vowifi-modems")
         legacy_present = legacy_config.exists() and legacy_config != config_path
         distro_disabled = self.disable_distro_vpcd_reader(config_path)
@@ -1931,6 +2015,7 @@ class Orchestrator:
                 proc = self.bridges.pop(hwid)
                 self.bridge_ports.pop(hwid, None)
                 if proc.poll() is None: proc.terminate()
+        unclaimed = []
         for modem in modems:
             if modem["id"] in self.bridges: continue
             bridge = self.repo / "host" / "vpcd_modem_bridge.py"
@@ -1942,11 +2027,15 @@ class Orchestrator:
                 mm_modem = self.modemmanager_modem_for_tty(modem["tty"])
                 if not mm_modem:
                     self.log(f"waiting for ModemManager to claim {modem['tty']}")
+                    unclaimed.append(modem["tty"])
                     continue
                 command += ["--modemmanager", mm_modem, "--identity-refresh", "60"]
             if not self.dry_run:
                 self.bridges[modem["id"]] = subprocess.Popen(command)
                 self.bridge_ports[modem["id"]] = assignments[modem["id"]]["base_port"]
+        # One capture per cycle rather than one per modem: this is the state an operator has to
+        # be asked for by hand today, and asking costs a support round trip.
+        self._claim_evidence = self.claim_evidence(unclaimed) if unclaimed else {}
         atomic_json(self.hw_state_path, {"updated_at": int(time.time()), "assignments": assignments})
         return assignments
 
@@ -2018,6 +2107,8 @@ class Orchestrator:
             assignments = self.reconcile_hardware(
                 desired, active_desired, through_modemmanager=cellular_required)
             self.publish_device_status(desired_devices, assignments)
+            self.publish_host_diagnostics(discovered, assignments, mm_active,
+                                          cellular_required, vowifi_required)
             # Compare what this cycle concluded, not what it observed: timestamps and counters
             # differ every time and would defeat the comparison.
             fingerprint = json.dumps([sorted(present_ids), active_desired, cellular_required,

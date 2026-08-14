@@ -450,6 +450,81 @@ modem.3gpp.registration-state : unknown
             self.assertEqual(len(respawned), 1)
             self.assertIn(str(moved), app.bridges["a"].command)
 
+    def test_unclaimed_tty_records_the_modemmanager_state_a_maintainer_would_ask_for(self):
+        """A bridge that never starts leaves only a repeating log line to go on."""
+        listing = ("    /org/freedesktop/ModemManager1/Modem/5 [Baiwang] QDC507\n")
+        detail = ("modem.generic.state                     : failed\n"
+                  "modem.generic.ports.value[1]            : ttyUSB9 (at)\n"
+                  "modem.generic.equipment-identifier      : 123456789012345\n")
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["mmcli", "-L"]:
+                return SimpleNamespace(returncode=0, stdout=listing, stderr="")
+            if args[:2] == ["mmcli", "-m"]:
+                return SimpleNamespace(returncode=0, stdout=detail, stderr="")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            app = Orchestrator(root / "data", root, dry_run=False)
+            app.root.mkdir(parents=True)
+            modems = [{"id": "a", "name": "A", "tty": "/dev/ttyUSB2"}]
+
+            with patch.object(app, "usb_modems", return_value=modems), patch(
+                    "host.mdd_orchestrator.run", side_effect=fake_run), patch.dict(
+                    "os.environ", {"MDD_VPCD_READER_CONFIG": str(root / "readers.conf")}):
+                assignments = app.reconcile_hardware(
+                    {"hardware": {"auto_detect": True}}, {"a": {"vowifi_enabled": True}},
+                    through_modemmanager=True)
+                app.publish_host_diagnostics(modems, assignments, False, True, True)
+
+            self.assertNotIn("a", app.bridges)
+            document = device_state._read(str(app.host_diagnostics_path), {})
+            evidence = document["modemmanager"]["unclaimed"]
+            self.assertEqual(evidence["unclaimed_ttys"], ["/dev/ttyUSB2"])
+            # The modem exists but owns a different port — the claim check's actual input.
+            self.assertEqual(evidence["modem_objects"],
+                             ["/org/freedesktop/ModemManager1/Modem/5"])
+            ports = evidence["modem_ports"]["/org/freedesktop/ModemManager1/Modem/5"]
+            self.assertIn("modem.generic.ports.value[1]            : ttyUSB9 (at)", ports)
+            self.assertEqual(document["modemmanager"]["unit_active"], False)
+            self.assertIn("waiting for ModemManager to claim /dev/ttyUSB2",
+                          " ".join(document["recent_log"]))
+            # Identity lines are not port lines and must not ride along into the bundle.
+            self.assertNotIn("123456789012345", json.dumps(document))
+
+    def test_claimed_tty_leaves_no_stale_unclaimed_evidence(self):
+        detail = ("modem.generic.ports.value[1]            : ttyUSB2 (at)\n")
+
+        def fake_run(args, **kwargs):
+            if args[:2] == ["mmcli", "-L"]:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout="    /org/freedesktop/ModemManager1/Modem/5 [Quectel] EC25\n",
+                    stderr="")
+            if args[:2] == ["mmcli", "-m"]:
+                return SimpleNamespace(returncode=0, stdout=detail, stderr="")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            app = Orchestrator(root / "data", root, dry_run=False)
+            app.root.mkdir(parents=True)
+            app._claim_evidence = {"unclaimed_ttys": ["/dev/ttyUSB2"]}
+            modems = [{"id": "a", "name": "A", "tty": "/dev/ttyUSB2"}]
+
+            with patch.object(app, "usb_modems", return_value=modems), patch(
+                    "host.mdd_orchestrator.run", side_effect=fake_run), patch(
+                    "host.mdd_orchestrator.subprocess.Popen",
+                    return_value=SimpleNamespace(poll=lambda: None, pid=1)), patch.dict(
+                    "os.environ", {"MDD_VPCD_READER_CONFIG": str(root / "readers.conf")}):
+                app.reconcile_hardware(
+                    {"hardware": {"auto_detect": True}}, {"a": {"vowifi_enabled": True}},
+                    through_modemmanager=True)
+
+            self.assertIn("a", app.bridges)
+            self.assertEqual(app._claim_evidence, {})
+
     def test_orchestrator_stop_marks_pcsc_maintenance_immediately(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

@@ -104,6 +104,24 @@ def list_local_backups() -> list[dict]:
     return result[:50]
 
 
+def host_diagnostics() -> dict:
+    """Read the host orchestrator's published view, or say why it is absent.
+
+    An empty section would read as "nothing wrong on the host"; a stopped or outdated
+    orchestrator is itself a finding, so the absence is reported rather than omitted.
+    """
+    path = Path(cfg.DATA_DIR) / "orchestrator" / "host-diagnostics.json"
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"available": False,
+                "note": "the host orchestrator has not published diagnostics; it may be "
+                        "stopped, or older than the release that introduced this file"}
+    if not isinstance(document, dict):
+        return {"available": False, "note": "host diagnostics document is malformed"}
+    return {"available": True, **document}
+
+
 def support_bundle(status_documents: dict, log_lines: int = 500) -> bytes:
     log_lines = max(50, min(2000, int(log_lines)))
     output = io.BytesIO()
@@ -112,6 +130,11 @@ def support_bundle(status_documents: dict, log_lines: int = 500) -> bytes:
         archive.writestr("settings-redacted.yaml", yaml.safe_dump(settings, allow_unicode=True))
         archive.writestr("status-redacted.json", json.dumps(
             redact(status_documents), ensure_ascii=False, indent=2))
+        # The host orchestrator owns systemd, the USB tree and the bridge children; this
+        # process runs in a container that can observe none of them. Without its published
+        # view a modem fault is only diagnosable by asking the operator to run commands.
+        archive.writestr("host-diagnostics-redacted.json", json.dumps(
+            redact(host_diagnostics()), ensure_ascii=False, indent=2))
         base = Path(cfg.DATA_DIR) / "instances"
         # Include the current logs, compact rebuild snapshots and retained IKE segments. Every
         # source goes through the same redaction and contributes only its configured tail.

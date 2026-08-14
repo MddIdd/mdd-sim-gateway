@@ -96,6 +96,40 @@ class OperationsTests(unittest.TestCase):
             self.assertNotIn("001122", log)
             self.assertEqual(status["imei"], "<redacted>")
 
+    def test_support_bundle_carries_the_host_view_the_control_plane_cannot_observe(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(config, "DATA_DIR", temp):
+            orchestrator = Path(temp, "orchestrator")
+            orchestrator.mkdir(parents=True)
+            orchestrator.joinpath("host-diagnostics.json").write_text(json.dumps({
+                "virtualization": "lxc",
+                "modemmanager": {"unit_active": False,
+                                 "unclaimed": {"unclaimed_ttys": ["/dev/ttyUSB2"]}},
+                "recent_log": ["2026-08-14 12:09:16 waiting for ModemManager to claim "
+                               "/dev/ttyUSB2"],
+                "imei": "123456789012345",
+            }))
+
+            content = operations.support_bundle({})
+
+            with zipfile.ZipFile(BytesIO(content)) as archive:
+                host = json.loads(archive.read("host-diagnostics-redacted.json"))
+            self.assertTrue(host["available"])
+            self.assertEqual(host["virtualization"], "lxc")
+            self.assertFalse(host["modemmanager"]["unit_active"])
+            self.assertEqual(host["modemmanager"]["unclaimed"]["unclaimed_ttys"],
+                             ["/dev/ttyUSB2"])
+            self.assertIn("waiting for ModemManager", host["recent_log"][0])
+            self.assertEqual(host["imei"], "<redacted>")
+
+    def test_support_bundle_reports_a_missing_host_view_instead_of_omitting_it(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(config, "DATA_DIR", temp):
+            content = operations.support_bundle({})
+            with zipfile.ZipFile(BytesIO(content)) as archive:
+                host = json.loads(archive.read("host-diagnostics-redacted.json"))
+        # Silence here would read as a healthy host; a stopped orchestrator is a finding.
+        self.assertFalse(host["available"])
+        self.assertIn("orchestrator", host["note"])
+
     def test_support_bundle_includes_retained_ike_segment_tail(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(config, "DATA_DIR", temp):
             archive_dir = Path(temp) / "instances" / "sim1" / "logs" / "ike"

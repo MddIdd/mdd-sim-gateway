@@ -34,8 +34,18 @@ try:
 except ImportError:  # pragma: no cover - installer provides PyYAML
     yaml = None
 
-BASE_VPCD_PORT = 0x8C7B
+# 0x8C7B (35963) is vpcd's own default port, which the distribution package hands to its
+# "Virtual PCD" reader. Two pcscd readers cannot listen on one port, so sharing that base
+# made the modem readers and the packaged reader fight over it — directory order decided
+# who won and the loser never bound at all. Stay off it, and below the ephemeral range so
+# an outbound socket cannot squat a slot either.
+BASE_VPCD_PORT = 0x3C00
 VPCD_PORT_STRIDE = 0x100
+VPCD_PORT_SLOTS = 64
+# The reader definition shipped by the vsmartcard-vpcd package, renamed out of the way
+# (pcsc-lite skips dot files) rather than deleted, so an operator can restore it.
+DISTRO_VPCD_READER = "vpcd"
+DISTRO_VPCD_READER_DISABLED = ".vpcd.mdd-disabled"
 MANAGED_ROUTE_PROTO = "186"
 CLASH_API = os.environ.get("MDD_CLASH_API", "127.0.0.1:19090")
 
@@ -463,6 +473,7 @@ class Orchestrator:
         self._xray_rules: list[dict] = []
         self._xray_ports: dict[str, int] = {}
         self.bridges: dict[str, subprocess.Popen] = {}
+        self.bridge_ports: dict[str, int] = {}
         self.last_proxy_fingerprint = ""
         self.applied_cellular_backend: bool | None = None
         self.radio_states: dict[str, bool] = {}
@@ -583,9 +594,11 @@ class Orchestrator:
             target_data_active = bool(wanted.get("cellular_enabled")) and not bool(
                 wanted.get("flight_mode"))
             observed_data_active = bool(cellular_state.get("data_active"))
+            # The bridge is no longer a VoWiFi actual: it runs for every present modem so
+            # the card stays reachable. Comparing it against the VoWiFi switch would park
+            # every switched-off modem in "stopping" forever.
             device_transitioning = bool(transitioning or (
-                present and (bool(wanted["vowifi_enabled"]) != vowifi_actual or
-                             target_data_active != observed_data_active or
+                present and (target_data_active != observed_data_active or
                              (backend_active and radio_enabled is not None and
                               bool(wanted.get("flight_mode")) == radio_enabled) or
                              (bool(desired_devices) and not backend_active))))
@@ -629,6 +642,7 @@ class Orchestrator:
                     proc.kill()
                     proc.wait()
             self.bridges.pop(hwid, None)
+            self.bridge_ports.pop(hwid, None)
 
     def reset_modems_after_cellular(self):
         """Reset EC25-class modems after ModemManager releases QMI/UIM ownership."""
@@ -916,7 +930,9 @@ class Orchestrator:
             # Flight mode always wins over a still-saved 4G preference.  Keeping the
             # preference lets data reconnect when flight mode is later disabled.
             "cellular_data_enabled": wanted["cellular_enabled"] and not flight_mode,
-            "vowifi_bridge_enabled": wanted["vowifi_enabled"],
+            # The VoWiFi switch governs the line engine only. The card bridge follows the
+            # hardware, because provisioning a line requires reading the card first.
+            "vowifi_line_enabled": wanted["vowifi_enabled"],
         }
 
     @staticmethod
@@ -1828,33 +1844,62 @@ class Orchestrator:
                 f"DEVICENAME /dev/null:0x{base:04X}\nLIBPATH {library}\n"
                 f"CHANNELID 0x{base:04X}\n")
 
+    def disable_distro_vpcd_reader(self, config_path: Path) -> bool:
+        """Move the vsmartcard-vpcd package's own reader definition out of pcscd's way.
+
+        That package ships /etc/reader.conf.d/vpcd: a two-slot "Virtual PCD" reader on
+        vpcd's default port, present whether or not any modem is. pcscd cannot register
+        it and a modem reader on the same port, and readdir order — not policy — decides
+        which one binds, so on some hosts every modem reader silently failed to appear
+        while two phantom devices did. Reinstalling the package restores the file, hence
+        the check on every pass. It is renamed rather than deleted (pcsc-lite skips dot
+        files) so an operator who wants a virtual card back can rename it again.
+
+        Returns True when this pass changed something, so the caller restarts pcscd.
+        """
+        packaged = config_path.with_name(DISTRO_VPCD_READER)
+        if not packaged.is_file() or packaged == config_path:
+            return False
+        if self.dry_run:
+            return True
+        disabled = config_path.with_name(DISTRO_VPCD_READER_DISABLED)
+        try:
+            os.replace(packaged, disabled)
+        except OSError as exc:
+            self.log(f"could not disable the packaged vpcd reader definition: {exc}")
+            return False
+        self.log(f"disabled the packaged vpcd reader definition ({packaged} -> {disabled}); "
+                 "it collides with this gateway's per-modem virtual readers")
+        return True
+
     def reconcile_hardware(self, desired: dict, desired_devices: dict,
                            through_modemmanager=False) -> dict:
         hardware = (desired.get("hardware") or {})
         if not hardware.get("auto_detect", True): return {}
         modems = self.usb_modems(hardware)
         old = read_json(self.hw_state_path).get("assignments") or {}
-        used = {int(v.get("base_port")) for k, v in old.items() if k in {m["id"] for m in modems}}
+        ports = [BASE_VPCD_PORT + i * VPCD_PORT_STRIDE for i in range(VPCD_PORT_SLOTS)]
+        # A port saved by a release that started at vpcd's own default is migrated here:
+        # keeping it would leave that modem fighting the packaged "Virtual PCD" reader.
+        used = {int(v.get("base_port")) for k, v in old.items()
+                if k in {m["id"] for m in modems} and int(v.get("base_port") or 0) in ports}
         assignments = {}
         for modem in modems:
             saved = old.get(modem["id"]) or {}
             base = int(saved.get("base_port") or 0)
-            if not base:
-                base = next(BASE_VPCD_PORT + i * VPCD_PORT_STRIDE for i in range(64)
-                            if BASE_VPCD_PORT + i * VPCD_PORT_STRIDE not in used)
+            if base not in ports:
+                base = next(port for port in ports if port not in used)
             used.add(base); assignments[modem["id"]] = {**modem, "base_port": base}
         slots = max(1, min(3, int(hardware.get("vpcd_slots") or 3)))
-        vowifi_modems = [m for m in modems
-                         if (desired_devices.get(m["id"]) or {}).get("vowifi_enabled")]
         # Keep reader definitions stable for every detected modem. A capability toggle only
         # starts/stops that modem's bridge; it must not restart pcscd and disturb other lines.
-        # A disabled modem has no bridge, so its reader remains empty and cannot serve APDUs.
         reader_config = "\n".join(self.reader_stanza(m, assignments[m["id"]]["base_port"])
                                   for m in modems)
         config_path = Path(os.environ.get("MDD_VPCD_READER_CONFIG", "/etc/reader.conf.d/mdd-sim-gateway-modems"))
         legacy_config = config_path.with_name("vowifi-modems")
         legacy_present = legacy_config.exists() and legacy_config != config_path
-        if reader_config != self.last_reader_config:
+        distro_disabled = self.disable_distro_vpcd_reader(config_path)
+        if reader_config != self.last_reader_config or distro_disabled:
             if not self.dry_run:
                 config_path.parent.mkdir(parents=True, exist_ok=True)
                 config_path.write_text(reader_config, encoding="utf-8")
@@ -1870,12 +1915,23 @@ class Orchestrator:
             legacy_config.unlink(missing_ok=True)
             (self.root / "pcsc-maintenance").write_text(str(int(time.time())), encoding="ascii")
             run(["systemctl", "restart", "pcscd.service"])
-        live_ids = {m["id"] for m in vowifi_modems}
+        # Card access is not a capability. The virtual reader has to hold a card before a
+        # line can exist at all — detecting the SIM, verifying its PIN and managing eSIM
+        # profiles all go through it — while the VoWiFi switch stays disabled until such a
+        # line exists. Tying the bridge to that switch therefore deadlocked every fresh
+        # modem, and turning VoWiFi off to run an eSIM operation emptied the reader under
+        # it. Bridges follow the hardware instead: every present modem gets one.
+        live_ids = {m["id"] for m in modems}
         for hwid in list(self.bridges):
-            if hwid not in live_ids or self.bridges[hwid].poll() is not None:
+            # A bridge that was started on a now-migrated port would keep dialling a socket
+            # pcscd no longer listens on, so a port change has to respawn it.
+            moved = (hwid in live_ids
+                     and self.bridge_ports.get(hwid) != assignments[hwid]["base_port"])
+            if hwid not in live_ids or moved or self.bridges[hwid].poll() is not None:
                 proc = self.bridges.pop(hwid)
+                self.bridge_ports.pop(hwid, None)
                 if proc.poll() is None: proc.terminate()
-        for modem in vowifi_modems:
+        for modem in modems:
             if modem["id"] in self.bridges: continue
             bridge = self.repo / "host" / "vpcd_modem_bridge.py"
             metadata = self.data / "modems" / f"{modem['id']}.json"
@@ -1890,6 +1946,7 @@ class Orchestrator:
                 command += ["--modemmanager", mm_modem, "--identity-refresh", "60"]
             if not self.dry_run:
                 self.bridges[modem["id"]] = subprocess.Popen(command)
+                self.bridge_ports[modem["id"]] = assignments[modem["id"]]["base_port"]
         atomic_json(self.hw_state_path, {"updated_at": int(time.time()), "assignments": assignments})
         return assignments
 

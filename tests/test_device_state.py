@@ -1,3 +1,4 @@
+import json
 import tempfile
 import time
 import unittest
@@ -6,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from control.app import device_state
+from host import mdd_orchestrator
 from host.mdd_orchestrator import Orchestrator
 
 
@@ -149,7 +151,7 @@ class DeviceStateTests(unittest.TestCase):
             (True,  True,  False, False, False, False),
             (True,  True,  True,  False, False, True),
         )
-        for flight, cellular, vowifi, radio, data, bridge in cases:
+        for flight, cellular, vowifi, radio, data, line in cases:
             with self.subTest(flight=flight, cellular=cellular, vowifi=vowifi):
                 plan = Orchestrator.device_capability_plan({
                     "flight_mode": flight, "cellular_enabled": cellular,
@@ -157,14 +159,14 @@ class DeviceStateTests(unittest.TestCase):
                 self.assertEqual(plan["radio_enabled"], radio)
                 self.assertEqual(plan["cellular_data_requested"], cellular)
                 self.assertEqual(plan["cellular_data_enabled"], data)
-                self.assertEqual(plan["vowifi_bridge_enabled"], bridge)
+                self.assertEqual(plan["vowifi_line_enabled"], line)
 
                 aggregate = Orchestrator.capability_plan({"m": {
                     "flight_mode": flight, "cellular_enabled": cellular,
                     "vowifi_enabled": vowifi}})
                 self.assertTrue(aggregate["cellular_backend_required"])
                 self.assertEqual(aggregate["country_egress_required"], vowifi)
-                self.assertEqual(aggregate["vowifi_devices"], ["m"] if bridge else [])
+                self.assertEqual(aggregate["vowifi_devices"], ["m"] if line else [])
                 self.assertEqual(aggregate["effective_cellular_devices"], ["m"] if data else [])
                 self.assertEqual(aggregate["flight_mode_devices"], ["m"] if flight else [])
                 self.assertEqual(aggregate["radio_enabled_devices"], ["m"] if radio else [])
@@ -313,18 +315,39 @@ modem.3gpp.registration-state : unknown
             self.assertEqual(document["version"], 2)
             self.assertNotIn("mode", document)
 
-    def test_disabling_one_vowifi_bridge_preserves_the_other(self):
-        class Process:
-            def __init__(self, command):
-                self.command = command
-                self.running = True
+    class Process:
+        def __init__(self, command):
+            self.command = command
+            self.running = True
 
-            def poll(self):
-                return None if self.running else 0
+        def poll(self):
+            return None if self.running else 0
 
-            def terminate(self):
-                self.running = False
+        def terminate(self):
+            self.running = False
 
+    def reconcile(self, app, modems, desired_devices, config_path):
+        """Run one reconcile pass with the host calls stubbed out, returning the spawns."""
+        processes = []
+
+        def spawn(command):
+            process = self.Process(command)
+            processes.append(process)
+            return process
+
+        with patch.object(app, "usb_modems", return_value=modems), patch(
+                "host.mdd_orchestrator.run",
+                return_value=SimpleNamespace(returncode=0, stdout="", stderr="")), patch(
+                "host.mdd_orchestrator.subprocess.Popen", side_effect=spawn), patch.dict(
+                "os.environ", {"MDD_VPCD_READER_CONFIG": str(config_path)}):
+            app.reconcile_hardware({"hardware": {"auto_detect": True, "vpcd_slots": 3}},
+                                   desired_devices)
+        return processes
+
+    def test_the_card_bridge_survives_turning_vowifi_off(self):
+        """Reading the SIM is what lets a line exist at all, and the VoWiFi switch stays
+        disabled until one does — so a bridge that followed that switch deadlocked every
+        fresh modem, and emptied the reader under any eSIM operation."""
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             app = Orchestrator(root / "data", root, dry_run=False)
@@ -333,29 +356,99 @@ modem.3gpp.registration-state : unknown
                 {"id": "a", "name": "A", "tty": "/dev/a"},
                 {"id": "b", "name": "B", "tty": "/dev/b"},
             ]
-            hardware = {"auto_detect": True, "vpcd_slots": 3}
-            processes = []
+            config = root / "readers.conf"
 
-            def spawn(command):
-                process = Process(command)
-                processes.append(process)
-                return process
+            spawned = self.reconcile(app, modems, {
+                "a": {"vowifi_enabled": True}, "b": {"vowifi_enabled": True}}, config)
+            bridge_a, bridge_b = app.bridges["a"], app.bridges["b"]
+            again = self.reconcile(app, modems, {
+                "a": {"vowifi_enabled": False}, "b": {"vowifi_enabled": True}}, config)
 
-            with patch.object(app, "usb_modems", return_value=modems), patch(
-                    "host.mdd_orchestrator.run",
-                    return_value=SimpleNamespace(returncode=0, stdout="", stderr="")), patch(
-                    "host.mdd_orchestrator.subprocess.Popen", side_effect=spawn), patch.dict(
-                    "os.environ", {"MDD_VPCD_READER_CONFIG": str(root / "readers.conf")}):
-                app.reconcile_hardware({"hardware": hardware}, {
-                    "a": {"vowifi_enabled": True}, "b": {"vowifi_enabled": True}})
-                bridge_b = app.bridges["b"]
-                app.reconcile_hardware({"hardware": hardware}, {
-                    "a": {"vowifi_enabled": False}, "b": {"vowifi_enabled": True}})
+            self.assertEqual(len(spawned), 2)
+            self.assertEqual(again, [])
+            self.assertIs(app.bridges["a"], bridge_a)
+            self.assertIs(app.bridges["b"], bridge_b)
+            self.assertTrue(bridge_a.running)
+
+    def test_unplugging_a_modem_stops_only_its_bridge(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            app = Orchestrator(root / "data", root, dry_run=False)
+            app.root.mkdir(parents=True)
+            modems = [
+                {"id": "a", "name": "A", "tty": "/dev/a"},
+                {"id": "b", "name": "B", "tty": "/dev/b"},
+            ]
+            config = root / "readers.conf"
+            desired = {"a": {"vowifi_enabled": True}, "b": {"vowifi_enabled": True}}
+
+            self.reconcile(app, modems, desired, config)
+            bridge_a, bridge_b = app.bridges["a"], app.bridges["b"]
+            self.reconcile(app, modems[1:], desired, config)
 
             self.assertNotIn("a", app.bridges)
+            self.assertFalse(bridge_a.running)
             self.assertIs(app.bridges["b"], bridge_b)
             self.assertTrue(bridge_b.running)
-            self.assertEqual(len(processes), 2)
+
+    def test_the_packaged_virtual_pcd_definition_is_moved_out_of_the_way(self):
+        """vsmartcard-vpcd ships a reader on vpcd's default port. pcscd can bind that port
+        for it or for a modem reader, never both, and readdir order picks the winner."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            app = Orchestrator(root / "data", root, dry_run=False)
+            app.root.mkdir(parents=True)
+            config = root / "conf.d" / "mdd-sim-gateway-modems"
+            config.parent.mkdir(parents=True)
+            packaged = config.with_name("vpcd")
+            packaged.write_text('FRIENDLYNAME "Virtual PCD"\nCHANNELID 0x8C7B\n')
+
+            self.reconcile(app, [{"id": "a", "name": "A", "tty": "/dev/a"}],
+                           {"a": {"vowifi_enabled": True}}, config)
+
+            self.assertFalse(packaged.exists())
+            self.assertTrue(config.with_name(".vpcd.mdd-disabled").is_file())
+            # pcsc-lite skips dot files, so the definition is only parked, not destroyed.
+            self.assertIn("Virtual PCD", config.with_name(".vpcd.mdd-disabled").read_text())
+            self.assertNotIn("0x8C7B", config.read_text())
+
+    def test_a_port_saved_on_the_vpcd_default_is_migrated_away(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            app = Orchestrator(root / "data", root, dry_run=False)
+            app.root.mkdir(parents=True)
+            app.hw_state_path.parent.mkdir(parents=True, exist_ok=True)
+            app.hw_state_path.write_text(json.dumps({"assignments": {
+                "a": {"id": "a", "tty": "/dev/a", "base_port": 0x8C7B}}}))
+
+            self.reconcile(app, [{"id": "a", "name": "A", "tty": "/dev/a"}],
+                           {"a": {"vowifi_enabled": True}}, root / "readers.conf")
+
+            saved = json.loads(app.hw_state_path.read_text())["assignments"]["a"]
+            self.assertNotEqual(saved["base_port"], 0x8C7B)
+            self.assertEqual(saved["base_port"], mdd_orchestrator.BASE_VPCD_PORT)
+
+    def test_a_bridge_is_respawned_when_its_port_moves(self):
+        """The bridge dials the port pcscd listens on, so it cannot outlive a migration."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            app = Orchestrator(root / "data", root, dry_run=False)
+            app.root.mkdir(parents=True)
+            modems = [{"id": "a", "name": "A", "tty": "/dev/a"}]
+            desired = {"a": {"vowifi_enabled": True}}
+            config = root / "readers.conf"
+
+            self.reconcile(app, modems, desired, config)
+            stale = app.bridges["a"]
+            self.assertIn(str(mdd_orchestrator.BASE_VPCD_PORT), stale.command)
+            moved = mdd_orchestrator.BASE_VPCD_PORT + mdd_orchestrator.VPCD_PORT_STRIDE
+            app.hw_state_path.write_text(json.dumps({"assignments": {
+                "a": {"id": "a", "tty": "/dev/a", "base_port": moved}}}))
+            respawned = self.reconcile(app, modems, desired, config)
+
+            self.assertFalse(stale.running)
+            self.assertEqual(len(respawned), 1)
+            self.assertIn(str(moved), app.bridges["a"].command)
 
     def test_orchestrator_stop_marks_pcsc_maintenance_immediately(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -217,6 +217,7 @@ const zh = {
   'lpac is not installed. Run "sudo ./install.sh build-lpac" on the host.': '未安装 lpac。请在主机运行“sudo ./install.sh build-lpac”。',
   'Reading…': '正在读取…', 'Click Load to read chip info from this card (uses lpac / PC/SC).': '点击“读取”以读取此卡的芯片信息（使用 lpac / PC/SC）。',
   'This card is not an eUICC / eSIM. Ordinary USIM cards cannot be managed here.': '此卡不是 eUICC/eSIM，普通 USIM 卡无法在这里管理。',
+  'This reader holds no card, so nothing could be read. For a cellular module the card arrives over its SIM bridge — check that the module is still connected.': '此读卡器中没有卡片，因此读不到任何信息。蜂窝模块的卡片经由 SIM 桥接通道提供，请确认模块仍处于连接状态。',
   Copy: '复制', 'Default SM-DP+': '默认 SM-DP+', 'Free NVM': '可用 NVM', 'IMEI for download': '下载使用的 IMEI', '— (lpac default TAC)': '—（使用 lpac 默认 TAC）',
   Profiles: '配置文件', '{count} profile(s)': '{count} 个配置文件', 'Click Load to list profiles.': '点击“读取”列出配置文件。',
   'No profiles on this eUICC.': '此 eUICC 上没有配置文件。', 'No profiles to show.': '没有可显示的配置文件。', 'No profiles on this SE.': '此 SE 上没有配置文件。',

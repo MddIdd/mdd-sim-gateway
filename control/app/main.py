@@ -2711,7 +2711,9 @@ def _vowifi_capability(desired: bool, observed: dict, running: bool,
     elif transitioning:
         actual = "starting" if desired else "stopping"
     elif not desired:
-        actual = "stopping" if running or bridge else "off"
+        # The bridge stays up for every present modem so the card remains readable, so it
+        # says nothing about VoWiFi here — only a still-running line means "stopping".
+        actual = "stopping" if running else "off"
     elif not bridge:
         actual = "starting"
     elif not running:

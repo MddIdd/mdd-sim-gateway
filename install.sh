@@ -761,6 +761,28 @@ remove_control_local() {
   fi
 }
 
+# The vsmartcard-vpcd package ships its own /etc/reader.conf.d/vpcd: a two-slot "Virtual PCD"
+# reader on vpcd's default port, present whether or not a modem is. pcscd cannot bind that port
+# for it AND for a modem reader, and directory order decides who wins, so on some hosts the modem
+# readers never appeared while two phantom devices did. Rename it out of the way — pcsc-lite skips
+# dot files — instead of deleting a package file, so it can be restored. The orchestrator repeats
+# this check on every pass, which also covers a later reinstall of the package.
+VPCD_PACKAGED_READER=/etc/reader.conf.d/vpcd
+VPCD_PACKAGED_READER_DISABLED=/etc/reader.conf.d/.vpcd.mdd-disabled
+disable_packaged_vpcd_reader() {
+  [ -f "$VPCD_PACKAGED_READER" ] || return 0
+  mv -f "$VPCD_PACKAGED_READER" "$VPCD_PACKAGED_READER_DISABLED"
+  info "disabled the packaged 'Virtual PCD' reader definition (collides with modem readers)"
+  systemctl restart pcscd.service >/dev/null 2>&1 || true
+}
+
+restore_packaged_vpcd_reader() {
+  [ -f "$VPCD_PACKAGED_READER_DISABLED" ] || return 0
+  [ -e "$VPCD_PACKAGED_READER" ] && { rm -f "$VPCD_PACKAGED_READER_DISABLED"; return 0; }
+  mv -f "$VPCD_PACKAGED_READER_DISABLED" "$VPCD_PACKAGED_READER"
+  systemctl restart pcscd.service >/dev/null 2>&1 || true
+}
+
 # Country routes and USB modem serial ports live in the host namespace even when the manager is
 # containerized, so this small privileged service is installed in both deployment modes.
 run_orchestrator() {
@@ -774,6 +796,7 @@ run_orchestrator() {
   VPCD_LIB=$(find /usr/local/lib /usr/lib -name libifdvpcd.so -print -quit 2>/dev/null || true)
   [ -n "$VPCD_LIB" ] && info "virtual smart-card driver: $VPCD_LIB" \
     || warn "libifdvpcd.so not found; native readers work, modem virtual slots will stay unavailable"
+  disable_packaged_vpcd_reader
   have sing-box || die "sing-box installation failed"
   have xray || die "Xray-core installation failed"
   cat > "$ORCHESTRATOR_UNIT" <<EOF
@@ -803,6 +826,8 @@ EOF
 remove_orchestrator() {
   if have systemctl; then systemctl disable --now mdd-sim-gateway-orchestrator >/dev/null 2>&1 || true; fi
   rm -f "$ORCHESTRATOR_UNIT" /etc/reader.conf.d/mdd-sim-gateway-modems
+  # Nothing of ours is left to collide with it, so hand the packaged reader back.
+  restore_packaged_vpcd_reader
   have systemctl && systemctl daemon-reload 2>/dev/null || true
 }
 
@@ -1080,6 +1105,116 @@ cmd_status() {
   if have xray; then printf '  Xray-core  %s\n' "$(xray version 2>/dev/null | head -1)"; else printf '  Xray-core  (not installed)\n'; fi
   if have mmcli; then printf '  ModemManager  %s\n' "$(mmcli --version 2>/dev/null | head -1)"; else printf '  ModemManager  (not installed)\n'; fi
   if [ -x "$MDD_DATA_DIR/lpac/lpac" ]; then printf '  lpac  installed\n'; else printf '  lpac  (not installed)\n'; fi
+}
+
+# One command whose output can be pasted into a bug report: everything needed to tell a card
+# path apart from a radio path, with SIM identities masked on the way out. Long digit runs are
+# ICCID/IMSI/IMEI/EID here, so only their last four characters survive.
+diag_redact() { sed -E 's/[0-9]{6,}([0-9]{4})/****\1/g'; }
+
+diag_section() { printf '\n%s== %s ==%s\n' "$B" "$1" "$N"; }
+
+diag_readers() {
+  if [ -x "$VENV_DIR/bin/python" ]; then
+    "$VENV_DIR/bin/python" - <<'PY' 2>/dev/null || true
+try:
+    from smartcard.System import readers
+    for index, reader in enumerate(readers()):
+        print("%d: %s" % (index, reader))
+except Exception as exc:  # noqa - a diagnostic must never fail the whole report
+    print("reader enumeration failed: %r" % (exc,))
+PY
+  elif have pcsc_scan; then
+    pcsc_scan -r 2>/dev/null || true
+  else
+    printf '(no pyscard venv and no pcsc_scan — install pcsc-tools to list readers)\n'
+  fi
+}
+
+cmd_diagnose() {
+  need_root
+  resolve_mode
+  DATA_ABS=$(data_dir_abs)
+  diag_section "Install"
+  printf 'version: %s (%s)\n' "$(cat "$REPO_DIR/VERSION" 2>/dev/null || echo unknown)" \
+    "$(git -C "$REPO_DIR" describe --always --dirty 2>/dev/null || echo 'no git')"
+  printf 'mode:    %s\ndata:    %s\n' "$MODE" "$DATA_ABS"
+  printf 'host:    %s\n' "$(uname -srm)"
+  if [ -r /etc/os-release ]; then
+    (. /etc/os-release; printf 'distro:  %s\n' "${PRETTY_NAME:-unknown}") || true
+  fi
+
+  diag_section "PC/SC reader definitions"
+  ls -la /etc/reader.conf.d/ 2>/dev/null || printf '(no /etc/reader.conf.d)\n'
+  [ -f "$VPCD_PACKAGED_READER" ] \
+    && printf '\n!! the packaged "Virtual PCD" definition is still active — it collides with modem readers\n' \
+    || printf '\npackaged "Virtual PCD" definition: not active (good)\n'
+  printf '\n--- /etc/reader.conf.d/mdd-sim-gateway-modems ---\n'
+  cat /etc/reader.conf.d/mdd-sim-gateway-modems 2>/dev/null || printf '(absent)\n'
+
+  diag_section "pcscd and live readers"
+  if have systemctl; then systemctl is-active pcscd.service 2>/dev/null || true; fi
+  diag_readers
+
+  diag_section "Modem SIM bridges"
+  pgrep -af vpcd_modem_bridge.py 2>/dev/null || printf '(no bridge process running)\n'
+  printf '\n--- listening virtual-reader sockets (pcscd) ---\n'
+  if have ss; then
+    ss -lntp 2>/dev/null | grep -i pcscd || printf '(none — pcscd bound no virtual reader port)\n'
+    printf '\n--- bridge connections ---\n'
+    ss -ntp 2>/dev/null | grep -i "vpcd_modem_bridge\|python" || printf '(none)\n'
+  else
+    printf '(ss unavailable)\n'
+  fi
+
+  diag_section "Orchestrator state (masked)"
+  for name in devices-desired.json devices-hardware.json devices-status.json; do
+    printf -- '--- %s ---\n' "$name"
+    if [ -f "$DATA_ABS/orchestrator/$name" ]; then
+      diag_redact < "$DATA_ABS/orchestrator/$name"
+    else
+      printf '(absent)\n'
+    fi
+    printf '\n'
+  done
+  for path in "$DATA_ABS"/modems/*.json; do
+    [ -f "$path" ] || continue
+    printf -- '--- modems/%s ---\n' "$(basename "$path")"
+    diag_redact < "$path"
+    printf '\n'
+  done
+
+  diag_section "Orchestrator log (card path, masked)"
+  if have journalctl; then
+    journalctl -u mdd-sim-gateway-orchestrator -n 400 --no-pager 2>/dev/null \
+      | grep -Ei 'bridge|vpcd|reader|channel|modemmanager' | tail -60 | diag_redact || printf '(nothing matched)\n'
+  else
+    printf '(journalctl unavailable)\n'
+  fi
+
+  diag_section "eSIM chip read over each modem reader (masked)"
+  if [ ! -x "$MDD_DATA_DIR/lpac/lpac" ]; then
+    printf 'lpac is not built — run: sudo ./install.sh build-lpac\n'
+  else
+    diag_readers | grep -F 'VoWiFi Modem' > /tmp/mdd-diag-readers.$$ 2>/dev/null || true
+    if [ ! -s /tmp/mdd-diag-readers.$$ ]; then
+      printf '(no modem reader present, so nothing to read)\n'
+    else
+      # A running line owns the reader exclusively; lpac then fails for that reason alone.
+      while IFS= read -r entry; do
+        name=${entry#*: }
+        printf -- '--- %s ---\n' "$name"
+        LPAC_APDU=pcsc LPAC_APDU_PCSC_DRV_NAME="$name" \
+          "$MDD_DATA_DIR/lpac/lpac" chip info 2>&1 | head -30 | diag_redact || true
+        printf '\n'
+      done < /tmp/mdd-diag-readers.$$
+    fi
+    rm -f /tmp/mdd-diag-readers.$$
+  fi
+
+  diag_section "ModemManager"
+  if have mmcli; then mmcli -L 2>&1 | diag_redact || true; else printf '(mmcli unavailable)\n'; fi
+  printf '\n'
 }
 
 cmd_reset_admin() {
@@ -1371,6 +1506,7 @@ ${B}MDD Sim Gateway installer${N}
   $0 disable-autostart    do not start on boot
   $0 uninstall [--purge]  remove MDD containers/images/service (--purge also deletes data+venv)
   $0 status               show mode + component status
+  $0 diagnose             print a masked card-path report (readers, bridges, lpac, logs)
   $0 reset-admin          reset the local administrator (old credential file is backed up)
   $0 logs                 follow control-plane logs
   $0 build-lpac [--lpac-src PATH] [--dest DIR]   compile lpac into data/lpac (local eSIM LPA)
@@ -1425,6 +1561,7 @@ case "$CMD" in
   disable-autostart)  cmd_disable_autostart ;;
   uninstall)          cmd_uninstall ;;
   status)             cmd_status ;;
+  diagnose)           cmd_diagnose ;;
   reset-admin)        cmd_reset_admin ;;
   logs)               cmd_logs ;;
   build-lpac)         cmd_build_lpac ;;

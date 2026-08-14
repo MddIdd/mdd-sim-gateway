@@ -29,6 +29,14 @@ function isNonEuiccError(msg) {
   return /euicc_init|does not appear to be an eUICC|not an eUICC|ordinary USIM/i.test(s)
 }
 
+/** An empty reader fails euicc_init exactly like an ordinary USIM does, so without this the
+ * UI accuses a perfectly good eSIM of not being one — the modem's virtual reader is empty
+ * whenever its SIM bridge is down. Check this first: lpac reports both symptoms at once. */
+function isNoCardError(msg) {
+  const s = String(msg || '')
+  return /SCARD_E_NO_SMARTCARD|SCARD_W_REMOVED_CARD|no smart ?card|card (is )?(absent|removed|not present)|SCardConnect/i.test(s)
+}
+
 function copyText(text, showToast, t) {
   if (!text) return
   navigator.clipboard?.writeText(text).then(
@@ -405,6 +413,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
   const [ses, setSes] = useState([])
   const [meta, setMeta] = useState({ imei: '' })
   const [loaded, setLoaded] = useState(false)
+  const [emptyReason, setEmptyReason] = useState('not-euicc') // why no chip was found
   const [cachedAt, setCachedAt] = useState(0)
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState('')
@@ -492,6 +501,7 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
       setSes(list)
       setMeta({ imei: c.imei || '' })
       const seErr = list.map((s) => s.error).filter(Boolean)
+      setEmptyReason(seErr.some((m) => isNoCardError(m)) ? 'no-card' : 'not-euicc')
       if (!list.length) {
         setErr('')
       } else if (list.every((s) => s.error) && seErr.every((m) => isNonEuiccError(m))) {
@@ -505,7 +515,8 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
       setCachedAt(0)
     } catch (e) {
       // Non-eUICC cards surface as a calm empty state, not a red error banner.
-      setErr(isNonEuiccError(e.message) ? '' : e.message)
+      setEmptyReason(isNoCardError(e.message) ? 'no-card' : 'not-euicc')
+      setErr(isNonEuiccError(e.message) || isNoCardError(e.message) ? '' : e.message)
       setSes([])
       setMeta({ imei: '' })
       setLoaded(true)
@@ -754,7 +765,9 @@ export default function Esim({ cards, instances, refresh, subscribe, showToast }
                 ? t('Reading…')
                 : !loaded
                   ? t('Click Load to read chip info from this card (uses lpac / PC/SC).')
-                  : t('This card is not an eUICC / eSIM. Ordinary USIM cards cannot be managed here.')}
+                  : emptyReason === 'no-card'
+                    ? t('This reader holds no card, so nothing could be read. For a cellular module the card arrives over its SIM bridge — check that the module is still connected.')
+                    : t('This card is not an eUICC / eSIM. Ordinary USIM cards cannot be managed here.')}
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12, fontSize: 13 }}>

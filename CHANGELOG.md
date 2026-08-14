@@ -4,6 +4,24 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- Stopped the `vsmartcard-vpcd` package's own reader definition from taking the port this
+  gateway gives a cellular module. Both used vpcd's default, only one could bind it, and
+  directory order decided which — so on some hosts every module reader vanished while two
+  phantom "Virtual PCD" devices appeared. The packaged definition is parked as a dot file
+  (installer and every orchestrator pass, so a package reinstall cannot bring it back) and
+  module readers now start well below the ephemeral port range. Saved ports on the old base
+  are migrated, and a module whose port moved gets its bridge respawned.
+- Kept a module's SIM reachable while VoWiFi is off. The card bridge used to follow the
+  VoWiFi switch, but reading the SIM is what lets a line exist in the first place and the
+  switch stays disabled until one does — a fresh module could never be provisioned, and
+  turning VoWiFi off to run an eSIM operation emptied the reader instead. Bridges now follow
+  the hardware: every connected module has one.
+- Stopped reporting "this card is not an eUICC" for a reader that simply holds no card, and
+  added `install.sh diagnose`: one masked report covering reader definitions, live readers,
+  bridges, sockets, orchestrator state and an lpac read per module reader.
+
 ## [1.3.5] - 2026-08-13
 
 ### Changed

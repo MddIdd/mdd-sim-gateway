@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 import time
 import io
 import tempfile
@@ -785,6 +786,8 @@ class IdleBackoffTests(unittest.TestCase):
                 clock[0] += seconds
                 if len(slept) == 2:              # an operator saves settings mid-wait
                     app.desired_path.write_text('{"changed": true}')
+                    os.utime(app.desired_path, ns=(2_000_000_000_000,
+                                                   2_000_000_000_000))
 
             with patch("host.mdd_orchestrator.time.sleep", fake_sleep), \
                     patch("host.mdd_orchestrator.time.time", lambda: clock[0]):
@@ -833,7 +836,7 @@ class IdleBackoffTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             app = self._app(temp)
             # None of them exist yet on a fresh install.
-            self.assertEqual(len(app._input_mtimes()), 6)
+            self.assertEqual(len(app._input_mtimes()), 7)
 
 
 class HotplugResponsivenessTests(unittest.TestCase):
@@ -853,4 +856,4 @@ class HotplugResponsivenessTests(unittest.TestCase):
             self.assertNotEqual(two_devices, three_devices,
                                 "a newly plugged modem must end the backoff")
             # A platform without a USB tree still returns a stable shape.
-            self.assertEqual(len(app._input_mtimes()), 6)
+            self.assertEqual(len(app._input_mtimes()), 7)

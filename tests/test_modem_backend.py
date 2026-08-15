@@ -1,7 +1,9 @@
+import tempfile
 import threading
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from host import mdd_orchestrator
 from host.mdd_orchestrator import Orchestrator
@@ -11,6 +13,33 @@ from host.vpcd_modem_bridge import (ModemError, ModemManagerCard,
 
 
 class ModemBackendTests(unittest.TestCase):
+    def test_bridge_restart_request_recycles_only_the_requested_modem(self):
+        with tempfile.TemporaryDirectory() as temp:
+            data = Path(temp) / "data"
+            repo = Path(temp) / "repo"
+            app = Orchestrator(data, repo)
+            target = Mock()
+            target.poll.return_value = None
+            other = Mock()
+            other.poll.return_value = None
+            app.bridges = {"modem-1": target, "modem-2": other}
+            app.bridge_ports = {"modem-1": 15360, "modem-2": 15616}
+            app.root.mkdir(parents=True)
+            mdd_orchestrator.atomic_json(app.bridge_restart_path, {
+                "request_id": "switch-1", "device_id": "modem-1"})
+
+            app.process_bridge_restart_request()
+
+            target.terminate.assert_called_once()
+            target.wait.assert_called_once_with(8)
+            other.terminate.assert_not_called()
+            self.assertNotIn("modem-1", app.bridges)
+            self.assertIn("modem-2", app.bridges)
+            self.assertTrue((app.root / "pcsc-maintenance").exists())
+            status = mdd_orchestrator.read_json(app.bridge_restart_status_path)
+            self.assertEqual(status["state"], "completed")
+            self.assertEqual(status["request_id"], "switch-1")
+
     def test_logical_channel_metadata_exposes_capacity_roles_and_ids(self):
         value = logical_channel_metadata([1, 2, 3])
         self.assertEqual(value["channel_capacity"], 3)

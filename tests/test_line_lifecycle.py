@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from control.app import config, engine, main
@@ -175,6 +176,134 @@ class BackgroundStartGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["restarted"], ["1"])
         stop.assert_called_once_with("1")
         start.assert_called_once_with(running, {}, dev_mounts=False)
+
+
+class ESimProfileSwitchRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    def test_raw_vpcd_card_resolves_modem_imei_from_reader_name(self):
+        card = {"name": "VoWiFi Modem modem-1 00 00", "present": True,
+                "iccid": "profile-target"}
+        with patch.object(main, "_device_identities", return_value={
+                "modem-1": {"hardware_id": "modem-1", "imei": "000000000000001"}}):
+            imei, device_id, device_type = main._hardware_imei_for_card(card, [card])
+
+        self.assertEqual(imei, "000000000000001")
+        self.assertEqual(device_id, "modem-1")
+        self.assertEqual(device_type, "modem")
+
+    async def test_recovery_enables_and_starts_only_the_live_profile(self):
+        reader = "VoWiFi Modem modem-1 00 00"
+        lines = {
+            "1": {"id": "1", "iccid": "profile-old", "enabled": True,
+                  "imei_source_device_id": "modem-1"},
+            "2": {"id": "2", "iccid": "profile-target", "enabled": False,
+                  "imei_source_device_id": "modem-1"},
+            "3": {"id": "3", "iccid": "profile-other", "enabled": True,
+                  "imei_source_device_id": "modem-2"},
+        }
+
+        def list_instances():
+            return [dict(value) for value in lines.values()]
+
+        def get_instance(iid):
+            value = lines.get(str(iid))
+            return dict(value) if value else None
+
+        def upsert(value):
+            iid = str(value["id"])
+            lines[iid] = {**lines[iid], **value}
+            return dict(lines[iid])
+
+        cards = {}
+        with patch.object(main, "_esim_restart_modem_bridge", new=AsyncMock(return_value=0)), \
+                patch.object(main.sim, "read_card", side_effect=[
+                    RuntimeError("ADF.USIM select failed"),
+                    SimpleNamespace(iccid="profile-target", imsi="imsi-target",
+                                    mcc="234", mnc="15", mnc_len=2,
+                                    pin_enabled=False, pin_tries=3, smsc="",
+                                    carrier_identity={}),
+                ]), \
+                patch.object(main.cfg, "list_instances", side_effect=list_instances), \
+                patch.object(main.cfg, "get_instance", side_effect=get_instance), \
+                patch.object(main.cfg, "upsert_instance", side_effect=upsert), \
+                patch.object(main.engine, "is_running", return_value=False), \
+                patch.object(main, "_carrier_identity_update", return_value={}), \
+                patch.object(main.hub, "cards", cards), \
+                patch.object(main.hub, "broadcast", new=AsyncMock()), \
+                patch.object(main.egress, "publish") as publish, \
+                patch.object(main, "api_instance_start", new=AsyncMock()) as start, \
+                patch.object(main.asyncio, "create_task") as create_task, \
+                patch.object(main.asyncio, "sleep", new=AsyncMock()):
+            result = await main._esim_recover_profile_switch(reader, "profile-target")
+
+        self.assertEqual(result["iccid"], "profile-target")
+        self.assertFalse(lines["1"]["enabled"])
+        self.assertTrue(lines["2"]["enabled"])
+        self.assertTrue(lines["3"]["enabled"])
+        publish.assert_called_once()
+        start.assert_awaited_once_with("2")
+        create_task.assert_not_called()
+
+    async def test_recovery_fails_closed_when_target_profile_never_appears(self):
+        reader = "VoWiFi Modem modem-1 00 00"
+        stale = SimpleNamespace(iccid="profile-old", imsi="imsi-old", mcc="234", mnc="15",
+                                mnc_len=2, pin_enabled=False, pin_tries=3, smsc="",
+                                carrier_identity={})
+        with patch.object(main, "_esim_restart_modem_bridge", new=AsyncMock(return_value=0)), \
+                patch.object(main.sim, "read_card", return_value=stale), \
+                patch.object(main.sim, "list_readers", return_value=[reader]), \
+                patch.object(main.asyncio, "sleep", new=AsyncMock()), \
+                patch.object(main, "ESIM_PROFILE_REFRESH_ATTEMPTS", 2):
+            with self.assertRaises(main.HTTPException) as raised:
+                await main._esim_recover_profile_switch(reader, "profile-target")
+
+        self.assertEqual(raised.exception.status_code, 503)
+
+    async def test_recovery_refreshes_all_virtual_readers_for_the_modem(self):
+        reader = "VoWiFi Modem modem-1 00 00"
+        siblings = [reader, "VoWiFi Modem modem-1 00 01", "VoWiFi Modem modem-1 00 02"]
+        target_card = SimpleNamespace(
+            iccid="profile-target", imsi="imsi-target", mcc="234", mnc="15",
+            mnc_len=2, pin_enabled=False, pin_tries=3, smsc="", carrier_identity={})
+        lines = {
+            "1": {"id": "1", "iccid": "profile-old", "enabled": True,
+                  "imei_source_device_id": "modem-1"},
+            "2": {"id": "2", "iccid": "profile-target", "enabled": False,
+                  "imei_source_device_id": "modem-1"},
+        }
+        cards = {name: {"name": name, "index": index, "present": True,
+                        "iccid": "profile-old"}
+                 for index, name in enumerate(siblings)}
+
+        def list_instances():
+            return [dict(value) for value in lines.values()]
+
+        def get_instance(iid):
+            value = lines.get(str(iid))
+            return dict(value) if value else None
+
+        def upsert(value):
+            iid = str(value["id"])
+            lines[iid] = {**lines[iid], **value}
+            return dict(lines[iid])
+
+        with patch.object(main, "_esim_restart_modem_bridge", new=AsyncMock(return_value=0)), \
+                patch.object(main.sim, "read_card", return_value=target_card), \
+                patch.object(main.sim, "list_readers", return_value=siblings), \
+                patch.object(main.cfg, "list_instances", side_effect=list_instances), \
+                patch.object(main.cfg, "get_instance", side_effect=get_instance), \
+                patch.object(main.cfg, "upsert_instance", side_effect=upsert), \
+                patch.object(main.engine, "is_running", return_value=False), \
+                patch.object(main, "_carrier_identity_update", return_value={}), \
+                patch.object(main, "_modem_identity_for_reader",
+                             return_value={"hardware_id": "modem-1"}), \
+                patch.object(main.hub, "cards", cards), \
+                patch.object(main.hub, "broadcast", new=AsyncMock()), \
+                patch.object(main.egress, "publish"), \
+                patch.object(main, "api_instance_start", new=AsyncMock()), \
+                patch.object(main.asyncio, "sleep", new=AsyncMock()):
+            await main._esim_recover_profile_switch(reader, "profile-target")
+
+        self.assertEqual({cards[name]["iccid"] for name in siblings}, {"profile-target"})
 
 
 class StatusActivityTests(unittest.TestCase):

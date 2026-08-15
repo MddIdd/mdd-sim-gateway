@@ -38,6 +38,9 @@ from .runtime import RuntimeRegistry
 STATUS_OK_GRACE_SECONDS = 20
 STATUS_POLL_FAST_SECONDS = 4.0
 STATUS_POLL_HEALTHY_SECONDS = 15.0
+ESIM_PROFILE_REFRESH_ATTEMPTS = int(os.environ.get("MDD_ESIM_PROFILE_REFRESH_ATTEMPTS", "10"))
+ESIM_PROFILE_REFRESH_INTERVAL = float(os.environ.get("MDD_ESIM_PROFILE_REFRESH_INTERVAL", "0.5"))
+ESIM_BRIDGE_RESTART_TIMEOUT = float(os.environ.get("MDD_ESIM_BRIDGE_RESTART_TIMEOUT", "20"))
 # Once Asterisk has completed its own bounded REGISTER transaction and explicitly reports no
 # response, another two minutes of same-session retries cannot repair the stale carrier-side
 # P-CSCF/ESP state.  Rebuild promptly, but leave enough time for the diagnostic worker to capture
@@ -2216,11 +2219,11 @@ def _esim_guard_engine(name: str):
         )
 
 
-async def _esim_refresh_card(name: str, idx: int):
+async def _esim_refresh_card(name: str, idx: int, card_data=None, *, auto_start: bool = True):
     """Re-probe USIM identity after profile enable/disable/download and broadcast."""
     info = hub.cards.get(name) or {"index": idx, "name": name, "present": True}
     try:
-        c = await asyncio.to_thread(sim.read_card, idx)
+        c = card_data if card_data is not None else await asyncio.to_thread(sim.read_card, idx)
         info.update(
             present=True, index=idx, name=name,
             iccid=c.iccid, imsi=c.imsi, mcc=c.mcc, mnc=c.mnc,
@@ -2243,9 +2246,152 @@ async def _esim_refresh_card(name: str, idx: int):
         info.update(index=idx, name=name, present=True)
     hub.cards[name] = info
     await hub.broadcast({"type": "cards", "cards": _client_cards()})
-    if info.get("matched"):
+    if auto_start and info.get("matched"):
         asyncio.create_task(_auto_start_hotplugged_line(str(info["matched"])))
     return info
+
+
+async def _esim_refresh_virtual_cards(name: str):
+    """Refresh cached siblings of a modem VPCD reader after an eUICC switch.
+
+    The profile switch is one physical-card operation, but pcscd exposes one cached card entry
+    per modem logical channel. Refreshing only the LPA reader leaves the SWu/AMI entries with the
+    old ICCID, so the start guard can reject a valid newly active profile.
+    """
+    identity = _modem_identity_for_reader(name)
+    hardware_id = str((identity or {}).get("hardware_id") or "")
+    if not hardware_id:
+        return
+    readers = await asyncio.to_thread(sim.list_readers)
+    for sibling, cached in list(hub.cards.items()):
+        if sibling == name or not cached.get("present"):
+            continue
+        sibling_identity = _modem_identity_for_reader(sibling)
+        if str((sibling_identity or {}).get("hardware_id") or "") != hardware_id:
+            continue
+        try:
+            sibling_idx = readers.index(sibling)
+            card = await asyncio.to_thread(sim.read_card, sibling_idx)
+            await _esim_refresh_card(sibling, sibling_idx, card_data=card, auto_start=False)
+        except Exception as exc:  # noqa
+            log.warning("post-LPA virtual reader refresh failed reader=%s: %s", sibling, exc)
+
+
+def _esim_bridge_request_paths() -> tuple[str, str]:
+    root = os.path.join(cfg.DATA_DIR, "orchestrator")
+    return (os.path.join(root, "bridge-restart-request.json"),
+            os.path.join(root, "bridge-restart-status.json"))
+
+
+async def _esim_restart_modem_bridge(name: str, timeout: float = ESIM_BRIDGE_RESTART_TIMEOUT) -> int:
+    """Ask the host orchestrator to recycle the VPCD bridge for this generated reader."""
+    identity = _modem_identity_for_reader(name)
+    hardware_id = str((identity or {}).get("hardware_id") or "")
+    readers = await asyncio.to_thread(sim.list_readers)
+    if not hardware_id:
+        if name not in readers:
+            raise HTTPException(503, "reader disappeared after eSIM profile refresh")
+        return readers.index(name)
+
+    request_path, status_path = _esim_bridge_request_paths()
+    request_id = f"esim-{int(time.time() * 1000)}-{random.randrange(1_000_000):06d}"
+    os.makedirs(os.path.dirname(request_path), mode=0o700, exist_ok=True)
+    temporary = request_path + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump({"request_id": request_id, "device_id": hardware_id,
+                   "requested_at": int(time.time())}, handle)
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, request_path)
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = _read_json_file(status_path)
+        if status.get("request_id") == request_id:
+            if status.get("state") != "completed":
+                raise HTTPException(503, status.get("error") or "VPCD bridge rebuild failed")
+            break
+        await asyncio.sleep(.25)
+    else:
+        raise HTTPException(503, "timed out waiting for VPCD bridge rebuild")
+
+    while time.monotonic() < deadline:
+        readers = await asyncio.to_thread(sim.list_readers)
+        if name in readers:
+            return readers.index(name)
+        await asyncio.sleep(.25)
+    raise HTTPException(503, "VPCD reader did not re-enumerate after eSIM profile refresh")
+
+
+async def _esim_recover_profile_switch(name: str, iccid: str) -> dict:
+    """Rebuild the modem reader, prove the active ICCID, and start only its line."""
+    idx = await _esim_restart_modem_bridge(name)
+    last_error = ""
+    info = None
+    for _attempt in range(max(1, ESIM_PROFILE_REFRESH_ATTEMPTS)):
+        try:
+            c = await asyncio.to_thread(sim.read_card, idx)
+            if str(c.iccid or "") != str(iccid):
+                last_error = f"active ICCID is {c.iccid or 'unknown'}, expected {iccid}"
+            else:
+                info = await _esim_refresh_card(name, idx, card_data=c, auto_start=False)
+                await _esim_refresh_virtual_cards(name)
+                break
+        except Exception as exc:  # noqa
+            last_error = str(exc)
+        await asyncio.sleep(ESIM_PROFILE_REFRESH_INTERVAL)
+    if info is None:
+        raise HTTPException(503, f"eSIM profile did not become active: {last_error}")
+
+    target = _match_instance_by_iccid(iccid)
+    if not target:
+        raise HTTPException(409, f"no MDD instance configured for ICCID {iccid}")
+    hardware_id = str((_modem_identity_for_reader(name) or {}).get("hardware_id") or "")
+    for inst in cfg.list_instances():
+        same_modem = hardware_id and str(inst.get("imei_source_device_id") or "") == hardware_id
+        if not same_modem:
+            continue
+        wanted = str(inst.get("id")) == str(target.get("id"))
+        if bool(inst.get("enabled", True)) != wanted:
+            await asyncio.to_thread(cfg.upsert_instance, {"id": str(inst["id"]),
+                                                           "enabled": wanted})
+        if not wanted and await asyncio.to_thread(engine.is_running, str(inst["id"])):
+            await asyncio.to_thread(engine.stop, str(inst["id"]))
+            await hub.drop_ami(str(inst["id"]))
+    egress.publish()
+    await api_instance_start(str(target["id"]))
+    return info
+
+
+async def _esim_prepare_profile_switch(name: str) -> dict[str, bool]:
+    """Stop and disable all saved lines belonging to one modem before LPA runs."""
+    hardware_id = str((_modem_identity_for_reader(name) or {}).get("hardware_id") or "")
+    previous = {}
+    if not hardware_id:
+        return previous
+    for inst in cfg.list_instances():
+        if str(inst.get("imei_source_device_id") or "") != hardware_id:
+            continue
+        iid = str(inst["id"])
+        previous[iid] = bool(inst.get("enabled", True))
+        if previous[iid]:
+            await asyncio.to_thread(cfg.upsert_instance, {"id": iid, "enabled": False})
+        if await asyncio.to_thread(engine.is_running, iid):
+            await asyncio.to_thread(engine.stop, iid)
+            await hub.drop_ami(iid)
+    if previous:
+        egress.publish()
+    return previous
+
+
+def _esim_restore_profile_switch(previous: dict[str, bool]):
+    changed = False
+    for iid, enabled in previous.items():
+        inst = cfg.get_instance(iid)
+        if inst and bool(inst.get("enabled", True)) != enabled:
+            cfg.upsert_instance({"id": iid, "enabled": enabled})
+            changed = True
+    if changed:
+        egress.publish()
 
 
 async def _esim_run(name: str, idx: int, coro, *, refresh: bool = False):
@@ -2368,6 +2514,14 @@ def _card_identity_mismatch(inst: dict) -> dict | None:
     want = (inst.get("iccid") or "").strip()
     if not want:
         return None
+    swu_name = (inst.get("swu_reader") or "").strip()
+    if swu_name:
+        for c in hub.cards.values():
+            if c.get("name") != swu_name or not c.get("present"):
+                continue
+            got = (c.get("iccid") or "").strip()
+            if got and got != want:
+                return {"reader": swu_name, "iccid": got}
     if _reader_index_for_instance(inst) is not None:
         return None      # this line's SIM/profile is present somewhere — all good
     # Prefer the stable USB port binding when present; fall back to stored index.
@@ -2637,6 +2791,9 @@ def _device_for_card(card_info: dict, cards: list[dict] | None = None) -> tuple[
     if card_info.get("hardware_kind") == "modem" and hardware_id:
         return hardware_id, "modem"
     name = str(card_info.get("name") or "")
+    hardware_id = hardware_id or device_state.vpcd_modem_hardware_id(name)
+    if hardware_id:
+        return hardware_id, "modem"
     port = str(card_info.get("reader_port") or "")
     for device_id, candidate in device_state.native_reader_devices(cards).items():
         if ((name and candidate.get("name") == name)
@@ -4687,9 +4844,15 @@ async def api_esim_enable(iccid: str, body: dict | None = None):
     se = await asyncio.to_thread(
         _esim_resolve_se, name, idx, body.get("se_id") or body.get("seId"), body.get("aid"),
         require=True)
-    await _esim_run(
-        name, idx, lpa.profile_enable(name, iccid, aid=se.get("aid")), refresh=True)
+    previous = await _esim_prepare_profile_switch(name)
+    try:
+        await _esim_run(
+            name, idx, lpa.profile_enable(name, iccid, aid=se.get("aid")))
+    except Exception:
+        await asyncio.to_thread(_esim_restore_profile_switch, previous)
+        raise
     await asyncio.to_thread(_esim_cache_update_profile, iccid, state="enabled")
+    await _esim_recover_profile_switch(name, iccid)
     return {"ok": True, "iccid": iccid, "se_id": se["id"], "card": hub.cards.get(name)}
 
 

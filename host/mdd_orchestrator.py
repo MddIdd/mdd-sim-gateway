@@ -438,6 +438,8 @@ class Orchestrator:
         self.hw_state_path = self.root / "hardware-state.json"
         self.device_desired_path = self.root / "devices-desired.json"
         self.device_status_path = self.root / "devices-status.json"
+        self.bridge_restart_path = self.root / "bridge-restart-request.json"
+        self.bridge_restart_status_path = self.root / "bridge-restart-status.json"
         self.generated = self.root / "sing-box.json"
         self.xray_generated = self.root / "xray.json"
         self.cache = self.root / "subscription.yaml"
@@ -537,6 +539,46 @@ class Orchestrator:
         self._serial_mode = False
         # device id -> the exact command its bridge runs, for the support bundle.
         self._bridge_commands: dict[str, list] = {}
+
+    def process_bridge_restart_request(self):
+        """Recycle one modem bridge after an eUICC profile refresh.
+
+        eUICC REFRESH can leave a VPCD child with a stale logical-channel selection. The
+        control plane requests only that child be recreated; sing-box, ModemManager and other
+        modem bridges stay untouched.
+        """
+        request = read_json(self.bridge_restart_path)
+        if not request:
+            return
+        try:
+            self.bridge_restart_path.unlink()
+        except OSError:
+            pass
+        request_id = str(request.get("request_id") or "")
+        device_id = str(request.get("device_id") or "")
+        if not request_id or not device_id:
+            atomic_json(self.bridge_restart_status_path, {
+                "state": "failed", "error": "request_id and device_id are required",
+                "updated_at": int(time.time())})
+            return
+        self.root.mkdir(parents=True, exist_ok=True)
+        (self.root / "pcsc-maintenance").write_text(str(int(time.time())), encoding="ascii")
+        proc = self.bridges.pop(device_id, None)
+        self.bridge_ports.pop(device_id, None)
+        self._bridge_started.pop(device_id, None)
+        self._bridge_failures.pop(device_id, None)
+        was_running = bool(proc and proc.poll() is None)
+        if was_running:
+            proc.terminate()
+            try:
+                proc.wait(8)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        atomic_json(self.bridge_restart_status_path, {
+            "state": "completed", "request_id": request_id, "device_id": device_id,
+            "was_running": was_running, "updated_at": int(time.time())})
+        self.log(f"recycled VPCD bridge for eUICC profile refresh: {device_id}")
 
     @staticmethod
     def service_active(name: str) -> bool:
@@ -2357,6 +2399,7 @@ class Orchestrator:
         self.root.mkdir(parents=True, exist_ok=True)
         while not self.stop:
             self.process_update_request()
+            self.process_bridge_restart_request()
             self.retire_obsolete_services()
             self.reconcile_timezone()
             desired = read_json(self.desired_path)
@@ -2449,7 +2492,8 @@ class Orchestrator:
         """Cheap change detector for the documents an operator action writes."""
         stamps = []
         for path in (self.desired_path, self.device_desired_path,
-                     self.data / "config.yaml", self.reselect_path):
+                     self.data / "config.yaml", self.reselect_path,
+                     self.bridge_restart_path):
             try:
                 stamps.append(path.stat().st_mtime)
             except OSError:

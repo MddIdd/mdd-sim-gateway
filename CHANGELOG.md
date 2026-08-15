@@ -2,6 +2,14 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- eSIM profile enable now stops the other saved lines on the same modem, rebuilds only that
+  modem's VPCD bridge, verifies the requested ICCID, refreshes sibling virtual readers and starts
+  only the active profile line.
+
 ## [1.3.10] - 2026-08-16
 
 ### Added
@@ -23,7 +31,6 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   directory listing, the configured modem backend, and the live reader list as pcscd exposes
   it. `install.sh diagnose` keeps its role for active probing (per-reader lpac reads) and
   now includes the bridge log files as well.
-
 ## [1.3.9] - 2026-08-15
 
 ### Fixed

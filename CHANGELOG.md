@@ -2,6 +2,28 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [1.3.10] - 2026-08-16
+
+### Added
+
+- Added a VoWiFi-only mode switch to System settings (default off). Enabled, ModemManager
+  never runs and every SIM bridge drives its modem's serial port directly: VoWiFi keeps
+  working, while cellular data, flight mode and cellular SMS/calls are presented as
+  unsupported rather than forever starting. This is for hosts — virtual machines, containers —
+  where ModemManager's modem objects are unstable: on such a host its periodic loss of a
+  modem object severed SIM access mid-tunnel even though the serial port never went away.
+  Flipping the switch restarts the card path once (about thirty seconds) and is confirmed
+  before it applies; the ModemManager unit is disabled while the mode is on so a reboot does
+  not start, stop and reset the modems on every boot.
+- The redacted support bundle now answers the card-path questions that previously cost a
+  support round trip each: the exact command every SIM bridge runs and its recent output
+  (bridge output now lands in per-modem files that survive journal rotation), whether pcscd
+  is actually listening on each assigned virtual-reader port (read from /proc/net/tcp — a
+  probe connection could hijack a reader slot, a file cannot), the reader-definition
+  directory listing, the configured modem backend, and the live reader list as pcscd exposes
+  it. `install.sh diagnose` keeps its role for active probing (per-reader lpac reads) and
+  now includes the bridge log files as well.
+
 ## [1.3.9] - 2026-08-15
 
 ### Fixed

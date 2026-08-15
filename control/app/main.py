@@ -2827,13 +2827,20 @@ async def _unified_devices() -> list[dict]:
             vowifi.update(available=False,
                           reason="Automatic setup is waiting for SIM or hardware information")
 
-        is_cellular_target = not is_native_reader and device_id in present_ids
-        cell_reason = ""
-        cell_actual = "unsupported" if is_native_reader else "off"
         actual_state = observed.get("actual") or {}
+        # Published by the orchestrator when this gateway is configured VoWiFi-only
+        # (hardware.modem_backend = serial): ModemManager never runs, so cellular is a
+        # capability this host does not have — not a fault to keep retrying.
+        serial_only = actual_state.get("cellular_supported") is False
+        is_cellular_target = (not is_native_reader and not serial_only
+                              and device_id in present_ids)
+        cell_reason = ""
+        cell_actual = "unsupported" if (is_native_reader or serial_only) else "off"
         radio_on = bool(actual_state.get("cellular_radio_enabled"))
         if is_native_reader:
             cell_reason = "A smart-card reader supports VoWiFi only"
+        elif serial_only:
+            cell_reason = "This gateway is configured for VoWiFi only (ModemManager disabled)"
         cellular_view = None
         if is_cellular_target:
             if host_cell.get("available"):
@@ -2905,11 +2912,11 @@ async def _unified_devices() -> list[dict]:
             cell_actual, cell_reason = "off", "Device not connected"
             flight_actual, flight_available = "off", False
         else:
-            flight_actual = ("unsupported" if is_native_reader else
+            flight_actual = ("unsupported" if is_native_reader or serial_only else
                              "on" if flight_desired and not radio_on else
                              "off" if not flight_desired and radio_on else
                              "starting" if flight_desired else "stopping")
-            flight_available = not is_native_reader
+            flight_available = not is_native_reader and not serial_only
         result.append({
             "id": device_id, "device_type": "reader" if is_native_reader else "modem",
             "name": (card_info.get("display_name") or card_info.get("name")
@@ -2963,7 +2970,10 @@ async def _unified_devices() -> list[dict]:
                              "flight": {"desired": flight_desired,
                                         "actual": flight_actual,
                                         "available": flight_available,
-                                        "reason": "" if device_present else "Device not connected"},
+                                        "reason": ("Device not connected" if not device_present
+                                                   else "This gateway is configured for VoWiFi "
+                                                        "only (ModemManager disabled)"
+                                                   if serial_only else "")},
                              "vowifi": vowifi},
             "shared": shared,
         })
@@ -3303,6 +3313,17 @@ def api_put_settings(body: dict):
             body["updates"] = update_check.validate_network_settings(body.get("updates"))
         except update_check.UpdateNetworkError as exc:
             raise HTTPException(400, str(exc)) from exc
+    hardware = body.get("hardware")
+    if hardware is not None:
+        if not isinstance(hardware, dict):
+            raise HTTPException(400, "invalid hardware settings")
+        backend = str(hardware.get("modem_backend", "auto") or "auto")
+        if backend not in {"auto", "serial"}:
+            raise HTTPException(400, "modem_backend must be auto or serial")
+        # Settings updates replace top-level keys wholesale; a client sending only the
+        # backend switch must not wipe the modem profiles beside it.
+        body["hardware"] = {**cfg.get_settings().get("hardware", {}), **hardware,
+                            "modem_backend": backend}
     saved = cfg.update_settings(body)
     if defaults is not None:
         device_state.set_defaults(**defaults)
@@ -3534,6 +3555,11 @@ async def api_system_maintenance(body: dict):
 async def api_support_bundle():
     settings = cfg.get_settings()
     documents = {"devices": device_state.status(), "egress": egress.status(),
+                 # What pcscd is actually exposing right now — the one fact every card-path
+                 # report needed and the bundle never carried. Passive: monitor state only.
+                 "readers": [{"name": item.get("name"), "present": item.get("present"),
+                              "hardware_kind": item.get("hardware_kind")}
+                             for item in hub.cards_list()],
                  "instances": [{"id": item.get("id"), "name": item.get("name")}
                                for item in cfg.list_instances()]}
     content = await asyncio.to_thread(

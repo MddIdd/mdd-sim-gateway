@@ -752,19 +752,54 @@ modem.3gpp.registration-state : unknown
                                                 "b": {"vowifi_enabled": True}})
             # Refused only one of two: the healthy modem still needs the backend.
             app._degraded = {"a": "refused"}
-            self.assertTrue(app.cellular_backend_needed(plan, {"a", "b"}))
+            self.assertTrue(app.cellular_backend_needed(plan, {"a", "b"}, {}))
             # Refused both, nobody wants cellular: stand down.
             app._degraded = {"a": "refused", "b": "refused"}
-            self.assertFalse(app.cellular_backend_needed(plan, {"a", "b"}))
+            self.assertFalse(app.cellular_backend_needed(plan, {"a", "b"}, {}))
             # An operator turning cellular on brings it back — that request must fail
             # visibly through ModemManager, not be silently pre-empted here.
             wants = Orchestrator.capability_plan({"a": {"vowifi_enabled": True,
                                                         "cellular_enabled": True},
                                                  "b": {"vowifi_enabled": True}})
-            self.assertTrue(app.cellular_backend_needed(wants, {"a", "b"}))
+            self.assertTrue(app.cellular_backend_needed(wants, {"a", "b"}, {}))
             # No modems at all: nothing to run a backend for.
             self.assertFalse(app.cellular_backend_needed(
-                Orchestrator.capability_plan({}), set()))
+                Orchestrator.capability_plan({}), set(), {}))
+
+    def test_configured_serial_mode_outranks_everything(self):
+        """An explicit VoWiFi-only configuration keeps ModemManager down even when a
+        stale desired flag still asks for cellular: with the backend disabled the UI
+        presents cellular as unsupported, so nothing may resurrect it."""
+        with tempfile.TemporaryDirectory() as temp:
+            app = Orchestrator(Path(temp) / "data", Path(temp), dry_run=True)
+            wants = Orchestrator.capability_plan(
+                {"a": {"vowifi_enabled": True, "cellular_enabled": True}})
+            serial = {"modem_backend": "serial"}
+            self.assertFalse(app.cellular_backend_needed(wants, {"a"}, serial))
+            self.assertTrue(app.cellular_backend_needed(wants, {"a"}, {}))
+            self.assertTrue(app.cellular_backend_needed(
+                wants, {"a"}, {"modem_backend": "auto"}))
+
+    def test_serial_mode_publishes_cellular_as_unsupported_capability(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            app = Orchestrator(root / "data", root, dry_run=True)
+            app.root.mkdir(parents=True)
+            app._serial_mode = True
+            app.bridges["a"] = SimpleNamespace(poll=lambda: None, pid=9)
+            app._bridge_started["a"] = time.time() - 60
+            stub = SimpleNamespace(returncode=1, stdout="", stderr="")
+            with patch("host.mdd_orchestrator.run", return_value=stub):
+                app.publish_device_status(
+                    {"a": {"vowifi_enabled": True}},
+                    {"a": {"id": "a", "name": "A", "tty": "/dev/x", "base_port": 15360}})
+            document = device_state._read(str(app.device_status_path), {})
+            device = document["devices"]["a"]
+            self.assertFalse(device["actual"]["cellular_supported"])
+            self.assertEqual(device["actual"]["vowifi_backend"], "direct-serial")
+            self.assertEqual(document["shared"]["modem_backend"], "serial")
+            self.assertEqual(document["shared"]["cellular_backend"],
+                             "disabled-by-configuration")
 
     def test_standing_down_skips_the_modem_reset(self):
         with tempfile.TemporaryDirectory() as temp:

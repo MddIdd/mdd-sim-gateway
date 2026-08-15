@@ -1302,6 +1302,15 @@ cmd_diagnose() {
     printf '\n'
   done
 
+  diag_section "Bridge process logs (masked)"
+  # Since 1.3.10 bridge stdout/stderr land in per-modem files rather than the journal, so
+  # the activity trail survives journald rotation and reaches the support bundle.
+  for bridge_log in "$MDD_DATA_DIR"/orchestrator/bridge-*.log; do
+    [ -f "$bridge_log" ] || continue
+    printf -- '--- %s ---\n' "$(basename "$bridge_log")"
+    tail -40 "$bridge_log" | diag_redact
+  done
+
   diag_section "Orchestrator log (card path, masked)"
   if have journalctl; then
     # -A6 keeps the exception line under a traceback header: the header paths matched the

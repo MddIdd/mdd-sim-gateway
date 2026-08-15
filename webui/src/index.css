@@ -146,6 +146,7 @@ a { color: inherit; }
 .u-update-note { display:flex; align-items:center; justify-content:space-between; gap:12px; }
 .u-update-note .btn { flex-shrink:0; }
 .u-support-actions { display:flex; align-items:center; gap:24px; margin-top:18px; padding-top:18px; border-top:1px solid var(--border); }.u-support-actions>.btn { flex:none; }.u-support-actions b { font-size:13px; }.u-support-actions p { margin:4px 0; color:var(--text-dim); font-size:12px; }.u-support-actions div>a { color:var(--primary); font-size:12px; font-weight:700; text-decoration:none; }
+.u-hint { margin:6px 0 0; color:var(--text-dim); font-size:12px; line-height:1.5; max-width:640px; }
 .u-theme { order:1; display:grid; grid-template-columns:repeat(3,1fr); gap:5px; }
 .u-theme button { border:1px solid var(--border); background:transparent; color:var(--text-dim); border-radius:8px; padding:5px; cursor:pointer; }
 .u-theme button.active { color:white; border-color:var(--primary); background:var(--primary); }

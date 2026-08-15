@@ -533,6 +533,10 @@ class Orchestrator:
         # status document reported every freshly respawned process as a running bridge.
         self._bridge_started: dict[str, float] = {}
         self._bridge_failures: dict[str, dict] = {}
+        # Whether this gateway is configured VoWiFi-only (hardware.modem_backend = serial).
+        self._serial_mode = False
+        # device id -> the exact command its bridge runs, for the support bundle.
+        self._bridge_commands: dict[str, list] = {}
 
     @staticmethod
     def service_active(name: str) -> bool:
@@ -676,8 +680,13 @@ class Orchestrator:
                            "vowifi_bridge_active": vowifi_actual,
                            # Which path is carrying SIM traffic, so a modem serving VoWiFi
                            # without any cellular capability is not read as half-broken.
-                           "vowifi_backend": ("direct-serial" if degraded else
-                                              "modemmanager" if vowifi_actual else "")},
+                           "vowifi_backend": ("direct-serial"
+                                              if degraded or self._serial_mode else
+                                              "modemmanager" if vowifi_actual else ""),
+                           # False only in configured serial mode: cellular is then a
+                           # capability this host does not have, and the control plane
+                           # must present it as unsupported rather than forever starting.
+                           "cellular_supported": not self._serial_mode},
                 "cellular": cellular_state,
                 "present": present,
                 "transitioning": device_transitioning,
@@ -697,7 +706,10 @@ class Orchestrator:
         atomic_json(self.device_status_path, {
             "version": 2, "updated_at": int(time.time()), "devices": devices,
             "shared": {
-                "cellular_backend": "modemmanager-per-device" if mm_active else "unavailable",
+                "cellular_backend": ("disabled-by-configuration" if self._serial_mode else
+                                     "modemmanager-per-device" if mm_active else
+                                     "unavailable"),
+                "modem_backend": "serial" if self._serial_mode else "auto",
                 "modemmanager_active": mm_active,
                 "transitioning": bool(transitioning), "error": error,
                 "disruption": disruption or "",
@@ -753,7 +765,9 @@ class Orchestrator:
             time.sleep(12)
 
     def _bridge_stderr_path(self, hwid: str):
-        return self.root / f"bridge-{hwid}.stderr.log"
+        # Since 1.3.10 this carries the bridge's stdout too: its activity lines used to go
+        # only to the journal, which the support bundle cannot read.
+        return self.root / f"bridge-{hwid}.log"
 
     def _bridge_stderr_tail(self, hwid: str) -> str:
         """The last lines a dead bridge wrote — normally the exception that killed it."""
@@ -763,6 +777,51 @@ class Orchestrator:
             return ""
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         return " | ".join(lines[-2:])[-300:]
+
+    def _bridge_log_tail(self, hwid: str, lines: int = 25) -> list[str]:
+        """Recent bridge output for the support bundle; [] when there is none."""
+        try:
+            text = self._bridge_stderr_path(hwid).read_text(errors="replace")
+        except OSError:
+            return []
+        return [line for line in text.splitlines() if line.strip()][-lines:]
+
+    @staticmethod
+    def _listening_tcp_ports() -> set[int]:
+        """LISTEN ports from /proc/net/tcp{,6}. A read, never a connection: probing a VPCD
+        port with a real connect could hijack the reader slot from its bridge."""
+        ports: set[int] = set()
+        for name in ("/proc/net/tcp", "/proc/net/tcp6"):
+            try:
+                for line in Path(name).read_text().splitlines()[1:]:
+                    parts = line.split()
+                    if len(parts) > 3 and parts[3] == "0A":
+                        ports.add(int(parts[1].rsplit(":", 1)[1], 16))
+            except (OSError, ValueError, IndexError):
+                continue
+        return ports
+
+    def vpcd_port_status(self, assignments: dict) -> dict:
+        """Per assigned VPCD port: is pcscd actually listening on it right now."""
+        listening = self._listening_tcp_ports()
+        status = {}
+        for hwid, assignment in (assignments or {}).items():
+            try:
+                base = int(assignment.get("base_port") or 0)
+            except (TypeError, ValueError):
+                continue
+            status[hwid] = {str(base + slot): (base + slot) in listening
+                            for slot in range(VPCD_CHANNEL_CAPACITY)}
+        return status
+
+    def reader_definitions_listing(self) -> list[str]:
+        """File names in the pcscd reader definition directory (content stays out: the
+        stanzas are already carried verbatim elsewhere and paths are enough here)."""
+        try:
+            return sorted(entry.name for entry in
+                          self.reader_config_path.parent.iterdir())
+        except OSError:
+            return []
 
     def _record_bridge_exit(self, hwid: str, proc, started: float) -> None:
         """Keep an exited bridge visible instead of silently respawning over it."""
@@ -828,7 +887,7 @@ class Orchestrator:
                     continue
         return VPCD_PACKAGED_SLOTS
 
-    def cellular_backend_needed(self, plan: dict, present_ids) -> bool:
+    def cellular_backend_needed(self, plan: dict, present_ids, hardware: dict) -> bool:
         """Whether ModemManager should be running this cycle.
 
         Without a modem object ModemManager provides nothing — data, flight mode and
@@ -841,6 +900,11 @@ class Orchestrator:
         brought back, refusals notwithstanding: that request must fail visibly, not be
         silently pre-empted here.
         """
+        # An explicit VoWiFi-only configuration outranks everything, including a cellular
+        # wish: with the backend disabled by the operator the UI presents cellular as
+        # unsupported, so a stale desired flag must not resurrect ModemManager.
+        if str(hardware.get("modem_backend") or "auto") == "serial":
+            return False
         if plan["cellular_devices"]:
             return True
         if not plan["cellular_backend_required"]:
@@ -902,6 +966,7 @@ class Orchestrator:
             "version": 1,
             "updated_at": int(time.time()),
             "virtualization": self.virtualization(),
+            "modem_backend": "serial" if self._serial_mode else "auto",
             "modemmanager": {
                 # The claim check depends on this unit being reported active; a mismatch
                 # against mmcli working by hand is itself the diagnosis.
@@ -916,8 +981,14 @@ class Orchestrator:
             },
             "discovered_modems": discovered,
             "assignments": assignments,
-            "bridges": {hwid: {"pid": proc.pid, "running": proc.poll() is None}
+            "bridges": {hwid: {"pid": proc.pid, "running": proc.poll() is None,
+                               "command": self._bridge_commands.get(hwid) or [],
+                               "log_tail": self._bridge_log_tail(hwid)}
                         for hwid, proc in self.bridges.items()},
+            # Which of the assigned VPCD ports pcscd is actually listening on, read from
+            # /proc/net/tcp — a probe connection could hijack a reader slot, a file cannot.
+            "vpcd_ports_listening": self.vpcd_port_status(assignments),
+            "reader_definitions": self.reader_definitions_listing(),
             "country_egress_required": vowifi_required,
             "reader_config": {"path": str(self.reader_config_path),
                               "stanzas": self.last_reader_config.count("FRIENDLYNAME")},
@@ -1128,6 +1199,9 @@ class Orchestrator:
                 run(["udevadm", "trigger", "--action=add",
                      f"--subsystem-match={subsystem}"])
             run(["udevadm", "settle"])
+            # Re-enable in case a spell of serial mode disabled the unit; otherwise the
+            # backend would not survive the next boot.
+            run(["systemctl", "enable", "ModemManager.service"])
             result = run(["systemctl", "start", "ModemManager.service"])
             if result.returncode:
                 raise RuntimeError("could not start ModemManager: " +
@@ -1144,6 +1218,12 @@ class Orchestrator:
         if modemmanager_was_active:
             self.stop_bridges()
         run(["systemctl", "stop", "ModemManager.service"])
+        if not reset_modems:
+            pass  # refusal stand-down: leave the unit enabled; a replug retries ModemManager
+        else:
+            # Configured serial mode: keep ModemManager from starting at boot, or every boot
+            # would start it, stop it and reset the modems before the bridges could run.
+            run(["systemctl", "disable", "ModemManager.service"])
         run(["pkill", "-x", "qmi-proxy"])
         time.sleep(1)
         if modemmanager_was_active and reset_modems:
@@ -2253,10 +2333,13 @@ class Orchestrator:
                         "bridged over the serial port directly. Cellular data and flight mode "
                         "are unavailable until ModemManager claims it.")
             if not self.dry_run:
-                # stderr goes to a file, not the journal: it is what names the exception
-                # when a bridge dies, and a pipe nobody drains would block a healthy one.
+                # Output goes to a file, not the journal: stderr is what names the
+                # exception when a bridge dies, stdout is the activity trail the support
+                # bundle carries, and a pipe nobody drains would block a healthy bridge.
                 with open(self._bridge_stderr_path(modem["id"]), "wb") as sink:
-                    self.bridges[modem["id"]] = subprocess.Popen(command, stderr=sink)
+                    self.bridges[modem["id"]] = subprocess.Popen(
+                        command, stdout=sink, stderr=subprocess.STDOUT)
+                self._bridge_commands[modem["id"]] = list(command)
                 self._bridge_started[modem["id"]] = time.time()
                 self.bridge_ports[modem["id"]] = assignments[modem["id"]]["base_port"]
         # One capture per cycle rather than one per modem: this is the state an operator has to
@@ -2293,11 +2376,20 @@ class Orchestrator:
             active_desired = {device_id: state for device_id, state in desired_devices.items()
                               if device_id in present_ids}
             plan = self.capability_plan(active_desired)
-            cellular_required = self.cellular_backend_needed(plan, present_ids)
+            hardware_config = desired.get("hardware") or {}
+            self._serial_mode = str(hardware_config.get("modem_backend")
+                                    or "auto") == "serial"
+            cellular_required = self.cellular_backend_needed(plan, present_ids,
+                                                             hardware_config)
             # Standing ModemManager down after a refusal must not reset the modems: it never
             # owned them (no objects), and the reset would re-enumerate USB, retire the very
             # refusal verdicts that justified the stand-down, and restart the whole cycle.
-            mm_stood_down = plan["cellular_backend_required"] and not cellular_required
+            # The configured serial mode is different: ModemManager may have genuinely held
+            # QMI/UIM ownership until this moment, and a modem coming out of that needs the
+            # reset before a direct-serial bridge can use it. The unit is also disabled so
+            # the next boot does not start-then-stop-then-reset the modems all over again.
+            mm_stood_down = (not self._serial_mode
+                             and plan["cellular_backend_required"] and not cellular_required)
             vowifi_required = self.country_egress_required(desired, plan)
             mm_active = self.service_active("ModemManager.service")
             previous = mm_active

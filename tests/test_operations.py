@@ -121,6 +121,33 @@ class OperationsTests(unittest.TestCase):
             self.assertIn("waiting for ModemManager", host["recent_log"][0])
             self.assertEqual(host["imei"], "<redacted>")
 
+    def test_support_bundle_host_view_carries_bridge_activity_and_port_truth(self):
+        """The three facts every card-path report needed by hand: what command each bridge
+        runs, what it printed last, and whether pcscd actually listens on its ports."""
+        with tempfile.TemporaryDirectory() as temp, patch.object(config, "DATA_DIR", temp):
+            orchestrator = Path(temp, "orchestrator")
+            orchestrator.mkdir(parents=True)
+            orchestrator.joinpath("host-diagnostics.json").write_text(json.dumps({
+                "modem_backend": "serial",
+                "modemmanager": {"unit_active": False},
+                "bridges": {"a": {"pid": 7, "running": True,
+                                  "command": ["python", "bridge", "--modem", "/dev/ttyUSB2"],
+                                  "log_tail": ["[bridge] allocated logical channels [1, 2, 3]"]}},
+                "vpcd_ports_listening": {"a": {"15360": True, "15361": True, "15362": False}},
+                "reader_definitions": ["libccidtwin", "mdd-sim-gateway-modems"],
+            }))
+
+            content = operations.support_bundle({})
+
+            with zipfile.ZipFile(BytesIO(content)) as archive:
+                host = json.loads(archive.read("host-diagnostics-redacted.json"))
+            self.assertEqual(host["modem_backend"], "serial")
+            self.assertIn("--modem", host["bridges"]["a"]["command"])
+            self.assertIn("allocated logical channels",
+                          host["bridges"]["a"]["log_tail"][0])
+            self.assertFalse(host["vpcd_ports_listening"]["a"]["15362"])
+            self.assertIn("mdd-sim-gateway-modems", host["reader_definitions"])
+
     def test_support_bundle_reports_a_missing_host_view_instead_of_omitting_it(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(config, "DATA_DIR", temp):
             content = operations.support_bundle({})

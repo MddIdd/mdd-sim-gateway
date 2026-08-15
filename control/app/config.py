@@ -84,6 +84,11 @@ DEFAULTS = {
         # logical slots; native PC/SC readers pass through untouched.
         "hardware": {
             "auto_detect": True,
+            # "auto": ModemManager runs whenever a modem is present (full feature set).
+            # "serial": ModemManager never runs; SIM bridges drive the AT port directly.
+            # VoWiFi keeps working, cellular data / flight mode / cellular SMS do not.
+            # For hosts (VMs, containers) where ModemManager's modem objects are unstable.
+            "modem_backend": "auto",
             "vpcd_slots": 3,
             "modem_profiles": [
                 {"name": "DJI/Quectel EC25", "vid": "2c7c", "pid": "0125",

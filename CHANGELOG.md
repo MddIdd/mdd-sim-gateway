@@ -2,6 +2,30 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- The serial fallback acts on ModemManager's own refusal instead of waiting it out. When
+  ModemManager has logged that it cannot create a modem for this hardware, the bridge takes the
+  serial port at once; the three-minute grace period remains only for hosts whose journal says
+  nothing. An affected host previously paid the full wait on every boot.
+- Opening the modem's AT port tolerates absent modem-control lines. pyserial raises DTR and RTS
+  as part of open with no way to opt out, and on virtualised USB passthrough that control
+  transfer can fail — which killed the bridge for two lines an AT channel never uses. Unrelated
+  errors still fail loudly.
+- A bridge that keeps dying is now visible and paced. Its exits are recorded with the exception
+  it wrote on the way down, respawns back off exponentially to ten minutes, and the device error
+  names the count and reason. Status no longer reports a just-respawned process as a running
+  bridge while it crash-loops, and a bridge that runs stably lives its failure history down.
+- The pcsc-lite source build works on a fresh Debian 13 host: meson resolves its systemd
+  dependency through systemd.pc, which trixie moved into the new systemd-dev package.
+- `install.sh diagnose` no longer filters the one line that names a crashed bridge's exception
+  out of its own report; traceback context is kept.
+- The packaged "Virtual PCD" reader definition can no longer reappear as phantom devices even
+  if a package reinstall restores the file the installer disables: the device list drops that
+  endpoint on its own.
+
 ## [1.3.7] - 2026-08-14
 
 ### Fixed

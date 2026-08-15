@@ -665,7 +665,8 @@ class Orchestrator:
                 present and (target_data_active != observed_data_active or
                              (backend_active and radio_enabled is not None and
                               bool(wanted.get("flight_mode")) == radio_enabled) or
-                             (bool(desired_devices) and not backend_active))))
+                             (not bool(wanted.get("flight_mode")) and
+                              not backend_active))))
             devices[device_id] = {
                 "id": device_id,
                 "name": assignment.get("name") or "USB modem",
@@ -681,7 +682,8 @@ class Orchestrator:
                            # Which path is carrying SIM traffic, so a modem serving VoWiFi
                            # without any cellular capability is not read as half-broken.
                            "vowifi_backend": ("direct-serial"
-                                              if degraded or self._serial_mode else
+                                              if degraded or self._serial_mode or
+                                              (vowifi_actual and not mm_active) else
                                               "modemmanager" if vowifi_actual else ""),
                            # False only in configured serial mode: cellular is then a
                            # capability this host does not have, and the control plane
@@ -833,6 +835,14 @@ class Orchestrator:
         self._bridge_failures[hwid] = {"count": count, "at": time.time(), "reason": reason,
                                        "returncode": proc.returncode,
                                        "uptime": round(uptime, 1)}
+        lowered = reason.casefold()
+        if count >= 3 and "logical channel allocation failed" in lowered and \
+                ("phonefailure" in lowered or "phone failure" in lowered):
+            self._degraded[hwid] = (
+                "ModemManager owns the modem but its AT command path cannot access the SIM; "
+                "using direct serial for the VoWiFi bridge while cellular data stays disabled.")
+            self.log(f"ModemManager SIM access failed repeatedly for {hwid}; "
+                     "falling back to direct serial")
         self.log(f"SIM bridge for {hwid} exited after {uptime:.0f}s "
                  f"(rc={proc.returncode}, attempt {count})"
                  + (f": {reason}" if reason else ""))
@@ -907,6 +917,8 @@ class Orchestrator:
             return False
         if plan["cellular_devices"]:
             return True
+        if present_ids and set(present_ids) <= set(plan.get("flight_mode_devices") or []):
+            return False
         if not plan["cellular_backend_required"]:
             return False
         if present_ids and set(present_ids) <= set(self._degraded):

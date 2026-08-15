@@ -2,6 +2,14 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- Flight-mode VoWiFi can settle on a direct-serial SIM bridge without keeping ModemManager
+  active. Repeated ModemManager `PhoneFailure` channel-allocation errors also fall back to the
+  direct serial path while cellular data remains disabled.
+
 ## [1.3.10] - 2026-08-16
 
 ### Added
@@ -23,7 +31,6 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   directory listing, the configured modem backend, and the live reader list as pcscd exposes
   it. `install.sh diagnose` keeps its role for active probing (per-reader lpac reads) and
   now includes the bridge log files as well.
-
 ## [1.3.9] - 2026-08-15
 
 ### Fixed

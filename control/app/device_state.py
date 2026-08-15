@@ -37,6 +37,12 @@ def native_reader_devices(cards: list[dict]) -> dict[str, dict]:
     for card_info in cards:
         if vpcd_modem_hardware_id(card_info.get("name")):
             continue
+        # The vsmartcard package's own reader definition. The installer disables it, but a
+        # package reinstall or a hand edit can bring it back — and when it came back it
+        # appeared here as two phantom card readers that exist whether or not any hardware
+        # does. It is a software endpoint, never a reader an operator plugged in.
+        if str(card_info.get("name") or "").startswith("Virtual PCD"):
+            continue
         if card_info.get("hardware_kind") != "reader":
             continue
         identity = str(card_info.get("reader_port") or card_info.get("name") or "")

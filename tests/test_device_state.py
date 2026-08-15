@@ -113,6 +113,20 @@ class DeviceStateTests(unittest.TestCase):
         self.assertEqual(device_state.vpcd_modem_hardware_id(
             "SCR Prime CCID Reader (000000000001) 00 00"), "")
 
+    def test_the_packaged_virtual_pcd_endpoint_is_never_a_device(self):
+        """The vsmartcard package's own reader definition rendered as two phantom devices
+        that exist whether or not any hardware does. The installer disables the file, but a
+        package reinstall can restore it — the device list must not trust that."""
+        cards = [
+            {"name": "Virtual PCD 00 00", "hardware_kind": "reader", "present": True},
+            {"name": "Virtual PCD 00 01", "hardware_kind": "reader", "present": True},
+            {"name": "SCR Prime CCID Reader (000000000001) 00 00",
+             "hardware_kind": "reader", "reader_port": "1-1.5"},
+        ]
+        readers = device_state.native_reader_devices(cards)
+        self.assertEqual(len(readers), 1)
+        self.assertEqual(next(iter(readers.values()))["reader_port"], "1-1.5")
+
     def test_native_readers_exclude_orchestrator_vpcd_slots(self):
         cards = [
             {"name": "VoWiFi Modem 2c7c-0125-1-1.2 00 00", "hardware_kind": "reader"},

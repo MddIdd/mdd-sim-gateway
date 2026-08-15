@@ -1304,8 +1304,12 @@ cmd_diagnose() {
 
   diag_section "Orchestrator log (card path, masked)"
   if have journalctl; then
+    # -A6 keeps the exception line under a traceback header: the header paths matched the
+    # filter but the one line that names the error did not, and a whole support round trip
+    # was spent recovering exactly that line by hand.
     journalctl -u mdd-sim-gateway-orchestrator -n 400 --no-pager 2>/dev/null \
-      | grep -Ei 'bridge|vpcd|reader|channel|modemmanager' | tail -60 | diag_redact || printf '(nothing matched)\n'
+      | grep -Ei -A6 'bridge|vpcd|reader|channel|modemmanager|traceback|error' \
+      | tail -80 | diag_redact || printf '(nothing matched)\n'
   else
     printf '(journalctl unavailable)\n'
   fi

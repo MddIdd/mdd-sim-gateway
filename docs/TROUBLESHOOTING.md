@@ -19,4 +19,65 @@
   重试不能替代可用网络；请换到可访问上游的可信 ARM64 构建机，或使用已审核的
   `MDD_ENGINE_BASE_IMAGE`。不得关闭证书验证或改用未审核镜像。
 
+
+## 虚拟化环境部署（PVE / QEMU）
+
+本节来自一次完整的现场排障（issue #1），配方均经实机验证。
+
+### 网络前置：Docker Hub 不可达
+
+国内网络环境下引擎镜像的基础层（`fedora`、`node`）常无法从 `registry-1.docker.io` 拉取，
+表现为安装/升级时 `dial tcp ... i/o timeout`。给 Docker 配置镜像加速后重试：
+
+```bash
+sudo tee /etc/docker/daemon.json <<'EOF'
+{ "registry-mirrors": ["https://docker.m.daocloud.io"] }
+EOF
+sudo systemctl restart docker
+```
+
+加速地址时效性强，哪个可用因网络而异，任选一个能用的填入即可。
+
+### 虚拟机（QEMU/PVE）单模块
+
+- 用完整虚拟机而不是 LXC 时，模块的 QMI 网口在客户机内核中创建，ModemManager 可完整工作（4G + VoWiFi）。
+- USB 直通**按物理端口映射**（不要按厂商/设备 ID —— 两个同型模块的 ID 完全相同，按 ID 映射行为不确定），并**取消勾选「使用 USB3」**（这类模块是 USB2 设备，挂到模拟 xHCI 上控制传输可能失败，症状为设置 DTR 报 `Errno 71 Protocol error`、AT 无响应）。
+
+### 虚拟机双模块（多模块）
+
+两个模块共享一个模拟 USB 控制器时可能同时静默失效。已验证的完整配方：
+
+1. **宿主机拉黑模块驱动**，防止宿主机与直通抢设备（历史上多次「模块全哑」由此而来）：
+
+   ```bash
+   printf 'blacklist option\nblacklist qmi_wwan\n' > /etc/modprobe.d/mdd-passthrough-blacklist.conf
+   modprobe -r option qmi_wwan
+   ```
+
+2. **一模块一个独立模拟控制器**（PVE 网页界面做不到，需命令行；VM 需关机）：
+
+   ```bash
+   qm set <vmid> --delete usb0 --delete usb1
+   qm set <vmid> --args '-device qemu-xhci,id=x1 -device qemu-xhci,id=x2 -device usb-host,hostbus=3,hostport=3,bus=x1.0 -device usb-host,hostbus=3,hostport=4,bus=x2.0'
+   ```
+
+   `hostbus`/`hostport` 按宿主机 `lsusb -t` 里模块实际所在的总线和端口填写。注意：`--args`
+   定义的 USB 设备不会显示在 PVE 网页硬件列表中；回退用 `qm set <vmid> --delete args`。
+
+3. 可选：调高宿主机 usbfs 缓冲上限（无害保险）：内核参数 `usbcore.usbfs_memory_mb=1000`。
+
+验证：客户机 `lsusb -t` 中两个模块应挂在**两个不同的 xhci** 下、各 5 个接口；`mmcli -L` 应列出两个 Modem 对象。
+
+### LXC 容器
+
+- LXC 内看不到模块的 QMI 网口（网络接口属于宿主机命名空间），ModemManager 无法创建 modem 对象，**4G 不可用**。
+- 自 v1.3.9 起这是受支持的纯 VoWiFi 路径：编排服务读到 ModemManager 的拒绝记录后立即降级为直连串口，并停掉 ModemManager；SIM 访问与 VoWiFi 正常。
+- LXC 的 USB 为宿主内核直驱，多模块无虚拟化层限制。
+
+### 直通排障纪律
+
+- **每一步观测都必须从已知状态出发**：先关 VM（`qm status` 确认 `stopped`），设备冷复位（物理重插或重启宿主机），再测。带电测试得到的现象几乎都是上一步的残影。
+- VM 带直通运行期间，宿主机上**不要** `modprobe option` 或访问那些串口 —— 宿主机驱动与 QEMU 抢同一设备会把它推入「接口被两个系统瓜分」的分裂态，两侧同时失灵。
+- 宿主机侧快速自检（VM 关机状态下）：`modprobe option` 后 8 个 `ttyUSB` 应齐全，`echo 'ATI' | socat - /dev/ttyUSB2,crnl` 应返回模块固件信息；测完 `modprobe -r option` 再启 VM。
+
 提交问题前下载“诊断 → 脱敏支持包”，并再次确认其中没有个人信息。

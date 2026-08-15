@@ -2,6 +2,21 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [1.3.9] - 2026-08-15
+
+### Fixed
+
+- ModemManager is stood down once it has refused every present modem and no device asks for
+  cellular. Without a modem object it provides nothing — data, flight mode and cellular SMS all
+  need one — but its periodic probes still opened the same AT ports the direct bridges hold,
+  and the interleaved traffic corrupted SIM channel allocation: a bridge would read the reply
+  to ModemManager's own probe where its +CSIM answer should have been, and only allocate
+  channels in the gap between probes. Standing it down skips the modem reset (it never owned
+  the modems) so the refusal verdicts survive. Enabling cellular on any device brings it back,
+  refusals notwithstanding: that request must fail visibly, not be silently pre-empted.
+  ModemManager-managed deployments are unaffected — the stand-down requires a recorded refusal
+  for every present modem.
+
 ## [1.3.8] - 2026-08-15
 
 ### Fixed

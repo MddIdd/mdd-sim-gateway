@@ -741,6 +741,51 @@ modem.3gpp.registration-state : unknown
             settled = device_state._read(str(app.device_status_path), {})["devices"]["a"]
             self.assertTrue(settled["actual"]["vowifi_bridge_active"])
 
+    def test_modemmanager_stands_down_once_it_has_refused_every_modem(self):
+        """Without a modem object ModemManager provides nothing, but its probes share the
+        AT ports with the direct bridges and corrupt SIM channel allocation. Field log: a
+        bridge read the reply to ModemManager's own +QGPS probe where its +CSIM answer
+        should have been."""
+        with tempfile.TemporaryDirectory() as temp:
+            app = Orchestrator(Path(temp) / "data", Path(temp), dry_run=True)
+            plan = Orchestrator.capability_plan({"a": {"vowifi_enabled": True},
+                                                "b": {"vowifi_enabled": True}})
+            # Refused only one of two: the healthy modem still needs the backend.
+            app._degraded = {"a": "refused"}
+            self.assertTrue(app.cellular_backend_needed(plan, {"a", "b"}))
+            # Refused both, nobody wants cellular: stand down.
+            app._degraded = {"a": "refused", "b": "refused"}
+            self.assertFalse(app.cellular_backend_needed(plan, {"a", "b"}))
+            # An operator turning cellular on brings it back — that request must fail
+            # visibly through ModemManager, not be silently pre-empted here.
+            wants = Orchestrator.capability_plan({"a": {"vowifi_enabled": True,
+                                                        "cellular_enabled": True},
+                                                 "b": {"vowifi_enabled": True}})
+            self.assertTrue(app.cellular_backend_needed(wants, {"a", "b"}))
+            # No modems at all: nothing to run a backend for.
+            self.assertFalse(app.cellular_backend_needed(
+                Orchestrator.capability_plan({}), set()))
+
+    def test_standing_down_skips_the_modem_reset(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = Orchestrator(Path(temp) / "data", Path(temp), dry_run=False)
+            app.obsolete_services_retired = True
+            calls = []
+            stub = SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch("host.mdd_orchestrator.run",
+                       side_effect=lambda args, **k: calls.append(args) or stub), \
+                    patch.object(app, "service_active", return_value=True), \
+                    patch.object(app, "stop_bridges"), \
+                    patch.object(app, "reset_modems_after_cellular") as reset, \
+                    patch("host.mdd_orchestrator.time.sleep"):
+                app.apply_cellular_backend(False, reset_modems=False)
+                reset.assert_not_called()
+                self.assertIn(["systemctl", "stop", "ModemManager.service"], calls)
+
+                app.apply_cellular_backend(False)
+                reset.assert_called_once()
+
     def test_replug_retires_the_degraded_verdict(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

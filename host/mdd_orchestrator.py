@@ -828,6 +828,27 @@ class Orchestrator:
                     continue
         return VPCD_PACKAGED_SLOTS
 
+    def cellular_backend_needed(self, plan: dict, present_ids) -> bool:
+        """Whether ModemManager should be running this cycle.
+
+        Without a modem object ModemManager provides nothing — data, flight mode and
+        cellular SMS all need one — but its probes still open the same AT ports the direct
+        bridges hold, and the interleaved traffic corrupts SIM channel allocation. Field
+        log: a bridge read the response to ModemManager's own +QGPS probe where its +CSIM
+        answer should have been, and only allocated channels in the gap between probes.
+        So once ModemManager has refused every present modem and no device asks for
+        cellular, it is stood down. The moment an operator enables cellular anywhere it is
+        brought back, refusals notwithstanding: that request must fail visibly, not be
+        silently pre-empted here.
+        """
+        if plan["cellular_devices"]:
+            return True
+        if not plan["cellular_backend_required"]:
+            return False
+        if present_ids and set(present_ids) <= set(self._degraded):
+            return False
+        return True
+
     def virtualization(self) -> str:
         """Cached hypervisor/container label; deployments differ mostly in this one word."""
         if self._virtualization is None:
@@ -1082,11 +1103,16 @@ class Orchestrator:
             if primary and device == primary:
                 run(["nmcli", "connection", "down", name])
 
-    def apply_cellular_backend(self, enabled: bool):
+    def apply_cellular_backend(self, enabled: bool, *, reset_modems: bool = True):
         """Apply the shared cellular backend required by one or more physical modems.
 
         ModemManager cannot be toggled per modem. Starting/stopping it is therefore deliberately
         based on the aggregate request, while bridge creation remains per-device.
+
+        ``reset_modems=False`` is for standing ModemManager down after it refused every
+        modem: it never held their QMI/UIM ownership, so there is nothing to reset — and
+        resetting would re-enumerate USB and retire the refusal verdicts that justified
+        the stand-down, restarting the cycle.
         """
         if self.dry_run:
             self.applied_cellular_backend = enabled
@@ -1120,7 +1146,7 @@ class Orchestrator:
         run(["systemctl", "stop", "ModemManager.service"])
         run(["pkill", "-x", "qmi-proxy"])
         time.sleep(1)
-        if modemmanager_was_active:
+        if modemmanager_was_active and reset_modems:
             self.reset_modems_after_cellular()
 
         self.applied_cellular_backend = False
@@ -2267,7 +2293,11 @@ class Orchestrator:
             active_desired = {device_id: state for device_id, state in desired_devices.items()
                               if device_id in present_ids}
             plan = self.capability_plan(active_desired)
-            cellular_required = plan["cellular_backend_required"]
+            cellular_required = self.cellular_backend_needed(plan, present_ids)
+            # Standing ModemManager down after a refusal must not reset the modems: it never
+            # owned them (no objects), and the reset would re-enumerate USB, retire the very
+            # refusal verdicts that justified the stand-down, and restart the whole cycle.
+            mm_stood_down = plan["cellular_backend_required"] and not cellular_required
             vowifi_required = self.country_egress_required(desired, plan)
             mm_active = self.service_active("ModemManager.service")
             previous = mm_active
@@ -2284,7 +2314,8 @@ class Orchestrator:
                 self.publish_device_status(desired_devices, assignments, transitioning=True,
                                            disruption=disruption, affected_devices=affected)
                 try:
-                    self.apply_cellular_backend(cellular_required)
+                    self.apply_cellular_backend(cellular_required,
+                                                reset_modems=not mm_stood_down)
                 except Exception as exc:
                     error = str(exc)
                     try:

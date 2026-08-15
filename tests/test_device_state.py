@@ -331,7 +331,7 @@ modem.3gpp.registration-state : unknown
         """Run one reconcile pass with the host calls stubbed out, returning the spawns."""
         processes = []
 
-        def spawn(command):
+        def spawn(command, **kwargs):
             process = self.Process(command)
             processes.append(process)
             return process
@@ -514,7 +514,7 @@ modem.3gpp.registration-state : unknown
             modems = [{"id": "a", "name": "A", "tty": "/dev/ttyUSB2"}]
             commands = []
 
-            def spawn(command):
+            def spawn(command, **kwargs):
                 commands.append(command)
                 return SimpleNamespace(poll=lambda: None, pid=7)
 
@@ -554,7 +554,7 @@ modem.3gpp.registration-state : unknown
             app.root.mkdir(parents=True)
             commands = []
 
-            def spawn(command):
+            def spawn(command, **kwargs):
                 commands.append(command)
                 return SimpleNamespace(poll=lambda: None, pid=9)
 
@@ -593,7 +593,7 @@ modem.3gpp.registration-state : unknown
                     patch("host.mdd_orchestrator.run",
                           return_value=SimpleNamespace(returncode=0, stdout="", stderr="")), \
                     patch("host.mdd_orchestrator.subprocess.Popen",
-                          side_effect=lambda command: commands.append(command) or
+                          side_effect=lambda command, **kwargs: commands.append(command) or
                           SimpleNamespace(poll=lambda: None, pid=9)), \
                     patch.dict("os.environ",
                                {"MDD_VPCD_READER_CONFIG": str(root / "readers.conf")}):
@@ -617,6 +617,115 @@ modem.3gpp.registration-state : unknown
                 self.assertEqual(app.driver_slots(), mdd_orchestrator.VPCD_PACKAGED_SLOTS)
                 drivers.joinpath(".mdd-vpcd-slots-4").touch()
                 self.assertEqual(app.driver_slots(), 4)
+
+    def test_a_logged_refusal_skips_the_remaining_grace_period(self):
+        """ModemManager writes its refusal to its own journal. Waiting the full grace
+        period after that is on record costs an affected host three minutes of dead air
+        on every boot, forever."""
+        def fake_run(args, **kwargs):
+            if args[:2] == ["mmcli", "-L"]:
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            if args[0] == "journalctl":
+                return SimpleNamespace(returncode=0, stdout=(
+                    "couldn't create modem for device '/sys/devices/pci0000:00/usb3/"
+                    "3-4/3-4.1': Failed to find a net port in the QMI modem\n"), stderr="")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            app = Orchestrator(root / "data", root, dry_run=False)
+            app.root.mkdir(parents=True)
+            modems = [{"id": "a", "name": "A", "tty": "/dev/ttyUSB2", "usb_path": "3-4.1"}]
+            commands = []
+
+            with patch.object(app, "usb_modems", return_value=modems), \
+                    patch("host.mdd_orchestrator.run", side_effect=fake_run), \
+                    patch("host.mdd_orchestrator.subprocess.Popen",
+                          side_effect=lambda command, **kwargs: commands.append(command) or
+                          SimpleNamespace(poll=lambda: None, pid=9)), \
+                    patch.dict("os.environ",
+                               {"MDD_VPCD_READER_CONFIG": str(root / "readers.conf")}):
+                desired = {"hardware": {"auto_detect": True}}
+                wanted = {"a": {"vowifi_enabled": True}}
+                # First cycle: unclaimed, no evidence yet — waits, and captures the journal.
+                app.reconcile_hardware(desired, wanted, through_modemmanager=True)
+                self.assertEqual(commands, [])
+                self.assertTrue(app._claim_evidence.get("modemmanager_journal"))
+                # Second cycle: the refusal is on record — degrades without the 180s wait.
+                app.reconcile_hardware(desired, wanted, through_modemmanager=True)
+
+            self.assertIn("a", app.bridges)
+            self.assertNotIn("--modemmanager", commands[0])
+            self.assertIn("a", app._degraded)
+
+    def test_a_crashing_bridge_backs_off_and_tells_the_truth(self):
+        """A bridge that dies on spawn used to be respawned every cycle while device
+        status reported each fresh corpse as a running bridge."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            app = Orchestrator(root / "data", root, dry_run=False)
+            app.root.mkdir(parents=True)
+            modems = [{"id": "a", "name": "A", "tty": "/dev/ttyUSB2"}]
+            spawned = []
+
+            def spawn(command, **kwargs):
+                spawned.append(command)
+                return SimpleNamespace(poll=lambda: 1, returncode=1, pid=9)
+
+            with patch.object(app, "usb_modems", return_value=modems), \
+                    patch("host.mdd_orchestrator.run",
+                          return_value=SimpleNamespace(returncode=0, stdout="", stderr="")), \
+                    patch("host.mdd_orchestrator.subprocess.Popen", side_effect=spawn), \
+                    patch.dict("os.environ",
+                               {"MDD_VPCD_READER_CONFIG": str(root / "readers.conf")}):
+                desired = {"hardware": {"auto_detect": True}}
+                wanted = {"a": {"vowifi_enabled": True}}
+                app.reconcile_hardware(desired, wanted)          # spawns, process is dead
+                # What the child wrote before dying; the spawn truncated the previous file.
+                app._bridge_stderr_path("a").write_text(
+                    "Traceback (most recent call last):\nOSError: [Errno 71] Protocol error\n")
+                app.reconcile_hardware(desired, wanted)          # notices, records, gates
+                self.assertEqual(len(spawned), 1, "no instant respawn inside the backoff")
+                self.assertEqual(app._bridge_failures["a"]["count"], 1)
+                self.assertIn("Errno 71", app._bridge_failures["a"]["reason"])
+
+                # Backoff elapsed: one more attempt is allowed, then the gate closes again.
+                app._bridge_failures["a"]["at"] -= 3600
+                app.reconcile_hardware(desired, wanted)
+                app._bridge_stderr_path("a").write_text(
+                    "OSError: [Errno 71] Protocol error\n")
+                app.reconcile_hardware(desired, wanted)
+                self.assertEqual(len(spawned), 2)
+
+                app.publish_device_status(wanted, {"a": {**modems[0], "base_port": 15360}})
+            document = device_state._read(str(app.device_status_path), {})["devices"]["a"]
+            self.assertFalse(document["actual"]["vowifi_bridge_active"])
+            self.assertIn("keeps exiting", document["error"])
+            self.assertIn("Errno 71", document["error"])
+
+    def test_a_freshly_respawned_bridge_only_counts_once_it_survives_the_settle_window(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            app = Orchestrator(root / "data", root, dry_run=True)
+            app.root.mkdir(parents=True)
+            app.bridges["a"] = SimpleNamespace(poll=lambda: None, pid=9)
+            app._bridge_started["a"] = time.time()
+            app._bridge_failures["a"] = {"count": 2, "at": time.time(), "reason": "x",
+                                         "returncode": 1, "uptime": 0.1}
+            stub = SimpleNamespace(returncode=0, stdout="", stderr="")
+            with patch("host.mdd_orchestrator.run", return_value=stub):
+                app.publish_device_status({"a": {"vowifi_enabled": True}},
+                                      {"a": {"id": "a", "name": "A", "tty": "/dev/x",
+                                             "base_port": 15360}})
+                fresh = device_state._read(str(app.device_status_path), {})["devices"]["a"]
+                self.assertFalse(fresh["actual"]["vowifi_bridge_active"])
+
+                app._bridge_started["a"] = time.time() - 10
+                app.publish_device_status({"a": {"vowifi_enabled": True}},
+                                          {"a": {"id": "a", "name": "A", "tty": "/dev/x",
+                                                 "base_port": 15360}})
+            settled = device_state._read(str(app.device_status_path), {})["devices"]["a"]
+            self.assertTrue(settled["actual"]["vowifi_bridge_active"])
 
     def test_replug_retires_the_degraded_verdict(self):
         with tempfile.TemporaryDirectory() as temp:

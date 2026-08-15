@@ -281,6 +281,15 @@ IDLE_INTERVAL_SECONDS = float(os.environ.get("MDD_IDLE_INTERVAL", "15"))
 # an EC25-class module, so this is set far beyond any healthy first pass: reaching it means
 # ModemManager has decided not to manage this hardware, not that it is still working on it.
 MM_CLAIM_GRACE_SECONDS = float(os.environ.get("MDD_MM_CLAIM_GRACE", "180"))
+# A bridge that exits is respawned, but blindly and instantly respawning turned one broken
+# serial port into a fifteen-second crash loop that device status reported as a running
+# bridge. Retries double from base to ceiling; a bridge that survives the stable window has
+# its failure history forgotten; and a freshly spawned process only counts as running once
+# it has outlived the settle window when there is a recorded failure to live down.
+BRIDGE_RETRY_BASE_SECONDS = 15.0
+BRIDGE_RETRY_CEILING_SECONDS = 600.0
+BRIDGE_STABLE_SECONDS = 60.0
+BRIDGE_SETTLE_SECONDS = 5.0
 COUNTRY_PROXY_LISTEN = os.environ.get("MDD_COUNTRY_PROXY_LISTEN", "172.17.0.1")
 COUNTRY_PROXY_PORT_BASE = int(os.environ.get("MDD_COUNTRY_PROXY_PORT_BASE", "22000"))
 
@@ -519,6 +528,11 @@ class Orchestrator:
         self._unclaimed_since: dict[str, float] = {}
         # device id -> why its bridge talks to the serial port instead of ModemManager.
         self._degraded: dict[str, str] = {}
+        # device id -> when its bridge process was spawned, and the record of its exits.
+        # Together these are what keep a crash-looping bridge visible: without them the
+        # status document reported every freshly respawned process as a running bridge.
+        self._bridge_started: dict[str, float] = {}
+        self._bridge_failures: dict[str, dict] = {}
 
     @staticmethod
     def service_active(name: str) -> bool:
@@ -618,7 +632,15 @@ class Orchestrator:
                 "cellular_enabled": False, "vowifi_enabled": True,
                 "flight_mode": False}
             bridge = self.bridges.get(device_id)
-            vowifi_actual = bool(bridge and bridge.poll() is None)
+            bridge_failure = self._bridge_failures.get(device_id)
+            bridge_alive = bool(bridge and bridge.poll() is None)
+            # A process that was just respawned over a recorded failure has not proven
+            # anything yet: reporting it as a running bridge is what made a crash loop
+            # read as healthy. It counts once it has outlived the settle window.
+            vowifi_actual = bridge_alive and (
+                not bridge_failure or
+                time.time() - self._bridge_started.get(device_id, 0.0)
+                >= BRIDGE_SETTLE_SECONDS)
             present = device_id in assignments
             backend_active = mm_active
             cellular_state = self.cellular_states.get(device_id) or {}
@@ -660,7 +682,17 @@ class Orchestrator:
                 "present": present,
                 "transitioning": device_transitioning,
                 "error": (error or ("device is not connected" if not present else "")
-                          or degraded),
+                          or " ".join(part for part in (
+                              degraded,
+                              # The exit record is the only place the actual exception
+                              # lands; without it a failing takeover reads as success.
+                              (f"The SIM bridge keeps exiting "
+                               f"({bridge_failure['count']} attempt(s), last after "
+                               f"{bridge_failure['uptime']}s"
+                               + (f": {bridge_failure['reason']}"
+                                  if bridge_failure.get("reason") else "") + ")")
+                              if bridge_failure and not vowifi_actual else "",
+                          ) if part)),
             }
         atomic_json(self.device_status_path, {
             "version": 2, "updated_at": int(time.time()), "devices": devices,
@@ -720,6 +752,56 @@ class Orchestrator:
             # USB serial ports disappear and return after the module reboot.
             time.sleep(12)
 
+    def _bridge_stderr_path(self, hwid: str):
+        return self.root / f"bridge-{hwid}.stderr.log"
+
+    def _bridge_stderr_tail(self, hwid: str) -> str:
+        """The last lines a dead bridge wrote — normally the exception that killed it."""
+        try:
+            text = self._bridge_stderr_path(hwid).read_text(errors="replace")
+        except OSError:
+            return ""
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        return " | ".join(lines[-2:])[-300:]
+
+    def _record_bridge_exit(self, hwid: str, proc, started: float) -> None:
+        """Keep an exited bridge visible instead of silently respawning over it."""
+        uptime = time.time() - started if started else 0.0
+        previous = self._bridge_failures.get(hwid)
+        # A crash after a long healthy run is a fresh incident, not an escalation.
+        count = previous["count"] + 1 if previous and uptime < BRIDGE_STABLE_SECONDS else 1
+        reason = self._bridge_stderr_tail(hwid)
+        self._bridge_failures[hwid] = {"count": count, "at": time.time(), "reason": reason,
+                                       "returncode": proc.returncode,
+                                       "uptime": round(uptime, 1)}
+        self.log(f"SIM bridge for {hwid} exited after {uptime:.0f}s "
+                 f"(rc={proc.returncode}, attempt {count})"
+                 + (f": {reason}" if reason else ""))
+
+    def _bridge_retry_due(self, hwid: str) -> bool:
+        failure = self._bridge_failures.get(hwid)
+        if not failure:
+            return True
+        delay = min(BRIDGE_RETRY_BASE_SECONDS * (2 ** (failure["count"] - 1)),
+                    BRIDGE_RETRY_CEILING_SECONDS)
+        return time.time() - failure["at"] >= delay
+
+    def mm_refusal_logged(self, modem: dict) -> bool:
+        """ModemManager has already said it will not create a modem for this hardware.
+
+        Its refusal only ever appears in its own journal, which the previous cycle's claim
+        evidence captured. Acting on it immediately spares the affected host the full grace
+        period on every boot — three minutes of dead air per start, forever, on a machine
+        whose ModemManager can never claim the modem.
+        """
+        usb_path = str(modem.get("usb_path") or "")
+        if not usb_path:
+            return False
+        for line in self._claim_evidence.get("modemmanager_journal") or []:
+            if "couldn't create modem" in line and usb_path in line:
+                return True
+        return False
+
     def claim_wait(self, tty: str) -> float:
         """Seconds this tty has been continuously unclaimed by ModemManager.
 
@@ -773,10 +855,12 @@ class Orchestrator:
         evidence = {"observed_at": int(time.time()), "unclaimed_ttys": sorted(ttys),
                     "mmcli_list_returncode": listing.returncode,
                     "modem_objects": objects, "modem_ports": ports}
-        if not objects:
-            # ModemManager knowing about no modem at all is a refusal, and it only ever
-            # explains itself in its own journal — which the control-plane container cannot
-            # read. Without this the bundle shows an empty list and no reason for it.
+        if ttys:
+            # ModemManager only ever explains a refusal in its own journal — which the
+            # control-plane container cannot read, and which the next cycle also uses to
+            # skip the remaining grace period once a refusal for this hardware is on
+            # record. Captured whenever a tty is unclaimed, because ModemManager may hold
+            # objects for other modems while refusing this one.
             journal = run(["journalctl", "-u", "ModemManager.service", "-n", "40",
                            "--no-pager", "-p", "warning"])
             evidence["modemmanager_journal"] = [
@@ -807,6 +891,7 @@ class Orchestrator:
                 "claim_grace_seconds": MM_CLAIM_GRACE_SECONDS,
                 # Modems whose bridge gave up on ModemManager and drives the tty itself.
                 "degraded_to_direct_serial": dict(self._degraded),
+                "bridge_failures": dict(self._bridge_failures),
             },
             "discovered_modems": discovered,
             "assignments": assignments,
@@ -2023,6 +2108,7 @@ class Orchestrator:
         if not hardware.get("auto_detect", True):
             # Nothing is managed, so any retained claim failure describes a past cycle.
             self._claim_evidence, self._degraded, self._unclaimed_since = {}, {}, {}
+            self._bridge_failures, self._bridge_started = {}, {}
             return {}
         modems = self.usb_modems(hardware)
         # A replug retires both the grace clock and the degraded verdict, so re-seating a
@@ -2033,6 +2119,8 @@ class Orchestrator:
                                  if tty in live_ttys}
         self._degraded = {device_id: reason for device_id, reason in self._degraded.items()
                           if device_id in live_ids}
+        self._bridge_failures = {device_id: value for device_id, value
+                                 in self._bridge_failures.items() if device_id in live_ids}
         old = read_json(self.hw_state_path).get("assignments") or {}
         ports = [BASE_VPCD_PORT + i * VPCD_PORT_STRIDE for i in range(VPCD_PORT_SLOTS)]
         # A port saved by a release that started at vpcd's own default is migrated here:
@@ -2087,17 +2175,28 @@ class Orchestrator:
         # it. Bridges follow the hardware instead: every present modem gets one.
         live_ids = {m["id"] for m in modems}
         for hwid in list(self.bridges):
+            proc = self.bridges[hwid]
+            exited = proc.poll() is not None
+            # A bridge that has run stably has lived its failure history down.
+            if not exited and self._bridge_failures.get(hwid) and \
+                    time.time() - self._bridge_started.get(hwid, 0.0) >= BRIDGE_STABLE_SECONDS:
+                self._bridge_failures.pop(hwid, None)
             # A bridge that was started on a now-migrated port would keep dialling a socket
             # pcscd no longer listens on, so a port change has to respawn it.
             moved = (hwid in live_ids
                      and self.bridge_ports.get(hwid) != assignments[hwid]["base_port"])
-            if hwid not in live_ids or moved or self.bridges[hwid].poll() is not None:
-                proc = self.bridges.pop(hwid)
+            if hwid not in live_ids or moved or exited:
+                self.bridges.pop(hwid)
                 self.bridge_ports.pop(hwid, None)
+                started = self._bridge_started.pop(hwid, 0.0)
+                if exited and hwid in live_ids and not moved:
+                    self._record_bridge_exit(hwid, proc, started)
                 if proc.poll() is None: proc.terminate()
         unclaimed = []
         for modem in modems:
             if modem["id"] in self.bridges: continue
+            if not self._bridge_retry_due(modem["id"]):
+                continue
             bridge = self.repo / "host" / "vpcd_modem_bridge.py"
             metadata = self.data / "modems" / f"{modem['id']}.json"
             command = [sys.executable, str(bridge), "--modem", modem["tty"], "--slots", str(slots),
@@ -2105,27 +2204,34 @@ class Orchestrator:
                        "--metadata-file", str(metadata), "--hardware-id", modem["id"]]
             if through_modemmanager:
                 mm_modem = self.modemmanager_modem_for_tty(modem["tty"])
+                refused = self.mm_refusal_logged(modem)
                 if mm_modem:
                     self._unclaimed_since.pop(modem["tty"], None)
                     self._degraded.pop(modem["id"], None)
                     command += ["--modemmanager", mm_modem, "--identity-refresh", "60"]
-                elif self.claim_wait(modem["tty"]) < MM_CLAIM_GRACE_SECONDS:
+                elif not refused and self.claim_wait(modem["tty"]) < MM_CLAIM_GRACE_SECONDS:
                     self.log(f"waiting for ModemManager to claim {modem['tty']}")
                     unclaimed.append(modem["tty"])
                     continue
                 else:
                     unclaimed.append(modem["tty"])
                     if modem["id"] not in self._degraded:
-                        self.log(f"ModemManager has not claimed {modem['tty']} in "
-                                 f"{int(MM_CLAIM_GRACE_SECONDS)}s; bridging this modem over "
-                                 f"the serial port directly. VoWiFi works; cellular data and "
-                                 f"flight mode do not, because they need a ModemManager modem.")
+                        why = ("ModemManager logged that it cannot create a modem for it"
+                               if refused else
+                               f"ModemManager has not claimed it in {int(MM_CLAIM_GRACE_SECONDS)}s")
+                        self.log(f"bridging {modem['tty']} over the serial port directly "
+                                 f"({why}). VoWiFi works; cellular data and flight mode do "
+                                 f"not, because they need a ModemManager modem.")
                     self._degraded[modem["id"]] = (
                         "ModemManager did not create a modem for this hardware, so VoWiFi is "
                         "bridged over the serial port directly. Cellular data and flight mode "
                         "are unavailable until ModemManager claims it.")
             if not self.dry_run:
-                self.bridges[modem["id"]] = subprocess.Popen(command)
+                # stderr goes to a file, not the journal: it is what names the exception
+                # when a bridge dies, and a pipe nobody drains would block a healthy one.
+                with open(self._bridge_stderr_path(modem["id"]), "wb") as sink:
+                    self.bridges[modem["id"]] = subprocess.Popen(command, stderr=sink)
+                self._bridge_started[modem["id"]] = time.time()
                 self.bridge_ports[modem["id"]] = assignments[modem["id"]]["base_port"]
         # One capture per cycle rather than one per modem: this is the state an operator has to
         # be asked for by hand today, and asking costs a support round trip. Once a bridge has

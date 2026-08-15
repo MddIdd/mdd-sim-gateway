@@ -5,12 +5,34 @@ from unittest.mock import patch
 
 from host import mdd_orchestrator
 from host.mdd_orchestrator import Orchestrator
-from host.vpcd_modem_bridge import (ModemError, ModemManagerCard,
+from host.vpcd_modem_bridge import (ModemCard, ModemError, ModemManagerCard,
                                     allocate_logical_channels,
                                     logical_channel_metadata, serve_slot)
 
 
 class ModemBackendTests(unittest.TestCase):
+    def test_preallocated_slot_emulates_manage_channel_open_and_close(self):
+        card = ModemCard.__new__(ModemCard)
+        with patch.object(card, "csim") as csim:
+            self.assertEqual(
+                card.transmit(bytes.fromhex("0070000001"), 2),
+                bytes.fromhex("029000"),
+            )
+            self.assertEqual(
+                card.transmit(bytes.fromhex("0070800200"), 2),
+                bytes.fromhex("9000"),
+            )
+        csim.assert_not_called()
+
+    def test_preallocated_slot_rejects_unsupported_manage_channel_parameters(self):
+        card = ModemCard.__new__(ModemCard)
+        with patch.object(card, "csim") as csim:
+            self.assertEqual(
+                card.transmit(bytes.fromhex("0070010001"), 2),
+                bytes.fromhex("6A86"),
+            )
+        csim.assert_not_called()
+
     def test_logical_channel_metadata_exposes_capacity_roles_and_ids(self):
         value = logical_channel_metadata([1, 2, 3])
         self.assertEqual(value["channel_capacity"], 3)

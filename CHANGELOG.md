@@ -2,6 +2,14 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- eUICC clients can use the pre-allocated logical channel exposed by a modem VPCD slot.
+  `MANAGE CHANNEL` open and close commands are emulated by the bridge instead of being
+  forwarded to the modem to allocate or release a second channel.
+
 ## [1.3.10] - 2026-08-16
 
 ### Added
@@ -23,7 +31,6 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   directory listing, the configured modem backend, and the live reader list as pcscd exposes
   it. `install.sh diagnose` keeps its role for active probing (per-reader lpac reads) and
   now includes the bridge log files as well.
-
 ## [1.3.9] - 2026-08-15
 
 ### Fixed

@@ -224,6 +224,17 @@ class ModemCard:
         return rewritten, None
 
     def transmit(self, apdu, channel):
+        # VPCD exposes one pre-allocated modem logical channel per slot. A
+        # normal PC/SC lpac client still sends MANAGE CHANNEL OPEN/CLOSE
+        # during eUICC init/cleanup. Do not forward those commands to the
+        # modem (that would allocate/close a different channel); emulate
+        # the already-bound slot channel instead.
+        if len(apdu) >= 5 and apdu[1] == 0x70:
+            if apdu[2] == 0x00 and apdu[3] == 0x00:
+                return bytes((channel, 0x90, 0x00))
+            if apdu[2] == 0x80:
+                return bytes.fromhex("9000")
+            return bytes.fromhex("6A86")
         rewritten, local_response = self.on_channel(apdu, channel)
         if local_response is not None:
             return local_response

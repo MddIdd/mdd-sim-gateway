@@ -7,6 +7,7 @@ state remains isolated by the UICC logical channels.
 """
 
 import argparse
+import errno
 import json
 import os
 import re
@@ -77,6 +78,34 @@ def allocate_logical_channels(card, count):
             (len(channels), LOGICAL_CHANNEL_CAPACITY, exc)) from exc
 
 
+class ATSerial(serial.Serial if serial else object):
+    """A Serial that tolerates absent modem control lines.
+
+    pyserial raises DTR and RTS as part of open() and offers no way to skip that
+    (pyserial#729 — setting .dtr first only swaps which ioctl runs). On virtualised USB
+    passthrough the underlying control transfer can fail with EPROTO, and a port with no
+    modem-control support at all answers ENOTTY. An AT command channel uses neither line,
+    so either failure must not cost the port. Verified on the PVE guest that hit it:
+    with these overrides the same port opens and the bridge proceeds.
+    """
+
+    _TOLERATED = (errno.EPROTO, errno.ENOTTY)
+
+    def _update_dtr_state(self):
+        try:
+            super()._update_dtr_state()
+        except OSError as exc:
+            if exc.errno not in self._TOLERATED:
+                raise
+
+    def _update_rts_state(self):
+        try:
+            super()._update_rts_state()
+        except OSError as exc:
+            if exc.errno not in self._TOLERATED:
+                raise
+
+
 class ModemCard:
     def __init__(self, port, baud=115200, timeout=10.0, debug=False):
         if serial is None:
@@ -84,7 +113,7 @@ class ModemCard:
         self.lock = threading.RLock()
         self.debug = debug
         self.timeout = timeout
-        self.ser = serial.Serial(
+        self.ser = ATSerial(
             port, baud, timeout=0.25, write_timeout=2, exclusive=True
         )
         self._drain()

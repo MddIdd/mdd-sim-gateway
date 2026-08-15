@@ -105,5 +105,40 @@ class ModemBackendTests(unittest.TestCase):
         self.assertIn("timed out", lines[1])
 
 
+class ControlLineToleranceTests(unittest.TestCase):
+    """pyserial asserts DTR/RTS inside open() with no way to opt out (pyserial#729).
+    Virtualised USB passthrough can fail that control transfer with EPROTO, which used to
+    kill the whole bridge for two lines an AT channel never uses."""
+
+    def test_missing_control_lines_do_not_cost_the_port(self):
+        import errno
+        from host.vpcd_modem_bridge import ATSerial, serial as pyserial
+        if pyserial is None:
+            self.skipTest("pyserial unavailable")
+        probe = ATSerial.__new__(ATSerial)
+        for errnum in (errno.EPROTO, errno.ENOTTY):
+            with patch.object(pyserial.Serial, "_update_dtr_state",
+                              side_effect=OSError(errnum, "x")):
+                probe._update_dtr_state()
+            with patch.object(pyserial.Serial, "_update_rts_state",
+                              side_effect=OSError(errnum, "x")):
+                probe._update_rts_state()
+        # Ensure the destructor of the half-built probe cannot fail the test run.
+        probe.is_open = False
+
+    def test_unrelated_failures_still_raise(self):
+        import errno
+        from host.vpcd_modem_bridge import ATSerial, serial as pyserial
+        if pyserial is None:
+            self.skipTest("pyserial unavailable")
+        probe = ATSerial.__new__(ATSerial)
+        with patch.object(pyserial.Serial, "_update_dtr_state",
+                          side_effect=OSError(errno.EACCES, "denied")):
+            with self.assertRaises(OSError):
+                probe._update_dtr_state()
+        probe.is_open = False
+
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3,7 +3,11 @@ import React, { createContext, useContext, useEffect, useMemo, useState } from '
 const STORAGE_KEY = 'mdd-language'
 
 const zh = {
-  'update.error.proxy': '升级代理未配置或所选国家出口尚未就绪',
+  'update.error.proxy': '升级代理未配置、已从代理库移除或尚未就绪',
+  'Automatic tries a direct connection first, then the available proxy library entries. The route that passes the check is reused for the download.': '自动模式先尝试直连，失败后再依次尝试可用的代理库条目；检查成功的线路会继续用于下载。',
+  'Automatic — direct, then proxy library': '自动 · 先直连，后代理库', 'Direct only': '仅直连', 'Specified proxy': '指定代理',
+  'SOCKS5 entries connect directly. Subscription and node entries reuse a ready country exit assigned to that proxy.': 'SOCKS5 条目可直接连接；订阅和节点条目会复用已分配该代理且已就绪的国家出口。',
+  'Importing the verified control image…': '正在导入已校验的控制镜像…',
   Dashboard: '仪表盘', Softphone: '软电话', Messages: '短信', 'SIM Config': 'SIM 配置',
   Settings: '设置', Logs: '日志', Language: '语言', English: 'English', Chinese: '中文',
   Auto: '自动', Light: '浅色', Dark: '深色',

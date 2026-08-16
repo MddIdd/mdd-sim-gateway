@@ -36,16 +36,16 @@ class RequestApplyTests(unittest.TestCase):
         self.status_path = os.path.join(self.tmp.name, "orchestrator", "update-status.json")
 
     def test_request_is_published_with_version_and_repository(self):
-        with patch.object(update_check, "check", return_value=dict(_AVAILABLE)), \
-                patch.object(update_check, "_network_selection", return_value={
-                    "proxy_mode": "country", "proxy_url": "", "proxy_country": "us"}):
+        available = {**_AVAILABLE, "network": {
+            "proxy_mode": "library", "proxy_profile_id": "primary"}}
+        with patch.object(update_check, "check", return_value=available):
             result = update_check.request_apply()
         self.assertTrue(result["ok"])
         with open(self.request_path, encoding="utf-8") as handle:
             request = json.load(handle)
         self.assertEqual(request["version"], "9.9.9")
         self.assertEqual(request["repository"], update_check.repository())
-        self.assertEqual(request["network"]["proxy_country"], "us")
+        self.assertEqual(request["network"]["proxy_profile_id"], "primary")
         with open(self.status_path, encoding="utf-8") as handle:
             status = json.load(handle)
         self.assertEqual(status["state"], "running")
@@ -112,6 +112,33 @@ class UpdaterTests(unittest.TestCase):
         args = run.call_args.args[0]
         self.assertNotIn(proxy, args)
         self.assertEqual(run.call_args.kwargs["env"]["HTTPS_PROXY"], proxy)
+
+    def test_verified_control_image_is_loaded_and_identity_checked(self):
+        completed = lambda code=0, out="", err="": type(
+            "Completed", (), {"returncode": code, "stdout": out, "stderr": err})()
+        calls = [completed(0, "sha256:old\n"), completed(), completed(0, "Loaded image\n"),
+                 completed(0, "arm64|9.9.9\n")]
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(mdd_update.platform, "machine", return_value="aarch64"), \
+                patch.object(mdd_update.subprocess, "run", side_effect=calls) as run:
+            artifact = Path(tmp, "control.tar.gz")
+            artifact.write_bytes(b"image")
+            mdd_update.load_control_image(artifact, "9.9.9")
+        self.assertEqual(run.call_args_list[2].args[0][:3], ["docker", "load", "--input"])
+
+    def test_control_image_mismatch_restores_previous_tag(self):
+        completed = lambda code=0, out="", err="": type(
+            "Completed", (), {"returncode": code, "stdout": out, "stderr": err})()
+        calls = [completed(0, "sha256:old\n"), completed(), completed(),
+                 completed(0, "amd64|9.9.9\n"), completed()]
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(mdd_update.platform, "machine", return_value="aarch64"), \
+                patch.object(mdd_update.subprocess, "run", side_effect=calls) as run:
+            with self.assertRaises(mdd_update.UpdateError):
+                mdd_update.load_control_image(Path(tmp, "control.tar.gz"), "9.9.9")
+        self.assertEqual(run.call_args_list[-1].args[0], [
+            "docker", "tag", "mdd-sim-gateway/control:previous",
+            "mdd-sim-gateway/control"])
 
     def test_apply_tree_preserves_installation_state(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -199,15 +226,19 @@ class UpdaterTests(unittest.TestCase):
 
 
 class OrchestratorUpdateTests(unittest.TestCase):
-    def test_country_proxy_is_resolved_into_private_file_not_command_line(self):
+    def test_library_proxy_is_resolved_into_private_file_not_command_line(self):
         with tempfile.TemporaryDirectory() as tmp:
             data = Path(tmp)
             root = data / "orchestrator"
             root.mkdir()
             (root / "update-request.json").write_text(json.dumps({
                 "version": "9.9.9", "repository": "MddIdd/mdd-sim-gateway",
-                "network": {"proxy_mode": "country", "proxy_country": "us"},
+                "network": {"proxy_mode": "library", "proxy_profile_id": "primary"},
             }), encoding="utf-8")
+            (root / "desired.json").write_text(json.dumps({"proxy": {
+                "profiles": {"primary": {"name": "Primary", "type": "node"}},
+                "exits": {"us": {"enabled": True, "profile_id": "primary"}},
+            }}), encoding="utf-8")
             (root / "proxy-status.json").write_text(json.dumps({"exits": {"us": {
                 "ready": True, "proxy_host": mdd_orchestrator.COUNTRY_PROXY_LISTEN,
                 "proxy_port": 22538,
@@ -231,8 +262,10 @@ if __name__ == "__main__":
 
 
 class StarCountTests(unittest.TestCase):
-    """The count decorates a link. It must never turn a working update check into an error,
-    and an unreadable count must stay absent rather than being reported as zero."""
+    """The count decorates a link and keeps its last successful value across outages."""
+
+    def setUp(self):
+        update_check._stars_cache = None
 
     def test_a_failed_star_lookup_leaves_the_release_check_intact(self):
         session = SimpleNamespace(get=lambda *a, **k: (_ for _ in ()).throw(
@@ -258,6 +291,10 @@ class StarCountTests(unittest.TestCase):
         value = update_check._stargazers(SimpleNamespace(get=get), {}, "owner/repo")
         self.assertEqual(value, 13300)
         self.assertEqual(calls, ["https://api.github.com/repos/owner/repo"])
+
+        offline = SimpleNamespace(get=lambda *a, **k: (_ for _ in ()).throw(
+            requests.RequestException("offline")))
+        self.assertEqual(update_check._stargazers(offline, {}, "owner/repo"), 13300)
 
     def test_a_malformed_star_count_is_absent_rather_than_zero(self):
         class Response:

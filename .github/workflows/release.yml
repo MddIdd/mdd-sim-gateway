@@ -31,9 +31,20 @@ jobs:
           npm ci
           npm audit --audit-level=high
           npm run build
-      - name: Build control image and validate engine definition
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build ARM64 control image asset and validate engine definition
         run: |
-          docker build -f control/Dockerfile -t mdd-sim-gateway/control:${GITHUB_REF_NAME} .
+          image_tar="mdd-sim-gateway-control-${GITHUB_REF_NAME}-arm64.tar"
+          docker buildx build --platform linux/arm64 \
+            --build-arg "MDD_VERSION=$(cat VERSION)" \
+            -f control/Dockerfile \
+            -t mdd-sim-gateway/control \
+            -t "mdd-sim-gateway/control:${GITHUB_REF_NAME}" \
+            --output "type=docker,dest=${image_tar}" .
+          gzip -1 "$image_tar"
           # The clean target-ARM64 engine build is the manual gate documented in
           # docs/RELEASE_CHECKLIST.md; hosted runners cannot reliably reach sysmocom.
           docker build --check -f engine/Dockerfile engine
@@ -53,11 +64,14 @@ jobs:
             printf '%s\n' public > "$root/EDITION"
           fi
           tar -czf "$archive" -C "$staging" "mdd-sim-gateway-${GITHUB_REF_NAME}"
-          sha256sum "$archive" > SHA256SUMS
+          sha256sum "$archive" \
+            "mdd-sim-gateway-control-${GITHUB_REF_NAME}-arm64.tar.gz" > SHA256SUMS
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${GITHUB_REF_NAME}" \
-            "mdd-sim-gateway-${GITHUB_REF_NAME}.tar.gz" SHA256SUMS \
+            "mdd-sim-gateway-${GITHUB_REF_NAME}.tar.gz" \
+            "mdd-sim-gateway-control-${GITHUB_REF_NAME}-arm64.tar.gz" \
+            SHA256SUMS \
             --verify-tag --generate-notes --title "MDD Sim Gateway ${GITHUB_REF_NAME}"

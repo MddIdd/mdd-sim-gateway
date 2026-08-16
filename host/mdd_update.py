@@ -19,6 +19,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -132,21 +133,63 @@ def download(url: str, destination: Path, env: dict[str, str], proxy_url: str = 
 
 
 def verify_release_archive(archive: Path, sums: Path):
+    verify_release_file(archive, sums, "update archive")
+
+
+def verify_release_file(artifact: Path, sums: Path, description: str):
     expected = ""
     for line in sums.read_text(encoding="utf-8").splitlines():
         parts = line.strip().split(None, 1)
-        if len(parts) == 2 and parts[1].lstrip("*") == archive.name \
+        if len(parts) == 2 and parts[1].lstrip("*") == artifact.name \
                 and re.fullmatch(r"[0-9a-fA-F]{64}", parts[0]):
             expected = parts[0].lower()
             break
     if not expected:
-        raise UpdateError("release checksum file does not name the update archive")
+        raise UpdateError(f"release checksum file does not name the {description}")
     digest = hashlib.sha256()
-    with open(archive, "rb") as handle:
+    with open(artifact, "rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     if digest.hexdigest() != expected:
-        raise UpdateError("release archive checksum mismatch")
+        raise UpdateError(f"release {description} checksum mismatch")
+
+
+def installed_mode(data: Path) -> str:
+    try:
+        mode = (data / "install-mode").read_text(encoding="utf-8").strip().lower()
+    except OSError:
+        mode = ""
+    return mode if mode in {"local", "docker"} else "local"
+
+
+def load_control_image(artifact: Path, version: str):
+    """Load a verified image archive without changing or restarting the Docker daemon."""
+    image = "mdd-sim-gateway/control"
+    previous = f"{image}:previous"
+    inspect = subprocess.run(
+        ["docker", "image", "inspect", image, "--format", "{{.Id}}"],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    had_previous = inspect.returncode == 0 and bool(inspect.stdout.strip())
+    if had_previous:
+        tagged = subprocess.run(["docker", "tag", image, previous],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        if tagged.returncode:
+            raise UpdateError(f"could not preserve the current control image: {tagged.stderr.strip()}")
+    loaded = subprocess.run(["docker", "load", "--input", str(artifact)],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if loaded.returncode:
+        raise UpdateError(f"could not load Release control image: {loaded.stderr.strip()}")
+    expected_arch = "arm64" if platform.machine().lower() in {"aarch64", "arm64"} else "amd64"
+    checked = subprocess.run(
+        ["docker", "image", "inspect", image, "--format",
+         '{{.Architecture}}|{{index .Config.Labels "org.opencontainers.image.version"}}'],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    actual = checked.stdout.strip() if checked.returncode == 0 else ""
+    if actual != f"{expected_arch}|{version}":
+        if had_previous:
+            subprocess.run(["docker", "tag", previous, image], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+        raise UpdateError(f"Release control image identity mismatch: {actual or 'unreadable'}")
 
 
 def extract(archive: Path, destination: Path) -> Path:
@@ -232,7 +275,9 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
     env = network_environment(proxy_url)
     staging = Path(tempfile.mkdtemp(prefix="mdd-update.", dir=str(data / "update")))
     try:
+        mode = installed_mode(data)
         archive_name = f"mdd-sim-gateway-v{version}.tar.gz"
+        control_name = f"mdd-sim-gateway-control-v{version}-arm64.tar.gz"
         base = f"https://github.com/{repo_name}/releases/download/v{version}"
         url = f"{base}/{archive_name}"
         status.publish("running", "downloading", url=url)
@@ -254,6 +299,15 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
         if dist_version != version or not (release_dist / "index.html").is_file():
             raise UpdateError("release archive has no matching prebuilt WebUI")
 
+        if mode == "docker":
+            if shutil.disk_usage(data / "update").free < 1024 * 1024 * 1024:
+                raise UpdateError("not enough persistent disk space to import the control image")
+            status.publish("running", "control_image")
+            control_archive = staging / control_name
+            download(f"{base}/{control_name}", control_archive, env, proxy_url)
+            verify_release_file(control_archive, sums, "ARM64 control image")
+            load_control_image(control_archive, version)
+
         status.publish("running", "backup")
         try:
             current = (repo / "VERSION").read_text(encoding="utf-8").strip()
@@ -270,6 +324,8 @@ def perform(repo: Path, data: Path, version: str, repo_name: str, status: Status
         log_path = data / "update" / "reload.log"
         with open(log_path, "w", encoding="utf-8") as log:
             env["MDD_REUSE_WEBUI"] = "1"
+            if mode == "docker":
+                env["MDD_REUSE_CONTROL_IMAGE"] = "1"
             result = subprocess.run(["sh", str(repo / "install.sh"), "reload", "--no-engines"],
                                     cwd=str(repo), env=env, stdout=log,
                                     stderr=subprocess.STDOUT)

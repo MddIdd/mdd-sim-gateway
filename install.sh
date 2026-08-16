@@ -37,6 +37,7 @@
 #   MDD_BIND            control bind addr                          (default 0.0.0.0)
 #   MDD_ENGINE_BASE_IMAGE optional trusted local engine image for an offline overlay migration
 #   MDD_REUSE_WEBUI     set to 1 to reuse a prebuilt, reviewed webui/dist in an offline install
+#   MDD_REUSE_CONTROL_IMAGE set to 1 to reuse a checksummed Release control image (docker mode)
 #   PCSC_VERSION           pinned pcsc-lite version                   (default 2.3.3)
 #   LPAC_SRC               optional path to lpac source (for build-lpac)
 #   CMAKE_FETCH_VER        Kitware cmake version if system is too old (default 3.31.12)
@@ -651,9 +652,28 @@ engine_overlay_build() {
 }
 
 build_control_image() {
+  if [ "${MDD_REUSE_CONTROL_IMAGE:-0}" = 1 ]; then
+    docker image inspect "$CONTROL_IMAGE" >/dev/null 2>&1 || \
+      die "MDD_REUSE_CONTROL_IMAGE=1 but $CONTROL_IMAGE is not loaded"
+    expected=$(tr -d '\n' < "$REPO_DIR/VERSION")
+    actual=$(docker image inspect "$CONTROL_IMAGE" \
+      --format '{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null || true)
+    [ "$actual" = "$expected" ] || \
+      die "loaded control image version ${actual:-unknown} does not match $expected"
+    arch=$(docker image inspect "$CONTROL_IMAGE" --format '{{.Architecture}}' 2>/dev/null || true)
+    host_arch=$(uname -m)
+    case "$host_arch:$arch" in
+      aarch64:arm64|arm64:arm64|x86_64:amd64) ;;
+      *) die "loaded control image architecture ${arch:-unknown} does not match host $host_arch" ;;
+    esac
+    info "reusing verified Release control image $CONTROL_IMAGE ($actual, $arch)"
+    return
+  fi
   info "building control image ($CONTROL_IMAGE) from source (WebUI + FastAPI)…"
   # shellcheck disable=SC2086
-  docker build $NOCACHE_FLAG --build-arg "PCSC_VERSION=$PCSC_VERSION" -t "$CONTROL_IMAGE" -f "$REPO_DIR/control/Dockerfile" "$REPO_DIR"
+  docker build $NOCACHE_FLAG --build-arg "PCSC_VERSION=$PCSC_VERSION" \
+    --build-arg "MDD_VERSION=$(tr -d '\n' < "$REPO_DIR/VERSION")" \
+    -t "$CONTROL_IMAGE" -f "$REPO_DIR/control/Dockerfile" "$REPO_DIR"
   info "control image built"
 }
 

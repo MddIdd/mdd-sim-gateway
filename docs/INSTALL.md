@@ -30,9 +30,9 @@ sudo ./install.sh install --mode docker   # 控制面也运行在 Docker
 
 ## 更新
 
-发现新版本时，左下角版本号会出现红点。点击后确认“立即升级”即可一键更新：控制面把请求写入编排器目录，主机上的 `mdd-sim-gateway-orchestrator` 以独立的临时 systemd 单元（`mdd-sim-gateway-update`）运行 `host/mdd_update.py` —— 下载对应 `vX.Y.Z` Release 资产、校验 SHA-256 和版本，备份当前代码到数据目录 `backups/` 后覆盖安装，最后复用资产内已构建的 WebUI 并执行 `install.sh reload --no-engines` 重启控制服务。升级绝不会自动发生：只有管理员在界面中确认后才开始，且 `data/`、`.env`、`.git`、虚拟环境和已有 Engine 镜像、容器全部保留。Engine 变更仍按本项目的构建机部署流程单独发布。日志见 `journalctl -u mdd-sim-gateway-update` 与数据目录下 `update/reload.log`。
+发现新版本时，左下角版本号会出现红点。点击后确认“立即升级”即可一键更新：控制面把请求写入编排器目录，主机上的 `mdd-sim-gateway-orchestrator` 以独立的临时 systemd 单元（`mdd-sim-gateway-update`）运行 `host/mdd_update.py` —— 下载对应 `vX.Y.Z` Release 资产、校验 SHA-256 和版本，备份当前代码到数据目录 `backups/` 后覆盖安装，最后复用资产内已构建的 WebUI 并执行 `install.sh reload --no-engines` 重启控制服务。Docker 控制面模式还会用同一条下载线路取得已校验的 ARM64 控制镜像资产并执行 `docker load`，不需要 Docker daemon 访问镜像仓库。升级绝不会自动发生：只有管理员在界面中确认后才开始，且 `data/`、`.env`、`.git`、虚拟环境和已有 Engine 镜像、容器全部保留。Engine 变更仍按本项目的构建机部署流程单独发布。日志见 `journalctl -u mdd-sim-gateway-update` 与数据目录下 `update/reload.log`。
 
-“系统设置 → 备份与更新”可为版本检查和升级下载选择联网方式：默认直连、手动 HTTP/HTTPS/SOCKS5 代理，或复用已就绪的国家出口。选择 SOCKS5 时建议使用 `socks5h://`，使 DNS 解析也通过代理。手动代理凭据仅保存在主机权限为 `0600` 的配置/临时文件中，不写入 systemd 命令行或升级状态。一键升级会把同一代理环境传给 `install.sh reload`；Docker daemon 自身的镜像代理仍属于独立的主机配置。
+“系统设置 → 备份与更新”默认使用“自动”联网：先直连 GitHub，连接失败、超时或被限流时，再按代理库顺序尝试可用条目；检查成功的线路会继续用于更新下载。也可选择“仅直连”或指定一个代理库条目。SOCKS5 条目可直接使用；订阅、具体节点和导入的 outbound 需已分配给一个已启用且就绪的国家出口。代理凭据只保存一份，并只通过主机权限为 `0600` 的配置/临时文件传递，不写入 systemd 命令行或升级状态。
 正式 Release 归档包内含 CI 预构建的 `webui/dist`，一键升级校验整个归档后直接复用，因此不需要在树莓派上下载 Node 镜像或编译前端。GitHub `main` 与其 Release 是唯一支持的更新通道。
 
 也可以随时在主机上手动更新：备份并用受信任来源更新源码后执行：

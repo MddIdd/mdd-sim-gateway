@@ -5,6 +5,9 @@
 - `VERSION`、WebUI `package.json` 与标签保持一致（例如 `1.0.0` / `v1.0.0`）。
 - `CHANGELOG.md` 将目标版本从 `Unreleased` 改为发布日期。
 - CI 的 Python 测试、WebUI 构建、生产依赖审计和脚本语法检查全部通过。
+- Release 必须包含 `mdd-sim-gateway-control-vX.Y.Z-arm64.tar.gz`，且
+  `SHA256SUMS` 同时覆盖源码包和控制镜像。发布前用 `docker load` 验证资产为
+  `linux/arm64`、版本 label 与 `VERSION` 一致；不得只发源码包。
 - 依赖版本、源码提交与二进制 SHA-256 已复核；不得临时改成浮动分支或 `latest`。
 
 ## ARM64 实机验收
@@ -28,4 +31,5 @@
 - `data/`、`.env`、证书、pcap、数据库、构建目录和本机日志未被 Git 跟踪。
 - 截图仅使用空状态、虚构数据，或已经逐项遮挡设备、线路、运营商、国家出口、号码与消息内容并经人工复核的真实页面。
 - 先创建私有仓库完成内部验收；最终确认后再决定是否公开。
-- 推送已签名的 `vX.Y.Z` 标签；Release 工作流会生成源码包与 `SHA256SUMS`。
+- 推送已签名的 `vX.Y.Z` 标签；Release 工作流会生成源码包、ARM64 控制镜像与
+  同时覆盖两者的 `SHA256SUMS`。

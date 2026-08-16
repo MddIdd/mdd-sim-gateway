@@ -1,5 +1,14 @@
 @import "tailwindcss";
 
+/* Clash Verge Rev bundles this font instead of assuming the host OS can render flag
+   sequences. Restrict it to regional indicators so normal text and digits keep the UI font. */
+@font-face {
+  font-family:"twemoji mozilla";
+  src:url("./assets/fonts/Twemoji.Mozilla.ttf") format("truetype");
+  font-display:swap;
+  unicode-range:U+1F1E6-1F1FF;
+}
+
 /* ============ Theme palettes ============ */
 :root {
   /* light (default + fallback when system preference is unavailable) */
@@ -275,6 +284,9 @@ label:has(>.u-toggle) { display:flex; align-items:center; gap:10px; min-height:3
 .u-proxy-type { display:grid; grid-template-columns:34px minmax(0,1fr); grid-template-rows:auto 1fr; gap:3px 9px; min-height:112px; padding:13px; border:1px solid var(--border); border-radius:12px; background:var(--panel); color:var(--text); text-align:left; cursor:pointer; }
 .u-proxy-type:hover { border-color:var(--border-strong); background:var(--hover); }.u-proxy-type.active { border-color:var(--primary); background:color-mix(in srgb,var(--primary) 7%,var(--panel)); box-shadow:0 0 0 2px color-mix(in srgb,var(--primary) 12%,transparent); }
 .u-proxy-type-icon { grid-row:1 / 3; display:grid; place-items:center; width:32px; height:32px; border-radius:9px; color:var(--primary); background:color-mix(in srgb,var(--primary) 10%,var(--panel)); font-size:18px; }
+.u-proxy-type-icon,.u-proxy-node-text,.u-proxy-node-select,.u-proxy-row select,.u-routing-policy select { font-family:"twemoji mozilla","Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",ui-sans-serif,system-ui,sans-serif; font-variant-emoji:emoji; }
+.u-proxy-node-select,.u-proxy-node-select option { font-weight:400; }
+.u-proxy-node-flag { display:inline-block; margin:0 .04em; font-family:"twemoji mozilla","Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif!important; font-size:1em; font-style:normal; font-weight:400!important; font-variant-emoji:emoji; line-height:1; vertical-align:-.08em; }
 .u-proxy-type b { align-self:center; font-size:13px; }.u-proxy-type small { color:var(--text-dim); font-size:11px; line-height:1.45; }
 .u-proxy-modal-form { padding:16px; border:1px solid var(--border); border-radius:12px; background:var(--hover); }
 .u-proxy-modal-form>label:first-child { margin-top:0; }.u-proxy-modal-form label span { color:var(--text-mute); font-weight:500; }

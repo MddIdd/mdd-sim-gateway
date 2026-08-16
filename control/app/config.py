@@ -137,12 +137,11 @@ DEFAULTS = {
             "notification_history_days": 30,
             "support_bundle_log_lines": 500,
         },
-        # Software update traffic is direct by default. Operators on filtered networks can
-        # opt into a manual proxy or reuse one of the host orchestrator's country exits.
+        # Software update traffic tries direct first, then definitions from the proxy library.
+        # Keeping only the library id avoids a second credential store for the updater.
         "updates": {
-            "proxy_mode": "direct",
-            "proxy_url": "",
-            "proxy_country": "",
+            "proxy_mode": "auto",
+            "proxy_profile_id": "",
         },
         # Local lpac (eSIM LPA) integration. Binary is built by `./install.sh build-lpac` into
         # $MDD_DATA/lpac/ (STANDALONE layout). Empty lpac_bin → default path below.
@@ -345,6 +344,36 @@ def load() -> dict:
         proxy["schema_version"] = 2
         proxy["profiles"] = profiles
         proxy["exits"] = exits
+        # Import legacy updater proxy definitions into the shared library. Old proxy-only
+        # policies become Auto so upgraded systems also get direct-first fallback; a library
+        # choice made by a current client remains pinned.
+        updates = out["settings"].get("updates") or {}
+        update_mode = str(updates.get("proxy_mode") or "auto").lower()
+        update_profile_id = ""
+        if update_mode == "country":
+            country = str(updates.get("proxy_country") or "").strip().lower()
+            candidate = exits.get(country) if isinstance(exits.get(country), dict) else {}
+            if candidate.get("enabled") and candidate.get("profile_id") in profiles:
+                update_profile_id = str(candidate["profile_id"])
+        elif update_mode == "manual":
+            raw = str(updates.get("proxy_url") or "").strip()
+            parsed = urllib.parse.urlsplit(raw)
+            if parsed.scheme.lower() in {"socks5", "socks5h"} and parsed.hostname:
+                update_profile_id = "legacy-update-proxy"
+                profiles.setdefault(update_profile_id, {
+                    "name": "Software update proxy", "type": "socks5",
+                    "server": parsed.hostname, "port": parsed.port or 1080,
+                    "username": urllib.parse.unquote(parsed.username or ""),
+                    "password": urllib.parse.unquote(parsed.password or ""),
+                })
+        elif update_mode == "library" and str(updates.get("proxy_profile_id") or "") in profiles:
+            update_profile_id = str(updates["proxy_profile_id"])
+        normalized_update_mode = "library" if update_mode == "library" and update_profile_id \
+            else (update_mode if update_mode in {"auto", "direct"} else "auto")
+        out["settings"]["updates"] = {
+            "proxy_mode": normalized_update_mode,
+            "proxy_profile_id": update_profile_id if normalized_update_mode == "library" else "",
+        }
         # Asterisk debug includes complete SIP messages and IMS identities.  Older manual
         # provisioning forms accidentally enabled it by default, so normalize every loaded
         # line as well as new writes; this makes an upgrade safe before the operator next edits

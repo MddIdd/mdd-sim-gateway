@@ -2,6 +2,26 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [Unreleased]
+
+## [1.3.11] - 2026-08-16
+
+### Changed
+
+- Software updates now default to direct-first Auto networking and fall back through the
+  shared proxy library, reusing the successful check route for downloads. Docker-mode updates
+  import a checksummed ARM64 control-image Release asset through that route instead of asking
+  the Docker daemon to pull it.
+
+### Fixed
+
+- Proxy node country flags now use the bundled Twemoji Mozilla font across overview, detail,
+  status and selection surfaces, so regional-indicator sequences remain flags on platforms
+  that otherwise render them as country-code letters. Proxy source types also use recognizable
+  Emoji icons.
+- The sidebar Star count keeps a stable slot to the right of its icon and retains the last
+  successful value when a later GitHub metadata request fails.
+
 ## [1.3.10] - 2026-08-16
 
 ### Added

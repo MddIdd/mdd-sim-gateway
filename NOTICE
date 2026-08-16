@@ -20,6 +20,10 @@ This product includes the Android Open Source Project Carrier ID table, licensed
 the Apache License 2.0, for offline carrier identification. Android is a trademark of
 Google LLC; this project is not endorsed by or affiliated with Google.
 
+This product includes the unmodified Twemoji Mozilla color font from Mozilla's
+twemoji-colr project (Apache-2.0). Its Twemoji visual designs are Copyright Twitter, Inc.
+and other contributors and are licensed under CC-BY-4.0.
+
 MDD Sim Gateway is GPL-3.0-only except for the build-time patches listed under "Files that
 are not GPL-3.0-only" in THIRD_PARTY_LICENSES.md, which are derivative works of Asterisk
 (GPL-2.0-only) and CCID (LGPL-2.1-or-later) and remain under those licenses.

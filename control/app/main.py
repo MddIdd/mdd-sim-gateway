@@ -3313,6 +3313,11 @@ def api_put_settings(body: dict):
             body["updates"] = update_check.validate_network_settings(body.get("updates"))
         except update_check.UpdateNetworkError as exc:
             raise HTTPException(400, str(exc)) from exc
+        if body["updates"]["proxy_mode"] == "library":
+            effective_proxy = (body.get("proxy") if isinstance(body.get("proxy"), dict)
+                               else cfg.get_settings().get("proxy")) or {}
+            if body["updates"]["proxy_profile_id"] not in (effective_proxy.get("profiles") or {}):
+                raise HTTPException(400, "update proxy references an unknown proxy library entry")
     hardware = body.get("hardware")
     if hardware is not None:
         if not isinstance(hardware, dict):

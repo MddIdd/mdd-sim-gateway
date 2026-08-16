@@ -575,26 +575,43 @@ class Orchestrator:
             return
         mode = str(network.get("proxy_mode") or "direct").lower()
         proxy_url = ""
-        if mode == "manual":
-            proxy_url = str(network.get("proxy_url") or "").strip()
-            parsed = urllib.parse.urlsplit(proxy_url)
-            if parsed.scheme.lower() not in {"http", "https", "socks5", "socks5h"} \
-                    or not parsed.hostname or any(ch in proxy_url for ch in "\r\n"):
-                fail("invalid update proxy configuration")
+        if mode == "library":
+            profile_id = str(network.get("proxy_profile_id") or "").strip()
+            desired = read_json(self.desired_path)
+            proxy = desired.get("proxy") or {}
+            profile = (proxy.get("profiles") or {}).get(profile_id) or {}
+            if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", profile_id) or not profile:
+                fail("selected update proxy is not in the proxy library")
                 return
-        elif mode == "country":
-            country = str(network.get("proxy_country") or "").strip().lower()
-            state = (read_json(self.status_path).get("exits") or {}).get(country) or {}
-            try:
-                proxy_port = int(state.get("proxy_port") or 0)
-            except (TypeError, ValueError):
-                proxy_port = 0
-            proxy_host = str(state.get("proxy_host") or "").strip()
-            if not re.fullmatch(r"[a-z]{2}", country) or not state.get("ready") \
-                    or proxy_host != COUNTRY_PROXY_LISTEN or not 1 <= proxy_port <= 65535:
-                fail("selected update country exit is not ready")
-                return
-            proxy_url = f"socks5h://{proxy_host}:{proxy_port}"
+            if profile.get("type") == "socks5":
+                host = str(profile.get("server") or "").strip()
+                try:
+                    port = int(profile.get("port") or 1080)
+                except (TypeError, ValueError):
+                    port = 0
+                if not host or not 1 <= port <= 65535 or any(ch in host for ch in "\r\n/@"):
+                    fail("selected SOCKS5 update proxy is invalid")
+                    return
+                username = urllib.parse.quote(str(profile.get("username") or ""), safe="")
+                password = urllib.parse.quote(str(profile.get("password") or ""), safe="")
+                auth = f"{username}:{password}@" if username or password else ""
+                proxy_url = f"socks5h://{auth}{host}:{port}"
+            else:
+                exits = proxy.get("exits") or {}
+                live = read_json(self.status_path).get("exits") or {}
+                state = next((live.get(country) or {} for country, exit_cfg in exits.items()
+                              if isinstance(exit_cfg, dict) and exit_cfg.get("enabled")
+                              and exit_cfg.get("profile_id") == profile_id
+                              and (live.get(country) or {}).get("ready")), {})
+                try:
+                    proxy_port = int(state.get("proxy_port") or 0)
+                except (TypeError, ValueError):
+                    proxy_port = 0
+                proxy_host = str(state.get("proxy_host") or "").strip()
+                if proxy_host != COUNTRY_PROXY_LISTEN or not 1 <= proxy_port <= 65535:
+                    fail("selected update proxy has no ready country exit")
+                    return
+                proxy_url = f"socks5h://{proxy_host}:{proxy_port}"
         elif mode != "direct":
             fail("invalid update proxy mode")
             return

@@ -22,8 +22,14 @@ This list covers the material dependencies intentionally used by MDD Sim Gateway
 | jsQR | QR decoding for eSIM activation codes | Apache-2.0 | https://github.com/cozmo/jsQR |
 | React | Web interface | MIT | https://github.com/facebook/react |
 | Tailwind CSS | Web interface styling | MIT | https://github.com/tailwindlabs/tailwindcss |
+| Twemoji Mozilla | Bundled color Emoji font used for country flags in proxy node names | Apache-2.0 (font tooling/code); Twemoji artwork CC-BY-4.0 | https://github.com/mozilla/twemoji-colr |
 | FastAPI | Control API framework | MIT | https://github.com/fastapi/fastapi |
 | Android Open Source Project Carrier ID table | Offline MNO/MVNO identification data | Apache-2.0 | https://android.googlesource.com/platform/packages/providers/TelephonyProvider/ |
+
+Twemoji Mozilla is built by Mozilla from Twemoji artwork. The font project is Copyright
+2016-2018 Mozilla Foundation and licensed under Apache-2.0; the embedded visual designs are
+Copyright Twitter, Inc. and other contributors and licensed under CC-BY-4.0. The bundled font is
+unmodified and sourced from the same upstream font used by Clash Verge Rev.
 
 ## Retained upstream notice: pagecat/vowifi_gateway (MIT)
 

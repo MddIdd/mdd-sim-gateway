@@ -20,6 +20,7 @@ RUN npm run build
 
 # ---------- stage 2: python runtime ----------
 FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+ARG MDD_VERSION=dev
 # pcsc-lite client library, built from source and pinned to the SAME version as the host pcscd
 # and the engine image (PCSC_VERSION). pyscard loads libpcsclite.so.1 at runtime to detect the
 # reader via the mounted host /run/pcscd socket — matching versions avoids protocol mismatch.
@@ -57,5 +58,6 @@ ENV MDD_WEBUI=/app/webui/dist \
 
 EXPOSE 8443
 LABEL io.mdd-sim-gateway.managed="true" \
+      org.opencontainers.image.version="${MDD_VERSION}" \
       org.opencontainers.image.title="MDD Sim Gateway control plane"
 ENTRYPOINT ["python", "run.py"]

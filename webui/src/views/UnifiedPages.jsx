@@ -33,6 +33,23 @@ function exitNodeLabel(device, t) {
   return t('{node} (not your pinned {pinned})', { node: exit.node, pinned: exit.pinned_node })
 }
 
+const REGIONAL_FLAG_PAIR = /([\u{1F1E6}-\u{1F1FF}]{2})/gu
+
+function isRegionalFlag(value) {
+  const points = [...String(value || '')]
+  if (points.length !== 2) return false
+  const codes = points.map(point => point.codePointAt(0))
+  return codes.every(code => code >= 0x1F1E6 && code <= 0x1F1FF)
+}
+
+function ProxyNodeName({ text }) {
+  return <>{String(text || '').split(REGIONAL_FLAG_PAIR).map((part, index) => {
+    return isRegionalFlag(part)
+      ? <span key={`flag-${index}`} className="u-proxy-node-flag">{part}</span>
+      : <React.Fragment key={`text-${index}`}>{part}</React.Fragment>
+  })}</>
+}
+
 // Stating the mismatch without the cause reads as an unexplained override, so give the event
 // that actually moved the exit: when it happened, and what the line was failing with.
 function exitChangeReason(exit, t, language) {
@@ -246,7 +263,7 @@ export function UnifiedOverview({ devices, discovering, refreshDevices, setView,
       <div className="u-device-grid">{devices.map((d, i) => <div className="card u-device-card" key={d.id}>
         <div className="u-card-head"><div><h2>{deviceTitle(d, i)}</h2><p>{deviceIdentityLine(d, t)}</p></div><Badge state={d.present === false ? 'error' : 'on'}>{d.present === false ? t('Offline') : t('Detected')}</Badge></div>
         <div className="u-card-body">{supportsCellular(d) && <CapabilitySwitch device={d} kind="cellular" compact onChanged={refreshDevices} showToast={showToast} />}<CapabilitySwitch device={d} kind="vowifi" compact onChanged={refreshDevices} showToast={showToast} /><LineActivity device={d} compact />{capability(d, 'vowifi').desired && <VowifiHistory instanceId={d.instance_id} subscribe={subscribe} compact />}
-          <div className="u-details"><div className="u-detail"><span>{t('Carrier')}</span><b>{carrierLabel(d, t)}</b></div><div className="u-detail"><span>{t('Country exit')}</span><b>{exitNodeLabel(d, t) || d.proxy_node || t('Not connected')}</b></div></div>
+          <div className="u-details"><div className="u-detail"><span>{t('Carrier')}</span><b>{carrierLabel(d, t)}</b></div><div className="u-detail"><span>{t('Country exit')}</span><b className="u-proxy-node-text"><ProxyNodeName text={exitNodeLabel(d, t) || d.proxy_node || t('Not connected')} /></b></div></div>
           {d.instance_id && <AllowancePanel instanceId={String(d.instance_id)} showToast={showToast} />}
         </div><div className="u-card-foot"><button className="btn btn-ghost" onClick={() => { if (d.instance_id) setSelected(String(d.instance_id)); setView('calls') }}>{t('Call')}</button><button className="btn btn-ghost" onClick={() => { if (d.instance_id) setSelected(String(d.instance_id)); setView('messages') }}>{t('Message')}</button><button className="btn btn-primary" onClick={() => { setSelectedDeviceId(d.id); setView('devices') }}>{t('Details')}</button></div>
       </div>)}</div>}
@@ -266,7 +283,7 @@ export function DevicesPage({ devices, discovering, refreshDevices, instances, c
       {tab==='status' && <div className="card u-panel">{supportsCellular(d) ? <><CapabilitySwitch device={d} kind="cellular" onChanged={refreshDevices} showToast={showToast}/><CapabilitySwitch device={d} kind="flight" onChanged={refreshDevices} showToast={showToast}/></> : <p className="u-note">{t('This is a smart-card reader. It provides SIM access for VoWiFi and has no 4G radio.')}</p>}<CapabilitySwitch device={d} kind="vowifi" onChanged={refreshDevices} showToast={showToast}/><LineActivity device={d}/><p className="u-note">{t('Cellular data, flight mode and VoWiFi are independent controls. Flight mode disables modem RF; the 4G switch only connects or disconnects mobile data.')}</p><p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
       {tab==='sim' && <div className="card u-panel"><SimConfig instances={instances} selected={selected} refresh={refresh} cards={cards} setSelected={setSelected} targetDevice={d}/></div>}
       {tab==='cellular' && <div className="card u-panel"><h3>{t('4G network')}</h3>{d.cellular ? <div className="u-details cols"><div className="u-detail"><span>{t('Registration')}</span><b>{d.cellular.registration || t('Not connected')}</b></div><div className="u-detail"><span>{t('Operator')}</span><b>{d.cellular.operator || t('Not connected')}</b></div><div className="u-detail"><span>APN</span><b>{d.cellular.apn || t('Automatic')}</b></div><div className="u-detail"><span>{t('IP address')}</span><b>{d.cellular.ip || t('Waiting')}</b></div><div className="u-detail"><span>{t('Signal')}</span><b>{d.cellular.signal == null ? t('Waiting') : `${d.cellular.signal}%`}</b></div><div className="u-detail"><span>{t('Traffic')}</span><b>↓ {formatBytes(d.cellular.rx_bytes)} · ↑ {formatBytes(d.cellular.tx_bytes)}</b></div><div className="u-detail"><span>{t('Data profile')}</span><b>{d.cellular.profile || t('Automatic')}</b></div><div className="u-detail"><span>{t('Network interface')}</span><b>{d.cellular.interface || t('Waiting')}</b></div></div>:<Empty title={t('Cellular data not connected')} detail={t('Turn on 4G to let the per-device ModemManager backend establish a data bearer.')} />}</div>}
-      {tab==='vowifi' && <div className="card u-panel"><h3>VoWiFi</h3><CountryExitControl device={d} refresh={refresh} showToast={showToast}/><LineActivity device={d}/><VowifiHistory instanceId={d.instance_id} subscribe={subscribe}/><div className="u-details cols"><div className="u-detail"><span>ePDG / IKE</span><b>{typeof d.vowifi?.epdg === 'object' ? (d.vowifi.epdg.ike_reason || (d.vowifi.epdg.pcscf ? t('Tunnel connected') : t('Waiting'))) : (d.vowifi?.epdg || d.status?.state || t('Not connected'))}</b></div><div className="u-detail"><span>IMS / SIP</span><b>{d.vowifi?.ims || d.status?.label || t('Not connected')}</b></div><div className="u-detail"><span>{t('Country exit')}</span><b>{exitNodeLabel(d, t)}</b></div><div className="u-detail"><span>{t('Rekey')}</span><b>{d.vowifi?.rekey_minutes ?? 30} {t('minutes')}</b></div></div>{!!d.egress?.pinned_node && d.egress.pinned_node !== d.egress.node && !!exitChangeReason(d.egress, t, language) && <p className="u-note">{exitChangeReason(d.egress, t, language)}</p>}<p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
+      {tab==='vowifi' && <div className="card u-panel"><h3>VoWiFi</h3><CountryExitControl device={d} refresh={refresh} showToast={showToast}/><LineActivity device={d}/><VowifiHistory instanceId={d.instance_id} subscribe={subscribe}/><div className="u-details cols"><div className="u-detail"><span>ePDG / IKE</span><b>{typeof d.vowifi?.epdg === 'object' ? (d.vowifi.epdg.ike_reason || (d.vowifi.epdg.pcscf ? t('Tunnel connected') : t('Waiting'))) : (d.vowifi?.epdg || d.status?.state || t('Not connected'))}</b></div><div className="u-detail"><span>IMS / SIP</span><b>{d.vowifi?.ims || d.status?.label || t('Not connected')}</b></div><div className="u-detail"><span>{t('Country exit')}</span><b className="u-proxy-node-text"><ProxyNodeName text={exitNodeLabel(d, t)} /></b></div><div className="u-detail"><span>{t('Rekey')}</span><b>{d.vowifi?.rekey_minutes ?? 30} {t('minutes')}</b></div></div>{!!d.egress?.pinned_node && d.egress.pinned_node !== d.egress.node && !!exitChangeReason(d.egress, t, language) && <p className="u-note u-proxy-node-text"><ProxyNodeName text={exitChangeReason(d.egress, t, language)} /></p>}<p className="u-note">{t('Software support means the technical path is implemented. Actual availability still depends on the SIM plan, carrier, region, modem firmware and device-identity policy.')}</p></div>}
       {tab==='hardware' && <HardwarePanel device={d} refreshDevices={refreshDevices} showToast={showToast}/>}
     </section></div>
 }
@@ -386,7 +403,10 @@ export function EgressPage({ showToast }) {
   const removeProfile = id => {
     const countries = Object.entries(proxy.exits || {}).filter(([, ex]) => ex.profile_id === id).map(([country]) => country.toUpperCase())
     if (countries.length) { showToast(t('This proxy is used by: {countries}', { countries: countries.join(', ') })); return }
-    const next = { ...profiles }; delete next[id]; patch({ profiles: next })
+    const next = { ...profiles }; delete next[id]
+    setS(current => ({ ...current, proxy: { ...current.proxy, profiles: next },
+      updates: current.updates?.proxy_profile_id === id
+        ? { proxy_mode: 'auto', proxy_profile_id: '' } : current.updates }))
   }
   const testProfile = async id => {
     setProfileTests(x => ({ ...x, [id]: { busy: true } }))
@@ -441,17 +461,17 @@ export function EgressPage({ showToast }) {
           ? <><label>{t('Current node')}</label>
             {/* The pinned name is kept in the list even when the live status is missing, so
                 opening this page before the orchestrator answers cannot silently drop it. */}
-            <select value={ex.pinned_node || ''} onChange={e => patchExit(country, { pinned_node: e.target.value })}>
+            <select className="u-proxy-node-select" value={ex.pinned_node || ''} onChange={e => patchExit(country, { pinned_node: e.target.value })}>
               <option value="">{st?.node ? t('Automatic — changes only when a line fails ({node})', { node: st.node }) : t('Automatic')}</option>
               {[...new Set([...(st?.candidates || []), ...(ex.pinned_node ? [ex.pinned_node] : [])])].map(name => <option key={name} value={name}>{name}</option>)}
             </select>
-            {st?.pinned_missing && <p className="u-error">{t('Pinned node “{node}” is no longer offered by the subscription; automatic selection is in use.', { node: ex.pinned_node })}</p>}
+            {st?.pinned_missing && <p className="u-error u-proxy-node-text"><ProxyNodeName text={t('Pinned node “{node}” is no longer offered by the subscription; automatic selection is in use.', { node: ex.pinned_node })} /></p>}
             {/* Without this the picker shows the chosen node while the exit quietly runs on
                 another one, which reads as "my setting did nothing". */}
             {!!ex.pinned_node && !!st?.node && st.node !== ex.pinned_node && !st?.pinned_missing
               && ((ex.pin_mode || 'lock') === 'lock'
-                ? <p className="u-error">{t('Not in use: the exit is running on “{node}”. Check whether the locked node is reachable.', { node: st.node })}</p>
-                : <p className="u-note">{t('The preferred node is not in use; the exit is running on “{node}”. It returns to your preferred node the next time the exit has to change.', { node: st.node })}{' '}{exitChangeReason(st, t, language)}</p>)}
+                ? <p className="u-error u-proxy-node-text"><ProxyNodeName text={t('Not in use: the exit is running on “{node}”. Check whether the locked node is reachable.', { node: st.node })} /></p>
+                : <p className="u-note u-proxy-node-text"><ProxyNodeName text={`${t('The preferred node is not in use; the exit is running on “{node}”. It returns to your preferred node the next time the exit has to change.', { node: st.node })} ${exitChangeReason(st, t, language)}`} /></p>)}
             {!!ex.pinned_node && <><label>{t('If that node stops working')}</label>
               <select value={ex.pin_mode || 'lock'} onChange={e => patchExit(country, { pin_mode: e.target.value })}>
                 <option value="lock">{t('Keep using it — never switch automatically')}</option>
@@ -460,7 +480,7 @@ export function EgressPage({ showToast }) {
               <p className="u-note">{(ex.pin_mode || 'lock') === 'lock'
                 ? t('Locked: the line stays down until you change this. Use it for a controlled comparison.')
                 : t('Preferred: a failing line moves to another node, and returns to this one the next time the exit has to change anyway.')}</p></>}</>
-          : <div className="u-detail"><span>{t('Current node')}</span><b>{st?.node || '—'}</b></div>}
+          : <div className="u-detail"><span>{t('Current node')}</span><b className="u-proxy-node-text"><ProxyNodeName text={st?.node || '—'} /></b></div>}
         {st?.error && <p className="u-error">{st.error}</p>}
         <div className="u-inline"><button className="btn btn-ghost" onClick={async () => { try { await api.testEgress(country); await loadLive(); showToast(t('Test succeeded')) } catch (e) { showToast(e.message) } }}>{t('Test UDP')}</button><button className="btn btn-ghost" onClick={() => removeExit(country)}>{t('Remove')}</button></div>
       </div>
@@ -471,9 +491,9 @@ export function EgressPage({ showToast }) {
         <div className="u-proxy-modal-head"><div><h2 id="add-proxy-title">{t('Add proxy')}</h2><p>{t('Choose a source type. You can change the details before adding it to the library.')}</p></div><button className="u-modal-close" type="button" onClick={() => setProfileDraft(null)} aria-label={t('Cancel')}>×</button></div>
         <div className="u-proxy-type-grid">
           {[
-            ['subscription', t('Subscription link'), t('Paste a Clash subscription URL. The gateway fetches it automatically, extracts compatible nodes, and refreshes it on schedule.'), '↻'],
-            ['node', t('Individual node'), t('Paste one share link. Supports VLESS Reality/XHTTP, Trojan, Hysteria2, Shadowsocks and VMess.'), '◇'],
-            ['socks5', 'SOCKS5', t('Connect to a SOCKS5 server directly. It must support UDP ASSOCIATE for VoWiFi.'), '⇄'],
+            ['subscription', t('Subscription link'), t('Paste a Clash subscription URL. The gateway fetches it automatically, extracts compatible nodes, and refreshes it on schedule.'), '📡'],
+            ['node', t('Individual node'), t('Paste one share link. Supports VLESS Reality/XHTTP, Trojan, Hysteria2, Shadowsocks and VMess.'), '🔗'],
+            ['socks5', 'SOCKS5', t('Connect to a SOCKS5 server directly. It must support UDP ASSOCIATE for VoWiFi.'), '🧦'],
           ].map(([type, title, detail, icon]) => <button type="button" key={type} className={`u-proxy-type ${profileDraft.type === type ? 'active' : ''}`} onClick={() => setProfileDraft({ ...profileDraft, type })}><span className="u-proxy-type-icon" aria-hidden="true">{icon}</span><b>{title}</b><small>{detail}</small></button>)}
         </div>
         <div className="u-proxy-modal-form">
@@ -512,7 +532,7 @@ export function NotificationsPage({ showToast }) {
 export function SystemPage({ showToast, openUpdateDialog }) {
   const { t, language, setLanguage } = useI18n(); const [s, setS] = useState(null); const [tab, setTab] = useState('general'); const [status, setStatus] = useState(null); const [update,setUpdate]=useState(null); const [checking,setChecking]=useState(false); const [passwordForm,setPasswordForm]=useState({current:'',next:'',confirm:''})
   const loadStatus = () => api.systemStatus().then(setStatus).catch(() => setStatus(null))
-  useEffect(() => { api.settings().then(setS).catch(() => setS({ tls: {}, retry: {}, rekey: {}, security: {}, device_defaults: {}, updates: { proxy_mode: 'direct' }, proxy: { exits: {} } })); loadStatus() }, [])
+  useEffect(() => { api.settings().then(setS).catch(() => setS({ tls: {}, retry: {}, rekey: {}, security: {}, device_defaults: {}, updates: { proxy_mode: 'auto' }, proxy: { profiles: {}, exits: {} } })); loadStatus() }, [])
   if (!s) return <p>{t('Loading')}…</p>
   const tabs = [['general', t('General')], ['web', t('Web access')], ['voice', t('Calls & VoWiFi')], ['security', t('Security')], ['backup', t('Backup & updates')], ['maintenance', t('Maintenance')]]
   const save = async () => { try { const saved = await api.saveSettings(s); setS(saved); showToast(t('Saved')) } catch (e) { showToast(e.message) } }
@@ -532,12 +552,12 @@ export function SystemPage({ showToast, openUpdateDialog }) {
       <div className="u-card-head"><div><h2>{t('Backup & updates')}</h2><p>{t('Backups stay encrypted by host permissions and are not downloaded through the browser.')}</p></div><button className="btn btn-primary" onClick={() => action('backup')}>{t('Create local backup')}</button></div>
       <div className="u-detail"><span>{t('Running version')}</span><b>{status?.version || '—'}</b></div>
       <h3>{t('Update connection')}</h3>
-      <p className="u-note">{t('Used for both checking releases and downloading an update. Direct connection remains the default.')}</p>
+      <p className="u-note">{t('Automatic tries a direct connection first, then the available proxy library entries. The route that passes the check is reused for the download.')}</p>
       <div className="u-form-grid">
-        <div><label>{t('Connection')}</label><select value={s.updates?.proxy_mode || 'direct'} onChange={e => setS({ ...s, updates: { ...(s.updates || {}), proxy_mode: e.target.value } })}><option value="direct">{t('Direct')}</option><option value="manual">{t('Manual HTTP/SOCKS proxy')}</option><option value="country">{t('Use country exit')}</option></select></div>
-        {s.updates?.proxy_mode === 'manual' && <div><label>{t('Proxy URL')}</label><input type="password" autoComplete="off" value={s.updates?.proxy_url || ''} onChange={e => setS({ ...s, updates: { ...(s.updates || {}), proxy_url: e.target.value } })} placeholder="socks5h://host:port" /></div>}
-        {s.updates?.proxy_mode === 'country' && <div><label>{t('Country exit')}</label><select value={s.updates?.proxy_country || ''} onChange={e => setS({ ...s, updates: { ...(s.updates || {}), proxy_country: e.target.value } })}><option value="">{t('Select a country/region…')}</option>{Object.entries(s.proxy?.exits || {}).filter(([, ex]) => ex?.enabled && ex?.mode !== 'direct').map(([country]) => <option key={country} value={country}>{country.toUpperCase()}</option>)}</select></div>}
+        <div><label>{t('Connection')}</label><select value={s.updates?.proxy_mode || 'auto'} onChange={e => setS({ ...s, updates: { proxy_mode: e.target.value, proxy_profile_id: e.target.value === 'library' ? (s.updates?.proxy_profile_id || '') : '' } })}><option value="auto">{t('Automatic — direct, then proxy library')}</option><option value="direct">{t('Direct only')}</option><option value="library">{t('Specified proxy')}</option></select></div>
+        {s.updates?.proxy_mode === 'library' && <div><label>{t('Proxy')}</label><select value={s.updates?.proxy_profile_id || ''} onChange={e => setS({ ...s, updates: { proxy_mode: 'library', proxy_profile_id: e.target.value } })}><option value="">{t('Select a proxy…')}</option>{Object.entries(s.proxy?.profiles || {}).map(([id, profile]) => <option key={id} value={id}>{profile.name || t('Unnamed proxy')}</option>)}</select></div>}
       </div>
+      {s.updates?.proxy_mode === 'library' && <p className="u-note">{t('SOCKS5 entries connect directly. Subscription and node entries reuse a ready country exit assigned to that proxy.')}</p>}
       <button className="btn btn-ghost" onClick={save}>{t('Save update connection')}</button>
       <div className="u-detail"><span>{t('Software updates')}</span><div className="u-inline"><b>{update?.latest ? `v${update.latest}` : t(update ? 'Update check failed' : 'Not checked')}</b><button className="btn btn-ghost" disabled={checking} onClick={checkUpdate}>{t(checking?'Checking…':'Check for updates')}</button></div></div>
       {update?.update_available&&<div className="u-note u-update-note"><span>{t('A new version is available. Review the release notes before updating.')}</span><button className="btn btn-primary" onClick={()=>openUpdateDialog(update)}>{t('Review update')}</button></div>}

@@ -167,8 +167,19 @@ def dec_imsi(ef_hex: str) -> Optional[str]:
     return imsi
 
 
+ICCID_BYTES = 10
+ICCID_MIN_DIGITS = 15
+
+
 def dec_iccid(ef_hex: str) -> str:
-    return swap_nibbles(ef_hex).rstrip("f")
+    """Decode EF.ICCID (10 BCD bytes, TS 31.102). "" for anything that is not a plausible
+    ICCID: the start preflight convicts a reader whose live ICCID differs from the line's, so
+    a truncated or garbled read must not present itself as an identity. Empty simply means we
+    could not identify the card, which every caller already treats as "do not convict"."""
+    if len(ef_hex) != ICCID_BYTES * 2:
+        return ""
+    iccid = swap_nibbles(ef_hex).rstrip("f")
+    return iccid if iccid.isdigit() and len(iccid) >= ICCID_MIN_DIGITS else ""
 
 
 # 3GPP USIM application AID prefix (RID A000000087 + app code 1002). EF_DIR record 1 is

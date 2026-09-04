@@ -157,6 +157,10 @@ def write_status(**kw):
     os.replace(tmp, os.path.join(RUNDIR, "usim_status.json"))
 
 
+ICCID_BYTES = 10
+ICCID_MIN_DIGITS = 15
+
+
 def swap_nibbles(s):
     return "".join([x + y for x, y in zip(s[1::2], s[0::2])])
 
@@ -319,13 +323,21 @@ def _with_deadline(fn, timeout=None):
 
 
 def read_iccid(connection):
-    """Read EF.ICCID (no PIN required). Returns None when the card will not answer."""
+    """Read EF.ICCID (no PIN required). None when the card will not answer readably.
+
+    EF.ICCID is exactly 10 BCD bytes (TS 31.102). A short read, or a value that is not
+    all digits, is a card or reader fault rather than an identity -- and every caller
+    convicts a reader on ANY non-empty ICCID that differs from the line's, so handing one
+    a truncated value would strand a line whose binding is perfectly correct. Returning
+    None keeps the documented fail-open direction: we simply cannot convict.
+    """
     connection.transmit(toBytes("00a40004023f0000"))
     connection.transmit(toBytes("00a40004022fe200"))
     data, sw1, sw2 = connection.transmit(toBytes("00b000000a"))
-    if sw1 != 0x90:
+    if sw1 != 0x90 or len(data) != ICCID_BYTES:
         return None
-    return swap_nibbles(bytes(data).hex()).rstrip("f")
+    iccid = swap_nibbles(bytes(data).hex()).rstrip("f")
+    return iccid if iccid.isdigit() and len(iccid) >= ICCID_MIN_DIGITS else None
 
 
 def foreign_iccid(connection):

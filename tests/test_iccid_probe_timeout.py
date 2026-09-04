@@ -39,10 +39,13 @@ def _iccid_apdu_bytes(iccid):
 class _Connection:
     """A card connection. `hangs` models the VPCD channel that never answers."""
 
-    def __init__(self, name, iccid=None, hangs=False):
+    def __init__(self, name, iccid=None, hangs=False, short_read=None):
         self.name = name
         self.iccid = iccid
         self.hangs = hangs
+        # Bytes to hand back for EF.ICCID instead of all 10 — a partial read, which decodes
+        # into a shorter number that is NOT the card's identity.
+        self.short_read = short_read
         self.disconnected = False
         self.transmits = 0
         self.released = threading.Event()
@@ -63,7 +66,10 @@ class _Connection:
         if self.iccid is None:
             raise RuntimeError("card does not answer")
         if str(apdu).lower().startswith("00b0"):
-            return _iccid_apdu_bytes(self.iccid), 0x90, 0x00
+            body = _iccid_apdu_bytes(self.iccid)
+            if self.short_read is not None:
+                body = body[:self.short_read]
+            return body, 0x90, 0x00
         return [], 0x90, 0x00
 
 
@@ -179,6 +185,21 @@ class PinKeeperProbeTests(unittest.TestCase):
         self.assertEqual(caught.exception.actual, THEIRS)
         self.assertEqual(caught.exception.expected, OURS)
         self.assertTrue(conn.disconnected)
+
+    def test_a_partial_iccid_read_does_not_convict_the_reader(self):
+        """A short EF.ICCID decodes into a number that is not the card's identity. Convicting
+        on it would strand a correctly bound line, which is exactly what _accept documents it
+        must not do: only an ICCID we actually READ can convict."""
+        conn = _Connection(PHYSICAL, iccid=OURS, short_read=6)
+        reader, got, iccid = self.mod._accept(_Reader(PHYSICAL), conn, OURS)
+        self.assertIs(got, conn)
+        self.assertIsNone(iccid, "a truncated read must not pass itself off as an identity")
+        self.assertFalse(conn.disconnected)
+
+    def test_read_iccid_rejects_a_short_or_garbled_answer(self):
+        self.assertEqual(self.mod.read_iccid(_Connection(PHYSICAL, iccid=OURS)), OURS)
+        self.assertIsNone(self.mod.read_iccid(_Connection(PHYSICAL, iccid=OURS, short_read=9)))
+        self.assertIsNone(self.mod.read_iccid(_Connection(PHYSICAL, iccid=OURS, short_read=0)))
 
 
 class AmiUsimProbeTests(unittest.TestCase):

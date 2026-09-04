@@ -4,6 +4,37 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-09-04
+
+### Fixed
+
+- SIMs with no PIN could be reported as PIN-locked on v1.9.0, blocking VoWiFi with a prompt for a
+  PIN the card never asked for. v1.9.0 judged each SELECT by the GET RESPONSE that follows it, but
+  `61xx` already means the card accepted the command — a card that then declines to hand back the
+  response body made `SELECT ADF.USIM` read as a failure, so card reading stopped with every PIN
+  field unset. The APDU helper now reports the command's own verdict and returns whatever body it
+  could fetch, keeping the v1.9.0 support for APDU-level readers and T=1 cards rather than trading
+  one reader class for the other. The `6Cxx` length-correction retry also no longer drops the
+  command's data field, which turned a retried case-4 SELECT into a malformed command
+  ([#60](https://github.com/MddIdd/mdd-sim-gateway/issues/60)).
+- A start refused by the SIM preflight showed only "Capability change failed: Conflict" because the
+  409 carried no human-readable message. The refusal now explains itself; when a PIN really is
+  required the WebUI prompts for it and retries the start, and when the card could not be read at
+  all the error says so instead of asking for a PIN that cannot help
+  ([#60](https://github.com/MddIdd/mdd-sim-gateway/issues/60)).
+- Switching an eSIM profile while a line started could be reported as a misleading "no card". The
+  preflight now compares the live-read ICCID against the line's expected ICCID instead of relying
+  only on the sampled card-monitor cache, which lags inside a profile-switch window, and reports a
+  card mismatch naming both ICCIDs ([#60](https://github.com/MddIdd/mdd-sim-gateway/issues/60)).
+
+### Added
+
+- Support bundles now record why a line start was refused. A closed-schema `preflight_blocked`
+  lifecycle event (reason code plus card-present / ICCID-matches booleans, never an identifier) is
+  written for each refusal; previously the refusal happened in the control plane before any engine
+  log existed, so a bundle showed no trace of it
+  ([#60](https://github.com/MddIdd/mdd-sim-gateway/issues/60)).
+
 ## [1.9.0] - 2026-09-03
 
 ### Added

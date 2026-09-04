@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "release": {
-    "version": "1.9.0",
-    "kind": "main"
+    "version": "1.9.1",
+    "kind": "patch"
   },
   "auto_update": {
     "version": "1.8.0",

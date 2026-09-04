@@ -6098,8 +6098,19 @@ def _with_deadline(fn, timeout=None):
     return box.get("value")
 
 
+_ICCID_BYTES = 10
+_ICCID_MIN_DIGITS = 15
+
+
 def read_iccid_at_index(reader_index):
-    """Read EF.ICCID from a reader index. No PIN needed; None when the card will not answer."""
+    """Read EF.ICCID from a reader index. No PIN needed; None when it will not answer readably.
+
+    EF.ICCID is exactly 10 BCD bytes (TS 31.102). A short read, or a value that is not
+    all digits, is a card or reader fault rather than an identity -- and every caller
+    convicts a reader on ANY non-empty ICCID that differs from the line's, so handing one
+    a truncated value would strand a line whose binding is perfectly correct. Returning
+    None keeps the documented fail-open direction: we simply cannot convict.
+    """
     r = readers()
     connection = r[int(reader_index)].createConnection()
     connection.connect()
@@ -6107,9 +6118,10 @@ def read_iccid_at_index(reader_index):
         connection.transmit(toBytes('00A40000023F00'))
         connection.transmit(toBytes('00A40000022FE2'))
         data, sw1, sw2 = connection.transmit(toBytes('00B000000A'))
-        if sw1 != 0x90:
+        if sw1 != 0x90 or len(data) != _ICCID_BYTES:
             return None
-        return bcd(toHexString(data).replace(" ", "")).rstrip("Ff")
+        iccid = bcd(toHexString(data).replace(" ", "")).rstrip("Ff")
+        return iccid if iccid.isdigit() and len(iccid) >= _ICCID_MIN_DIGITS else None
     finally:
         try:
             connection.disconnect()

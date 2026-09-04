@@ -91,6 +91,10 @@ def write_status(state, tries_left=None, reader=None, detail=None, iccid=None):
     log(f"status={state} tries_left={tries_left} detail={detail}")
 
 
+ICCID_BYTES = 10
+ICCID_MIN_DIGITS = 15
+
+
 def swap_nibbles(s):
     return "".join([x + y for x, y in zip(s[1::2], s[0::2])])
 
@@ -272,13 +276,21 @@ def _with_deadline(fn, timeout=None):
 
 
 def read_iccid(conn):
+    """Read EF.ICCID (no PIN required). None when the card will not answer readably.
+
+    EF.ICCID is exactly 10 BCD bytes (TS 31.102). A short read, or a value that is not
+    all digits, is a card or reader fault rather than an identity -- and every caller
+    convicts a reader on ANY non-empty ICCID that differs from the line's, so handing one
+    a truncated value would strand a line whose binding is perfectly correct. Returning
+    None keeps the documented fail-open direction: we simply cannot convict.
+    """
     conn.transmit(toBytes("00a40004023f0000"))
     _xfr(conn, toBytes("00a40004022fe200"))
     d, s1, s2 = _xfr(conn, toBytes("00b000000a"))
-    if s1 != 0x90:
+    if s1 != 0x90 or len(d) != ICCID_BYTES:
         return None
-    hx = bytes(d).hex()
-    return swap_nibbles(hx).rstrip("f")
+    iccid = swap_nibbles(bytes(d).hex()).rstrip("f")
+    return iccid if iccid.isdigit() and len(iccid) >= ICCID_MIN_DIGITS else None
 
 
 class WrongCard(Exception):

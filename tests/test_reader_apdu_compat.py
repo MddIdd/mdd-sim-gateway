@@ -274,6 +274,16 @@ class ValidationTests(unittest.TestCase):
         self.assertIsNone(sim.dec_imsi("62058A0105FFFF"))  # an FCP misread as EF data
         self.assertIsNone(sim.dec_imsi(""))
 
+    def test_dec_iccid_rejects_short_or_garbled_reads(self):
+        """The start preflight convicts a reader whose live ICCID differs from the line's, so
+        a truncated or non-numeric EF.ICCID must decode to "" rather than to a wrong number."""
+        iccid = "8900010000000000013"                  # 19 digits, F-padded to 10 bytes
+        on_card = sim.swap_nibbles(iccid + "f")
+        self.assertEqual(sim.dec_iccid(on_card), iccid)
+        self.assertEqual(sim.dec_iccid(on_card[:12]), "")   # short read -> not an identity
+        self.assertEqual(sim.dec_iccid("ff" * 10), "")      # unprogrammed EF
+        self.assertEqual(sim.dec_iccid(""), "")
+
     def test_pin_body_validation(self):
         self.assertEqual(len(sim._pin_body("1234")), 8)
         self.assertIsNone(sim._pin_body("123"))        # too short

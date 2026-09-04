@@ -5,17 +5,17 @@
     "kind": "patch"
   },
   "auto_update": {
-    "version": "1.8.0",
-    "not_before": "2026-09-02T06:05:28Z"
+    "version": "1.9.1",
+    "not_before": "2026-09-04T17:17:53Z"
   },
   "channels": {
     "all": {
-      "version": "1.8.0",
-      "not_before": "2026-09-02T06:05:28Z"
+      "version": "1.9.1",
+      "not_before": "2026-09-04T17:17:53Z"
     },
     "main": {
-      "version": "1.8.0",
-      "not_before": "2026-09-02T06:05:28Z"
+      "version": "1.9.1",
+      "not_before": "2026-09-04T17:17:53Z"
     }
   }
 }

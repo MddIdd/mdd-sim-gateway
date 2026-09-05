@@ -698,6 +698,57 @@ class ManagedReselectTests(unittest.TestCase):
                 app.process_reselect_requests(states)
             self.assertEqual(app.selected, [])      # nothing measured, nothing moved
 
+    def test_persisting_a_selected_default_does_not_restart_any_country(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = self._orchestrator(temp, {})
+            config, _states = _build(app, {})
+            app.apply_singbox(config)
+            running = Mock()
+            running.poll.return_value = None
+            app.singbox = running
+            app.dry_run = False
+            started_at = app.singbox_started_at
+            app.exit_unranked.clear()
+            app.last_exit_node["us"] = "US Bravo"
+            updated, _states = _build(app, {})
+            with patch("host.mdd_orchestrator.subprocess.Popen") as spawn:
+                app.apply_singbox(updated)
+                app.apply_singbox(updated)
+            spawn.assert_not_called()
+            running.terminate.assert_not_called()
+            self.assertEqual(app.singbox_started_at, started_at)
+            self.assertEqual(app.exit_unranked, set())
+            self.assertEqual(json.loads(app.generated.read_text()), updated)
+            self.assertEqual(app.last_proxy_config, updated)
+
+    def test_real_config_changes_and_new_locks_still_restart(self):
+        for change in ("outbound", "lock", "dead_process"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temp:
+                app = self._orchestrator(temp, {})
+                app.last_exit_node["us"] = "US Bravo"
+                config, _states = _build(app, {})
+                app.apply_singbox(config)
+                old = Mock()
+                old.poll.return_value = 1 if change == "dead_process" else None
+                app.singbox = old
+                app.dry_run = False
+                updated, _states = _build(app, {"pinned_node": "US Alpha"}
+                                          if change == "lock" else {})
+                if change == "outbound":
+                    member = next(outbound for outbound in updated["outbounds"]
+                                  if outbound.get("tag") == "exit-us-0")
+                    member["server_port"] += 1
+                replacement = Mock()
+                replacement.poll.return_value = None
+                with patch("host.mdd_orchestrator.shutil.which", return_value="sing-box"), \
+                        patch("host.mdd_orchestrator.run", return_value=SimpleNamespace(returncode=0)), \
+                        patch("host.mdd_orchestrator.time.sleep"), \
+                        patch("host.mdd_orchestrator.subprocess.Popen", return_value=replacement) as spawn:
+                    app.apply_singbox(updated)
+                spawn.assert_called_once()
+                self.assertIs(app.singbox, replacement)
+                self.assertEqual(app.last_proxy_config, updated)
+
     def test_a_node_that_did_not_survive_the_rewrite_starts_over(self):
         with tempfile.TemporaryDirectory() as temp:
             app = self._orchestrator(temp, {"exit-us-0": 300, "exit-us-1": 800})

@@ -161,6 +161,11 @@ def lookup(identity: dict | None) -> dict | None:
     if not plmns:
         return None
     carriers, by_id, version = _database()
+    known_plmns = {value for carrier in carriers
+                   for attribute in carrier.get("attributes") or []
+                   for value in attribute.get("mccmnc_tuple") or []}
+    selected_plmn = next((value for value in plmns if value in known_plmns), plmns[0])
+    plmns = [selected_plmn]
     best: tuple[int, int, dict, str, list[str]] | None = None
     for order, carrier in enumerate(carriers):
         for attribute in carrier.get("attributes") or []:

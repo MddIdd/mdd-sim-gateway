@@ -9,14 +9,36 @@ class AttributionTests(unittest.TestCase):
     every one of those moved the exit, and every one of those moves was wrong."""
 
     def test_a_tunnel_that_never_came_up_blames_the_exit(self):
-        for state in ("CONNECTING", "DOWN", "", None):
+        for state in ("CONNECTING", "DOWN"):
             with self.subTest(state=state):
-                self.assertEqual(failover.classify(state, 0), failover.BLAMES_EXIT)
+                self.assertEqual(failover.classify(state, 0, reason_code="tunnel_network"),
+                                 failover.BLAMES_EXIT)
 
-    def test_an_epdg_that_refused_the_source_address_blames_the_exit(self):
-        # tunnel_not_authorized shows no packet loss at all: the ePDG answered, and refused.
-        # It is still the exit's fault — the refusal is about where the packets came from.
-        self.assertEqual(failover.classify("DOWN", 0), failover.BLAMES_EXIT)
+    def test_missing_or_unrecognized_state_is_not_exit_evidence(self):
+        for state in ("", None, "STARTING", "UNKNOWN"):
+            with self.subTest(state=state):
+                self.assertEqual(failover.classify(state, 0), failover.UNCLEAR)
+
+    def test_local_failures_do_not_blame_a_disconnected_exit(self):
+        for reason in ("epdg_unresolved", "tunnel_sim_auth", "tunnel_proposal",
+                       "tunnel_rekey_send_error", "client_engine_failure"):
+            with self.subTest(reason=reason):
+                self.assertEqual(failover.classify("DOWN", 10, reason_code=reason),
+                                 failover.BLAMES_ELSEWHERE)
+
+    def test_ambiguous_setup_or_authorization_failure_does_not_evict(self):
+        for reason in ("tunnel_setup", "tunnel_not_authorized", "unknown"):
+            self.assertEqual(failover.classify("DOWN", 0, reason_code=reason), failover.UNCLEAR)
+
+    def test_missing_retransmit_evidence_does_not_prove_a_clean_tunnel(self):
+        self.assertEqual(failover.classify("CONNECTED", None), failover.UNCLEAR)
+
+    def test_disconnected_state_alone_does_not_prove_an_exit_failure(self):
+        self.assertEqual(failover.classify("DOWN", 0), failover.UNCLEAR)
+
+    def test_unreadable_ike_evidence_does_not_strike_a_disconnected_exit(self):
+        self.assertEqual(failover.classify("DOWN", None, reason_code="tunnel_network"),
+                         failover.UNCLEAR)
 
     def test_an_established_tunnel_with_nothing_unanswered_clears_the_exit(self):
         self.assertEqual(failover.classify("CONNECTED", 0), failover.BLAMES_ELSEWHERE)
@@ -44,6 +66,23 @@ class StrikeTests(unittest.TestCase):
         action, ledger = self._strike(None, "node-a")
         self.assertEqual(action, failover.HOLD)
         self.assertEqual(ledger["strikes"], 1)
+
+    def test_unknown_evidence_preserves_the_walk_without_slowing_recovery(self):
+        ledger = {**failover.blank_ledger(), "node": "node-a", "strikes": 3,
+                  "tried": ["node-a"], "exhausted": True}
+        action, updated = self._strike(ledger, "node-a", verdict=failover.UNCLEAR)
+        self.assertEqual(action, failover.HOLD)
+        for field in ("node", "strikes", "tried", "exhausted"):
+            self.assertEqual(updated[field], ledger[field])
+
+    def test_unknown_evidence_reports_once_without_accumulating_strikes(self):
+        ledger = None
+        actions = []
+        for attempt in range(failover.FAILURES_BEFORE_REPORT + 2):
+            action, ledger = self._strike(ledger, "node-a", verdict=failover.UNCLEAR)
+            actions.append(action)
+        self.assertEqual(actions.count(failover.REPORT), 1)
+        self.assertEqual(ledger["strikes"], 0)
 
     def test_the_exit_moves_only_after_the_node_has_had_its_chances(self):
         ledger = None
@@ -220,7 +259,8 @@ class WordingTests(unittest.TestCase):
     def test_a_report_points_away_from_the_exit(self):
         ledger = {**failover.blank_ledger(), "node": "n1", "failures": 6}
         text = failover.summarise(ledger, failover.REPORT, "gb", False)
-        self.assertIn("不在 GB 出口", text)
+        self.assertIn("不足以归咎于 GB 出口", text)
+        self.assertNotIn("没有丢包", text)
         self.assertIn("会继续", text)
 
     def test_a_peer_blocked_report_names_the_line_it_protects(self):

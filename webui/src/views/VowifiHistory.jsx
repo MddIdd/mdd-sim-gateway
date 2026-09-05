@@ -125,19 +125,30 @@ export default function VowifiHistory({ instanceId, subscribe, compact = false }
   const [data, setData] = useState(null)
   const [error, setError] = useState('')
   const [hover, setHover] = useState(null)
+  const requestGeneration = useRef(0)
 
   const load = useCallback(() => {
+    const generation = ++requestGeneration.current
     if (!instanceId) return
     api.lineAvailability(instanceId)
-      .then(result => { setData(result); setError('') })
-      .catch(err => setError(err.message))
+      .then(result => {
+        if (generation !== requestGeneration.current) return
+        setData(result); setError('')
+      })
+      .catch(err => {
+        if (generation !== requestGeneration.current) return
+        setError(err.message)
+      })
   }, [instanceId])
 
   useEffect(() => {
-    setData(null); setHover(null)
+    setData(null); setHover(null); setError('')
     load()
     const timer = setInterval(load, REFRESH_MS)
-    return () => clearInterval(timer)
+    return () => {
+      ++requestGeneration.current
+      clearInterval(timer)
+    }
   }, [load])
 
   // Status events arrive every few seconds whether or not anything changed. Only a real

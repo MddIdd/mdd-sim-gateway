@@ -26,6 +26,8 @@ import re
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from typing import Any
 from urllib.parse import quote
 
@@ -77,6 +79,7 @@ EV_VOICEMAIL = "voicemail_received"
 EV_SOFTWARE_UPDATE = "software_update"
 
 _TIMEOUT = 8  # seconds; keep short so a dead endpoint never piles up threads
+_DELIVERY_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="mdd-notify")
 _TOKEN = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
 _HISTORY_LOCK = threading.RLock()
 _PENDING: dict[str, dict] = {}
@@ -767,38 +770,33 @@ def _post_telegram(cfg: dict, payload: dict):
 
 
 def dispatch(settings: dict, event: str, instance: dict, source: str, text: str | None = None):
-    """Fire all configured channels for one event. BLOCKING (does the HTTP itself) — the
-    caller runs this off the event path (e.g. asyncio.to_thread + create_task) so a slow
-    endpoint never stalls engine-event handling. Safe to call unconditionally: each channel
-    is gated on its own enable flag + per-event checkbox."""
+    """Queue independent deliveries on the notification pool and return their futures.
+
+    HTTP and retry waits never run on the caller's thread. Each destination is gated on its
+    own enable flag, event selection and line filter.
+    """
+    futures = []
     try:
         payload = build_payload(event, instance, source, text)
+        deliveries = []
         wh = settings.get("webhook") or {}
         if wh.get("enabled") and _events_enabled(wh).get(event):
-            _deliver_with_retry("webhook", send_webhook, wh, payload)
+            deliveries.append(("webhook", send_webhook, wh))
         tg = settings.get("telegram") or {}
         if tg.get("enabled") and _events_enabled(tg).get(event):
-            _deliver_with_retry("telegram", send_telegram, tg, payload)
+            deliveries.append(("telegram", send_telegram, tg))
         pp = settings.get("pushplus") or {}
         if pp.get("enabled") and _events_enabled(pp).get(event):
-            _deliver_with_retry("pushplus", send_pushplus, pp, payload)
-        feishu_deliveries = []
+            deliveries.append(("pushplus", send_pushplus, pp))
         for position, fs in enumerate(feishu_channels(settings.get("feishu") or {}), start=1):
             if (fs.get("enabled") and _events_enabled(fs).get(event)
                     and feishu_channel_matches(fs, payload.get("instance"))):
                 channel_id = str(fs.get("id") or position)
                 delivery_channel = "feishu" if channel_id == "legacy" else f"feishu:{channel_id}"
-                feishu_deliveries.append((delivery_channel, fs))
-        # One unavailable bot must not postpone another bot by the full 0/2/5-second retry
-        # ladder. Each destination owns an independent delivery id, retry state and thread.
-        threads = [threading.Thread(
-            target=_deliver_with_retry,
-            args=(delivery_channel, send_feishu, channel_cfg, payload),
-            daemon=True,
-        ) for delivery_channel, channel_cfg in feishu_deliveries]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
+                deliveries.append((delivery_channel, send_feishu, fs))
+        for channel, sender, channel_cfg in deliveries:
+            futures.append(_DELIVERY_EXECUTOR.submit(
+                _deliver_with_retry, channel, sender, deepcopy(channel_cfg), deepcopy(payload)))
     except Exception as e:  # noqa
         log.warning("push dispatch error: %r", e)
+    return futures

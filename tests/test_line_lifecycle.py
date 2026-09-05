@@ -1077,25 +1077,32 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
     and if giving up really stops the rebuild instead of merely saying so."""
 
     EXITS = {"exits": {"us": {"node": "node-a", "candidates": ["node-a", "node-b"],
-                              "selection": "auto"}}}
+                              "selection": "auto", "mode": "subscription"}}}
     INST = {"id": "9", "enabled": True, "mcc": "310", "mnc": "240", "name": "test"}
 
     def setUp(self):
         main.hub.exit_ledgers.pop("9", None)
         main.hub.reset_health("9")
+        settings = patch.object(main.cfg, "get_settings", return_value={"proxy": {"enabled": True}})
+        settings.start()
+        self.addCleanup(settings.stop)
+        stalled = patch.object(main.egress, "report_stalled_exit")
+        self.stalled = stalled.start()
+        self.addCleanup(stalled.stop)
 
     def tearDown(self):
         main.hub.exit_ledgers.pop("9", None)
         main.hub.reset_health("9")
 
-    def _judge(self, swu, retransmits, exits=None, stable_for=0.0, peers=()):
-        st = {"reason_code": "tunnel_network", "reason": "x"}
+    def _judge(self, swu, retransmits, exits=None, stable_for=0.0, peers=(),
+               reason="tunnel_network", evidence_error=None):
+        st = {"reason_code": reason, "reason": "x"}
         with patch.object(main.egress, "line_country", return_value="us"), \
-                patch.object(main.egress, "status", return_value=exits or self.EXITS), \
+                patch.object(main.egress, "status", return_value=self.EXITS if exits is None else exits), \
                 patch.object(main.cfg, "list_instances", return_value=list(peers)), \
                 patch.object(main.engine, "read_run_json", return_value={"state": swu}), \
                 patch.object(main.engine, "ike_evidence",
-                             return_value={"retransmits": retransmits}), \
+                             return_value={"retransmits": retransmits}, side_effect=evidence_error), \
                 patch.object(main, "_save_exit_ledgers"), \
                 patch.object(main.egress, "request_reselect") as reselect, \
                 patch.object(main.asyncio, "to_thread", new=AsyncMock()) as to_thread:
@@ -1103,6 +1110,79 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
         # dispatch is handed to to_thread(), which is called synchronously to build the
         # awaitable — so its arguments are visible without waiting for the task to run.
         return action, reselect, to_thread
+
+    async def test_missing_tunnel_evidence_never_switches_or_cleans_sessions(self):
+        for attempt in range(main.failover.FAILURES_BEFORE_REPORT):
+            action, reselect, _ = self._judge(None, 0)
+            self.assertIn(action, (main.failover.HOLD, main.failover.REPORT))
+            reselect.assert_not_called()
+        self.stalled.assert_not_called()
+        self.assertEqual(main.hub.exit_ledgers["9"]["strikes"], 0)
+
+    async def test_retransmit_read_failure_preserves_connected_evidence(self):
+        for attempt in range(3):
+            action, reselect, _ = self._judge("CONNECTED", 0, evidence_error=OSError("unreadable"))
+            self.assertEqual(action, main.failover.HOLD)
+            reselect.assert_not_called()
+        self.stalled.assert_not_called()
+        self.assertEqual(main.hub.exit_ledgers["9"]["strikes"], 0)
+
+    async def test_dns_failure_never_strikes_or_cleans_an_exit(self):
+        for attempt in range(3):
+            action, reselect, _ = self._judge("DOWN", 10, reason="epdg_unresolved")
+            self.assertEqual(action, main.failover.HOLD)
+            reselect.assert_not_called()
+        self.stalled.assert_not_called()
+
+    async def test_direct_missing_and_nonselectable_exits_do_not_accumulate_ledgers(self):
+        for exits in ({}, {"exits": {}}, {"exits": {"us": {"mode": "direct"}}},
+                      {"exits": {"us": {"mode": "manual", "node": "fixed"}}}):
+            main.hub.exit_ledgers["9"] = {"exhausted": True, "given_up": True}
+            for attempt in range(4):
+                action, reselect, notify = self._judge("DOWN", 0, exits=exits)
+                self.assertEqual(action, main.failover.HOLD)
+                reselect.assert_not_called()
+                notify.assert_not_called()
+                self.assertNotIn("9", main.hub.exit_ledgers)
+        self.stalled.assert_not_called()
+
+    async def test_disabled_proxy_ignores_stale_subscription_status(self):
+        with patch.object(main.cfg, "get_settings", return_value={"proxy": {"enabled": False}}):
+            action, reselect, _ = self._judge("DOWN", 0)
+        self.assertEqual(action, main.failover.HOLD)
+        self.assertNotIn("9", main.hub.exit_ledgers)
+        reselect.assert_not_called()
+        self.stalled.assert_not_called()
+
+    async def test_direct_freezes_keep_normal_retry_cadence(self):
+        st = {"state": "TUNNEL_DOWN", "reason_code": "tunnel_network", "reason": "x"}
+        with patch.object(main.egress, "status", return_value={"exits": {"us": {"mode": "direct"}}}), \
+                patch.object(main, "_local_card_fault", return_value=""), \
+                patch.object(main, "_save_exit_ledgers"), \
+                patch.object(main.asyncio, "to_thread", new=AsyncMock()), \
+                patch.object(main.hub, "drop_ami", new=AsyncMock()):
+            for attempt in range(4):
+                main.hub.reset_health("9")
+                health = main.hub.health_for("9")
+                health["fail_start"] = main.time.monotonic() - 10000
+                before = main.time.monotonic()
+                main.apply_health("9", self.INST, dict(st))
+                self.assertGreaterEqual(health["next_retry_at"], before + 160)
+                self.assertLess(health["next_retry_at"], before + 170)
+                self.assertNotIn("9", main.hub.exit_ledgers)
+
+    def test_empty_or_missing_ike_logs_are_explicitly_unavailable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            self.assertFalse(main.engine._charon_evidence(temp)["available"])
+            run = Path(temp) / "run"
+            run.mkdir()
+            log = run / "charon.log"
+            log.write_text("")
+            self.assertFalse(main.engine._charon_evidence(temp)["available"])
+            log.write_text("tunnel CONNECTED\n")
+            evidence = main.engine._charon_evidence(temp)
+            self.assertTrue(evidence["available"])
+            self.assertEqual(evidence["retransmits"], 0)
 
     async def test_a_healthy_tunnel_neither_moves_the_exit_nor_notifies(self):
         action, reselect, to_thread = self._judge("CONNECTED", 0)
@@ -1123,7 +1203,7 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
         seen = []
         for node in ("node-a", "node-b"):
             exits = {"exits": {"us": {"node": node, "candidates": ["node-a", "node-b"],
-                                      "selection": "auto"}}}
+                                      "selection": "auto", "mode": "subscription"}}}
             for _ in range(main.failover.STRIKES_PER_NODE):
                 action, _reselect, to_thread = self._judge("DOWN", 0, exits)
                 seen.append((action, to_thread))

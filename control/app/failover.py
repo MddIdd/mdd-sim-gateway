@@ -23,8 +23,9 @@ The five outcomes are not symmetric, because the cost of continuing differs:
             over a transient outage trades one failure for a worse one
   GIVE_UP   stop rebuilding and report — the operator pinned this exit and it has had its
             chances, so the only useful moves left belong to a person
-  REPORT    report but keep rebuilding — the exits are fine and the fault is upstream, where
-            retrying costs nothing and the carrier may simply come back
+  REPORT    report but keep rebuilding — the evidence does not justify moving the exit;
+            report local/upstream failures or missing evidence without claiming packet loss
+            has been ruled out
 
 Stopping the churn matters as much as switching. The previous policy could not stop: once
 every candidate was cooling down it cleared the cooldown and started the pool over, forever,
@@ -67,18 +68,26 @@ GIVE_UP = "give-up"
 REPORT = "report"
 
 
-def classify(swu_state: str, retransmits: int, stable_seconds: float = 0.0,
-             stable_threshold: float = 0.0) -> str:
+def classify(swu_state: str | None, retransmits: int | None, stable_seconds: float = 0.0,
+             stable_threshold: float = 0.0, reason_code: str = "") -> str:
     """Attribute one line failure to the exit, to something else, or to neither."""
     if stable_threshold and stable_seconds >= stable_threshold:
         # The node carried a registered line for long enough to prove it can. Whatever broke
         # afterwards is not the path: a carrier-side problem, or a rekey it failed to survive.
         return BLAMES_ELSEWHERE
-    if str(swu_state or "").upper() != "CONNECTED":
-        # The tunnel never came up over this exit. That covers a path too lossy for IKE and an
-        # ePDG that refused the source address outright — both belong to the node.
+    if reason_code in {"epdg_unresolved", "tunnel_sim_auth", "tunnel_proposal",
+                       "tunnel_rekey_send_error", "client_engine_failure", "wrong_card"}:
+        return BLAMES_ELSEWHERE
+    state = str(swu_state or "").upper()
+    if retransmits is None:
+        return UNCLEAR
+    if state != "CONNECTED":
+        if state not in {"CONNECTING", "DOWN", "DISCONNECTED"}:
+            return UNCLEAR
+        if reason_code != "tunnel_network":
+            return UNCLEAR
         return BLAMES_EXIT
-    if int(retransmits or 0) >= SUSPICIOUS_RETRANSMITS:
+    if int(retransmits) >= SUSPICIOUS_RETRANSMITS:
         return UNCLEAR
     # Tunnel established and nothing went unanswered: the exit carried every packet it was
     # given. A registration that fails here failed for a reason the exit cannot explain.
@@ -114,10 +123,15 @@ def record(ledger: dict, verdict: str, node: str, pinned: bool,
         # predated backing off). Automation is allowed again: resume where the walk stopped.
         ledger["given_up"] = False
 
+    if verdict == UNCLEAR:
+        ledger["held_for_peer"] = False
+        if ledger["failures"] >= FAILURES_BEFORE_REPORT and not ledger.get("reported"):
+            ledger["reported"] = True
+            return REPORT, ledger
+        return HOLD, ledger
+
     if verdict != BLAMES_EXIT:
         if ledger.get("exhausted"):
-            # The tunnel came up: whatever kept every exit from establishing has passed, so
-            # the walk's verdicts described the outage, not the nodes. Forget them.
             ledger["exhausted"] = False
             ledger["tried"] = []
             ledger["strikes"] = 0
@@ -180,8 +194,8 @@ def summarise(ledger: dict, action: str, country: str, pinned: bool) -> str:
                     f"但同一出口正承载着 {where} 另一条注册中的线路，说明出口本身可用，为不打断"
                     "那条线路没有自动换节点。更像是运营商拒绝了这条线路从该出口接入，"
                     "请为这条线路单独指定出口或人工处理。")
-        return (f"线路已连续 {ledger.get('failures')} 次失败，但每次隧道都正常建立、链路也没有丢包，"
-                f"问题不在 {where} 出口。自动重建会继续，请检查运营商侧或 IMS 配置。")
+        return (f"线路已连续 {ledger.get('failures')} 次失败，现有证据不足以归咎于 {where} 出口，"
+                "未自动换节点。自动重建会继续，请检查本机网络、隧道日志及运营商侧或 IMS 配置。")
     if action == BACK_OFF:
         return (f"{where} 的 {tried} 个候选出口都试过了，隧道都建不起来（最后一个 {node}）。"
                 "所有节点同时失效更像是本机网络或订阅出了问题，而非节点本身；"

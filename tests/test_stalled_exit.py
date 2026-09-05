@@ -149,8 +149,8 @@ class PrincipleTests(unittest.TestCase):
     """The report must stay inside the rules that govern every exit change."""
 
     def test_the_verdict_that_triggers_it_is_the_one_that_blames_the_exit(self):
-        # A tunnel that never established is the only evidence used here.
-        self.assertEqual(failover.classify("CONNECTING", 0), failover.BLAMES_EXIT)
+        self.assertEqual(failover.classify("CONNECTING", 0, reason_code="tunnel_network"),
+                         failover.BLAMES_EXIT)
         # A tunnel that came up and carried traffic is not the exit's fault, so no report.
         self.assertEqual(failover.classify("CONNECTED", 0), failover.BLAMES_ELSEWHERE)
 

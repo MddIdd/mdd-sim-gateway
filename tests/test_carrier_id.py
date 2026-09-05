@@ -1,9 +1,37 @@
 import unittest
+from unittest.mock import patch
 
 from control.app import carrier_id
 
 
 class CarrierIdTests(unittest.TestCase):
+    def test_exact_three_digit_mnc_wins_over_an_earlier_two_digit_record(self):
+        value = carrier_id.lookup({"mcc": "405", "mnc": "045"})
+        self.assertEqual(value["name"], "TATA DOCOMO")
+        self.assertEqual(value["plmn"], "405-045")
+
+    def test_exact_record_wins_even_when_shorter_plmn_has_more_matching_attributes(self):
+        carriers = [
+            {"carrier_name": "Short", "attributes": [
+                {"mccmnc_tuple": ["40545"], "spn": ["Test"]}]},
+            {"carrier_name": "Exact", "attributes": [{"mccmnc_tuple": ["405045"]}]},
+        ]
+        with patch.object(carrier_id, "_database", return_value=(carriers, {}, 1)):
+            value = carrier_id.lookup({"mcc": "405", "mnc": "045",
+                                       "carrier_identity": {"spn": "Test"}})
+        self.assertEqual(value["name"], "Exact")
+
+    def test_exact_parent_fallback_wins_over_an_unconditional_shorter_plmn(self):
+        carriers = [
+            {"carrier_name": "Short", "attributes": [{"mccmnc_tuple": ["40545"]}]},
+            {"carrier_name": "Exact", "attributes": [
+                {"mccmnc_tuple": ["405045"], "spn": ["Missing"]}]},
+        ]
+        with patch.object(carrier_id, "_database", return_value=(carriers, {}, 1)):
+            value = carrier_id.lookup({"mcc": "405", "mnc": "045"})
+        self.assertEqual(value["name"], "Exact")
+        self.assertEqual(value["plmn"], "405-045")
+
     def test_plain_plmn_resolves_the_home_network(self):
         value = carrier_id.lookup({"mcc": "234", "mnc": "10"})
         self.assertEqual(value["name"], "O2")

@@ -1779,24 +1779,35 @@ def _judge_exit_failure(iid: str, inst: dict, st: dict, stable_for: float) -> st
         return failover.HOLD
     country = egress.line_country(inst)
     exits = (egress.status().get("exits") or {}).get(country) or {}
+    if (not cfg.get_settings().get("proxy", {}).get("enabled", False)
+            or exits.get("mode") != "subscription" or not exits.get("node")):
+        if hub.exit_ledgers.pop(iid, None) is not None:
+            _save_exit_ledgers()
+        return failover.HOLD
     node = str(exits.get("node") or "")
     candidates = [str(name) for name in (exits.get("candidates") or [])]
     pinned = exits.get("selection") == "manual"
     peer_registered = _peer_line_registered(iid, country)
+    swu, retransmits = "", None
     try:
         swu = (engine.read_run_json(iid, "swu_status.json") or {}).get("state") or ""
-        retransmits = int((engine.ike_evidence(iid) or {}).get("retransmits") or 0)
     except Exception as exc:  # noqa
         log.debug("cannot read tunnel evidence for line %s: %r", iid, exc)
-        swu, retransmits = "", 0
+    try:
+        evidence = engine.ike_evidence(iid) or {}
+        if evidence.get("available", True) and evidence.get("retransmits") is not None:
+            retransmits = int(evidence["retransmits"])
+    except Exception as exc:
+        log.debug("cannot read IKE evidence for line %s: %r", iid, exc)
     verdict = failover.classify(swu, retransmits, stable_for,
-                                egress.RESELECT_MIN_STABLE_SECONDS)
+                                egress.RESELECT_MIN_STABLE_SECONDS,
+                                reason_code=st.get("reason_code") or "unknown")
     was_backing_off = bool((hub.exit_ledgers.get(iid) or {}).get("exhausted"))
     action, ledger = failover.record(hub.exit_ledgers.get(iid), verdict, node,
                                      pinned, candidates, peer_registered=peer_registered)
     hub.exit_ledgers[iid] = ledger
     _save_exit_ledgers()
-    log.info("line %s froze (%s) after %.0fs healthy; tunnel=%s ike_retransmits=%d "
+    log.info("line %s froze (%s) after %.0fs healthy; tunnel=%s ike_retransmits=%s "
              "-> blames %s, action %s (node=%s strikes=%d tried=%d/%d peer=%s)",
              iid, st.get("reason_code"), stable_for, swu or "unknown", retransmits,
              verdict, action, node or "unknown", ledger.get("strikes") or 0,

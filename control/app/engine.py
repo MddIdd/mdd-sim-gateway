@@ -191,7 +191,8 @@ def _charon_evidence(base: str) -> dict:
         if bare.startswith("STATE ") or "tunnel CONNECTED" in bare:
             last_state = line.strip()
             break
-    return {"retransmits": sum(1 for line in lines if "retransmit" in line),
+    return {"available": bool(lines),
+            "retransmits": sum(1 for line in lines if "retransmit" in line),
             "timeouts": sum(1 for line in lines if "TIMEOUT" in line),
             "last_state": last_state, "tail": lines[-40:]}
 

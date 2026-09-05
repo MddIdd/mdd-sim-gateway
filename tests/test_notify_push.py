@@ -4,6 +4,8 @@ import os
 import base64
 import hashlib
 import hmac
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock, patch
 
 import yaml
@@ -279,7 +281,8 @@ class NotificationChannelTests(unittest.TestCase):
             "url": "https://open.feishu.cn/open-apis/bot/v2/hook/test-token",
             "events": {EV_INCOMING_SMS: True},
         }}
-        notify_push.dispatch(settings, EV_INCOMING_SMS, {"id": 1}, "+100", "hello")
+        for future in notify_push.dispatch(settings, EV_INCOMING_SMS, {"id": 1}, "+100", "hello"):
+            future.result(timeout=5)
         deliver.assert_called_once()
         self.assertEqual(deliver.call_args.args[0], "feishu")
         self.assertIs(deliver.call_args.args[1], send_feishu)
@@ -294,10 +297,11 @@ class NotificationChannelTests(unittest.TestCase):
             {"id": "line-3", "enabled": True, "instances": ["3"],
              "events": {EV_INCOMING_SMS: True}},
         ]}}
-        notify_push.dispatch(settings, EV_INCOMING_SMS, {"id": "2"}, "+100", "hello")
+        for future in notify_push.dispatch(settings, EV_INCOMING_SMS, {"id": "2"}, "+100", "hello"):
+            future.result(timeout=5)
         self.assertEqual(deliver.call_count, 2)
-        self.assertEqual([call.args[0] for call in deliver.call_args_list],
-                         ["feishu:all", "feishu:line-2"])
+        self.assertCountEqual([call.args[0] for call in deliver.call_args_list],
+                              ["feishu:all", "feishu:line-2"])
 
     @patch("control.app.notify_push._deliver_with_retry")
     def test_line_filtered_feishu_channels_skip_gateway_events(self, deliver):
@@ -307,9 +311,40 @@ class NotificationChannelTests(unittest.TestCase):
             {"id": "global", "enabled": True, "instances": [],
              "events": {notify_push.EV_SOFTWARE_UPDATE: True}},
         ]}}
-        notify_push.dispatch(settings, notify_push.EV_SOFTWARE_UPDATE, {}, "1.8.0", "update")
+        for future in notify_push.dispatch(settings, notify_push.EV_SOFTWARE_UPDATE,
+                                            {}, "1.8.0", "update"):
+            future.result(timeout=5)
         deliver.assert_called_once()
         self.assertEqual(deliver.call_args.args[0], "feishu:global")
+
+    def test_slow_channels_do_not_hold_the_caller_or_delay_feishu(self):
+        release = threading.Event()
+        started = {channel: threading.Event()
+                   for channel in ("webhook", "telegram", "pushplus", "feishu")}
+        workers = []
+
+        def deliver(channel, sender, channel_cfg, payload):
+            workers.append(threading.current_thread().name)
+            started[channel].set()
+            if not release.wait(5):
+                raise TimeoutError("delivery test was not released")
+
+        settings = {channel: {"enabled": True, "events": {EV_INCOMING_SMS: True}}
+                    for channel in started}
+        with ThreadPoolExecutor(max_workers=1) as caller, \
+                patch.object(notify_push, "_deliver_with_retry", side_effect=deliver):
+            try:
+                queued = caller.submit(notify_push.dispatch, settings, EV_INCOMING_SMS,
+                                       {"id": "1"}, "+100", "hello")
+                futures = queued.result(timeout=2)
+                self.assertEqual(caller.submit(lambda: "free").result(timeout=2), "free")
+                for event in started.values():
+                    self.assertTrue(event.wait(2))
+                self.assertTrue(all(name.startswith("mdd-notify") for name in workers))
+            finally:
+                release.set()
+            for future in futures:
+                future.result(timeout=2)
 
     def test_manual_telegram_proxy_is_applied_without_environment_proxy(self):
         session = telegram_session({"proxy_mode": "manual",

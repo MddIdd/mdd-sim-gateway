@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import base64
 import collections
+from copy import deepcopy
 import hashlib
 import ipaddress
 import json
@@ -603,6 +604,7 @@ class Orchestrator:
         self.bridges: dict[str, subprocess.Popen] = {}
         self.bridge_ports: dict[str, int] = {}
         self.last_proxy_fingerprint = ""
+        self.last_proxy_config: dict | None = None
         self.applied_cellular_backend: bool | None = None
         self.radio_states: dict[str, bool] = {}
         self.cellular_states: dict[str, dict] = {}
@@ -2380,6 +2382,23 @@ class Orchestrator:
         fingerprint = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
         if fingerprint == self.last_proxy_fingerprint and self.singbox and self.singbox.poll() is None:
             return
+        if self.last_proxy_config is not None and self.singbox and self.singbox.poll() is None:
+            resumed_config = deepcopy(self.last_proxy_config)
+            selectors = {outbound.get("tag"): outbound
+                         for outbound in config.get("outbounds") or []
+                         if outbound.get("type") == "selector"}
+            for outbound in resumed_config.get("outbounds") or []:
+                tag = str(outbound.get("tag") or "")
+                current = selectors.get(tag)
+                if (outbound.get("type") == "selector" and tag.startswith("exit-")
+                        and current and current.get("default")
+                        and self.exit_resume.get(tag[len("exit-"):]) == current["default"]):
+                    outbound["default"] = current["default"]
+            if resumed_config == config:
+                atomic_json(self.generated, config)
+                self.last_proxy_fingerprint = fingerprint
+                self.last_proxy_config = deepcopy(config)
+                return
         # Restarting resets every selector to its configured default. Where that default is
         # the node already carrying this country's tunnels the restart is a no-op for the
         # exit, so the memory of it is kept and nothing is ranked: re-ranking there would
@@ -2397,6 +2416,7 @@ class Orchestrator:
         if self.dry_run:
             atomic_json(self.generated, config)
             self.last_proxy_fingerprint = fingerprint
+            self.last_proxy_config = deepcopy(config)
             return
         binary = shutil.which(os.environ.get("MDD_SINGBOX_BIN", "sing-box"))
         if not binary:
@@ -2425,6 +2445,7 @@ class Orchestrator:
                 self.singbox = None
             raise RuntimeError("sing-box exited during startup")
         self.last_proxy_fingerprint = fingerprint
+        self.last_proxy_config = deepcopy(config)
 
     def apply_xray(self, config: dict | None):
         if not config:

@@ -4,6 +4,22 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- Missing tunnel evidence and local DNS, SIM, protocol or engine failures no longer count as
+  failed exit nodes. Unknown evidence does not trigger node changes or stalled-session cleanup,
+  and notifications no longer claim a clean tunnel when that has not been established.
+- Direct and non-selectable routes bypass the exit ledger instead of entering an hourly
+  candidate-exhaustion retry cycle.
+- Persisting a subscription selector's already-active node no longer restarts the shared
+  sing-box process. Actual configuration changes and process failures still trigger a restart.
+- Notification destinations run independently on a dedicated, eight-worker delivery pool;
+  HTTP retries no longer hold the default executor or serialize the configured channels.
+- Carrier identification prefers an exact PLMN, including parent-network fallback, before
+  attempting compatibility with older zero-padded two-digit MNCs.
+- VoWiFi history ignores stale request successes and failures after a newer refresh, line
+  change or unmount, and clears the previous line's error when switching lines.
+
 ## [1.9.1] - 2026-09-04
 
 ### Fixed

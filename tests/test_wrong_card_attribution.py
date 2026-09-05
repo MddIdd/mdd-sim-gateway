@@ -146,10 +146,12 @@ class ExitAttributionTests(unittest.TestCase):
                 patch.object(main, "engine", MagicMock()), \
                 patch.object(main, "_peer_line_registered", return_value=False), \
                 patch.object(main, "_save_exit_ledgers"), \
+                patch.object(main.cfg, "get_settings", return_value={"proxy": {"enabled": True}}), \
                 patch.object(main, "failover", MagicMock(
                     HOLD=failover.HOLD, SWITCH=failover.SWITCH, GIVE_UP=failover.GIVE_UP,
                     REPORT=failover.REPORT, BACK_OFF=failover.BACK_OFF)) as policy:
-            egress.status.return_value = {"exits": {}}
+            egress.line_country.return_value = "us"
+            egress.status.return_value = {"exits": {"us": {"mode": "subscription", "node": "a"}}}
             policy.record.return_value = (failover.HOLD, {})
             main._judge_exit_failure("1", {}, {"reason_code": "reg_rejected"}, 0.0)
         policy.classify.assert_called_once()

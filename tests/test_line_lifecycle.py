@@ -1154,6 +1154,24 @@ class ExitFailoverWiringTests(unittest.IsolatedAsyncioTestCase):
         reselect.assert_not_called()
         self.stalled.assert_not_called()
 
+    async def test_a_momentarily_unknown_subscription_node_keeps_the_walk(self):
+        # The host blanks the node on every status cycle until the Clash API answers, so a
+        # freeze can land on a cycle where the exit is known to be a subscription pool but
+        # its current member is not. That is no evidence: a backed-off or given-up walk must
+        # survive it unchanged, or the line re-walks the pool and notifies all over again.
+        ledger = {**main.failover.blank_ledger(), "node": "node-b", "strikes": 1,
+                  "tried": ["node-a", "node-b"], "exhausted": True, "given_up": True,
+                  "failures": 7, "reported": True}
+        main.hub.exit_ledgers["9"] = dict(ledger)
+        unknown = {"exits": {"us": {"node": "", "candidates": ["node-a", "node-b"],
+                                    "selection": "auto", "mode": "subscription"}}}
+        action, reselect, notify = self._judge("DOWN", 0, exits=unknown)
+        self.assertEqual(action, main.failover.HOLD)
+        self.assertEqual(main.hub.exit_ledgers["9"], ledger)
+        reselect.assert_not_called()
+        notify.assert_not_called()
+        self.stalled.assert_not_called()
+
     async def test_direct_freezes_keep_normal_retry_cadence(self):
         st = {"state": "TUNNEL_DOWN", "reason_code": "tunnel_network", "reason": "x"}
         with patch.object(main.egress, "status", return_value={"exits": {"us": {"mode": "direct"}}}), \

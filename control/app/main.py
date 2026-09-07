@@ -1780,9 +1780,17 @@ def _judge_exit_failure(iid: str, inst: dict, st: dict, stable_for: float) -> st
     country = egress.line_country(inst)
     exits = (egress.status().get("exits") or {}).get(country) or {}
     if (not cfg.get_settings().get("proxy", {}).get("enabled", False)
-            or exits.get("mode") != "subscription" or not exits.get("node")):
+            or exits.get("mode") != "subscription"):
+        # Direct, single-node and disabled routes have no pool to walk, so a ledger for them
+        # is stale by definition.
         if hub.exit_ledgers.pop(iid, None) is not None:
             _save_exit_ledgers()
+        return failover.HOLD
+    if not exits.get("node"):
+        # A subscription exit whose node is momentarily unknown: the host blanks it on every
+        # status cycle until the Clash API answers, so a slow query or a sing-box restart
+        # leaves it empty for one cycle. That says nothing about the exit — keep the walk
+        # (tried, exhausted, given_up) intact and judge again on the next freeze.
         return failover.HOLD
     node = str(exits.get("node") or "")
     candidates = [str(name) for name in (exits.get("candidates") or [])]

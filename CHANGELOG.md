@@ -10,7 +10,9 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   failed exit nodes. Unknown evidence does not trigger node changes or stalled-session cleanup,
   and notifications no longer claim a clean tunnel when that has not been established.
 - Direct and non-selectable routes bypass the exit ledger instead of entering an hourly
-  candidate-exhaustion retry cycle.
+  candidate-exhaustion retry cycle. A subscription exit whose current node is momentarily
+  unknown (the host blanks it until the Clash API answers) keeps its ledger, so a freeze in
+  that window no longer restarts the candidate walk or repeats the exhaustion notification.
 - Persisting a subscription selector's already-active node no longer restarts the shared
   sing-box process. Actual configuration changes and process failures still trigger a restart.
 - Notification destinations run independently on a dedicated, eight-worker delivery pool;

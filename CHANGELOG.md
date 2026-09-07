@@ -9,8 +9,24 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 - Missing tunnel evidence and local DNS, SIM, protocol or engine failures no longer count as
   failed exit nodes. Unknown evidence does not trigger node changes or stalled-session cleanup,
   and notifications no longer claim a clean tunnel when that has not been established.
+  Only a tunnel that went unanswered on the network (`tunnel_network`) with readable IKE
+  evidence now blames the exit. An ePDG that refuses the line before any EAP-AKA challenge
+  (`tunnel_not_authorized`), a setup failure with no clear cause, and a rekey that timed out
+  before the line had been stable for ten minutes are treated as inconclusive: the line keeps
+  rebuilding on its current exit and reports once after repeated failures instead of walking
+  the candidate pool. Previously an authorization refusal was attributed to the exit's source
+  address and moved the node; in practice those refusals have been carrier-side decisions
+  (location headers, IMEI binding, provisioning) that no other node fixes.
+- A partial or garbled EF.ICCID read is no longer treated as the card's identity. The control
+  plane, `pin_keeper`, `ami_usim` and `swu_ike` now require the full ten BCD bytes and an
+  all-digit value of at least fifteen digits; anything shorter reads as "could not identify
+  the card". Previously a truncated read decoded into a different number and could convict a
+  correctly bound reader as holding the wrong SIM, stranding the line
+  ([#69](https://github.com/MddIdd/mdd-sim-gateway/pull/69)).
 - Direct and non-selectable routes bypass the exit ledger instead of entering an hourly
-  candidate-exhaustion retry cycle.
+  candidate-exhaustion retry cycle. A subscription exit whose current node is momentarily
+  unknown (the host blanks it until the Clash API answers) keeps its ledger, so a freeze in
+  that window no longer restarts the candidate walk or repeats the exhaustion notification.
 - Persisting a subscription selector's already-active node no longer restarts the shared
   sing-box process. Actual configuration changes and process failures still trigger a restart.
 - Notification destinations run independently on a dedicated, eight-worker delivery pool;

@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react'
 import { api } from '../api.js'
-import { Softphone as Phone } from '../softphone.js'
+import { Softphone as Phone, audioInputPresence, microphoneMessage, MEDIA_FAIL_CAUSE } from '../softphone.js'
 import SimSelector from './SimSelector.jsx'
 import { useI18n } from '../i18n.jsx'
 
@@ -138,6 +138,9 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
   const [keypad, setKeypad] = useState(false)
   const [dtmfSeq, setDtmfSeq] = useState('')   // digits/symbols entered since the keypad opened
   const [recording, setRecording] = useState(false)
+  // 'present' | 'none' | 'insecure' | 'unknown'. Starts optimistic so the warning banner can
+  // only ever appear once the probe has actually answered.
+  const [micPresence, setMicPresence] = useState('present')
   const [calls, setCalls] = useState([])
   const [callSelMode, setCallSelMode] = useState(false)
   const [callSel, setCallSel] = useState(() => new Set())
@@ -353,6 +356,10 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
       else if (type === 'active') setCall((c) => c ? { ...c, state: 'active', startedAt: Date.now() } : c)
       else if (type === 'ended') clearCallSoon(data && data.cause)
       else if (type === 'failed') clearCallSoon(data && data.cause)
+      // The device can also disappear or be grabbed between the pre-dial check and the call
+      // (or on answering an incoming one, which has no pre-dial check at all). 'failed' has
+      // already reset the screen by now; this is what tells the user why.
+      else if (type === 'mediafail') toast(t(microphoneMessage(data)))
     }, audioRef.current)
     ph.start(prov, prov.host || location.hostname)
     phone.current = ph
@@ -364,6 +371,18 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
   // The <audio> element mounts with the component; make sure the phone (which may have been
   // created before the ref attached) points at it.
   useEffect(() => { if (phone.current && audioRef.current) phone.current.setAudioEl(audioRef.current) })
+
+  // Probe for a microphone once, and again whenever the set of devices changes (a headset
+  // plugged in should clear the warning without a reload). enumerateDevices() prompts for
+  // nothing and opens nothing, so this is free to run on mount.
+  useEffect(() => {
+    let alive = true
+    const probe = () => { audioInputPresence().then((p) => { if (alive) setMicPresence(p) }).catch(() => {}) }
+    probe()
+    const media = navigator.mediaDevices
+    media?.addEventListener?.('devicechange', probe)
+    return () => { alive = false; media?.removeEventListener?.('devicechange', probe) }
+  }, [])
 
   // in-call duration timer
   useEffect(() => {
@@ -460,6 +479,16 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
       toast(t('This browser has WebRTC disabled, so no call can be placed. A privacy or ad-blocking extension is the usual cause — allow WebRTC for this site, or open it in a private window.'))
       return
     }
+    // The status dot already says the line is down, but the Call button did not read it: the
+    // INVITE went into a websocket that is not there and the screen reported an ordinary
+    // failed call. 'connecting' is deliberately allowed through — the transport may come up
+    // within the call setup — while these three states cannot carry a call at all.
+    if (callTransport === 'vowifi' && ['disconnected', 'failed', 'unregistered'].includes(reg)) {
+      toast(t(reg === 'disconnected'
+        ? 'This browser is not connected to the line’s engine, so the call cannot be placed. Check that the engine for this SIM is running.'
+        : 'This line is not registered right now, so the call cannot be placed. Wait for the Registered indicator, or check the line’s VoWiFi status.'))
+      return
+    }
     if (callTransport === 'cellular') {
       // The cellular backend places a voice call. A service code is supplementary-service
       // signalling, which needs AT+CUSD instead, so fail loudly rather than dialling nonsense.
@@ -486,7 +515,18 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
       return
     }
     if (!phone.current) return
-    phone.current.unlockAudio(); phone.current.call(target); setNum('')
+    // Must stay synchronous inside the click: it is the transient user activation that makes
+    // remote audio playable later. Harmless if the microphone check below then aborts.
+    phone.current.unlockAudio()
+    // Re-probe rather than trust the banner's state: a microphone can be unplugged between
+    // the page loading and this click.
+    const presence = await audioInputPresence()
+    if (presence === 'none' || presence === 'insecure') {
+      setMicPresence(presence)
+      toast(t(microphoneMessage(presence)))
+      return
+    }
+    phone.current.call(target); setNum('')
   }
   const answer = () => { phone.current?.unlockAudio(); phone.current?.answer() }
   // Optimistically move to 'ended' on a local hangup. JsSIP will still fire 'ended'
@@ -544,7 +584,11 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
   const inCall = call && (call.state === 'active' || call.state === 'calling' || call.state === 'ringing' || call.state === 'incoming' || call.state === 'ended')
   const endLabel = (c, isCode) => (isCode
     ? t(SERVICE_CODE_END_LABEL[c] || 'The carrier gave no usable answer to this code.')
-    : t(c === 'Rejected' ? 'Call declined' : c === 'Busy' ? 'Busy' : c === 'Canceled' || c === 'Canceled/Rejected' ? 'Call cancelled' : 'Call ended'))
+    // A local media failure never reached the carrier, so reporting it as a plain "Call
+    // ended" describes the one thing that did NOT happen. Name it: the toast explains what
+    // to do about it, and this line stops the screen from blaming the call.
+    : t(c === MEDIA_FAIL_CAUSE ? 'Microphone unavailable'
+      : c === 'Rejected' ? 'Call declined' : c === 'Busy' ? 'Busy' : c === 'Canceled' || c === 'Canceled/Rejected' ? 'Call cancelled' : 'Call ended'))
 
   // Google-Voice-style incoming-call overlay (prominent, full-panel)
   const IncomingOverlay = call?.state === 'incoming' ? (
@@ -614,6 +658,12 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
           <div style={{ margin: '12px 0', padding: '10px 12px', borderRadius: 8, fontSize: 13,
             lineHeight: 1.5, color: '#b45309', background: '#fffbeb', border: '1px solid #fcd34d' }}>
             {t('This browser has WebRTC disabled, so no call can be placed. A privacy or ad-blocking extension is the usual cause — allow WebRTC for this site, or open it in a private window.')}
+          </div>
+        )}
+        {callTransport === 'vowifi' && (micPresence === 'none' || micPresence === 'insecure') && (
+          <div style={{ margin: '12px 0', padding: '10px 12px', borderRadius: 8, fontSize: 13,
+            lineHeight: 1.5, color: '#b45309', background: '#fffbeb', border: '1px solid #fcd34d' }}>
+            {t(microphoneMessage(micPresence))}
           </div>
         )}
         {callTransport === 'vowifi' && prov && !prov.enabled && (

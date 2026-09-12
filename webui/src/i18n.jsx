@@ -211,6 +211,21 @@ const zh = {
   'Carrier replied': '运营商已回复',
   'This browser has WebRTC disabled, so no call can be placed. A privacy or ad-blocking extension is the usual cause — allow WebRTC for this site, or open it in a private window.':
     '此浏览器已禁用 WebRTC，无法拨打电话。通常是隐私或广告拦截扩展所致——请为本站点放行 WebRTC，或改用无痕窗口打开。',
+  'No microphone was found, so this browser cannot place a call. Connect a microphone or headset — or use a device that has one — and try again.':
+    '未检测到麦克风，此浏览器无法拨打电话。请接入麦克风或耳机（或换用带麦克风的设备）后重试。',
+  'This site is not allowed to use the microphone, so the call cannot be placed. Allow microphone access for this site in the browser, then try again.':
+    '浏览器未允许本站点使用麦克风，无法拨打电话。请在浏览器中为本站点放行麦克风权限后重试。',
+  'The microphone is being held by another application, so the call cannot be placed. Close whatever is using it, then try again.':
+    '麦克风正被其他程序占用，无法拨打电话。请关闭占用麦克风的程序后重试。',
+  'Browsers only allow microphone access over HTTPS, so no call can be placed on this address. Open the web interface over HTTPS and try again.':
+    '浏览器仅在 HTTPS 下允许使用麦克风，当前地址无法拨打电话。请改用 HTTPS 访问 Web 界面后重试。',
+  'The browser could not open the microphone, so the call cannot be placed.':
+    '浏览器无法打开麦克风，无法拨打电话。',
+  'Microphone unavailable': '麦克风不可用',
+  'This browser is not connected to the line’s engine, so the call cannot be placed. Check that the engine for this SIM is running.':
+    '浏览器尚未连接到该线路的引擎，无法拨打电话。请确认该卡的引擎正在运行。',
+  'This line is not registered right now, so the call cannot be placed. Wait for the Registered indicator, or check the line’s VoWiFi status.':
+    '该线路当前未注册成功，无法拨打电话。请等待状态变为“已注册”，或检查该线路的 VoWiFi 状态。',
   'The gateway did not send this code. Its engine image may be older than service-code support — reload the installation to update it.':
     '网关未能送出该代码。引擎镜像可能早于服务码支持——请重新加载安装以更新引擎。',
   'Carrier accepted the code. This kind of code returns no text.':

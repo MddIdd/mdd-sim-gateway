@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api.js'
-import { Softphone as Phone } from './softphone.js'
+import { Softphone as Phone, microphoneMessage } from './softphone.js'
 import { useI18n } from './i18n.jsx'
 
 const GREEN = '#22c55e'
@@ -67,6 +67,10 @@ export default function GlobalSoftphone({ instances, excludedId, showToast }) {
             setCall((current) => current ? { ...current, state: 'ended', endCause: data?.cause } : current)
             setMuted(false)
             clearTimer.current = setTimeout(() => setCall(null), 1800)
+          } else if (type === 'mediafail') {
+            // Answering also starts with getUserMedia, so an incoming call dies the same way
+            // an outgoing one does — and the overlay would only say "Call ended".
+            showToast?.(t(microphoneMessage(data)))
           } else if (type === 'audioblocked') {
             showToast?.(t('Browser blocked call audio. Click the page once and try again.'))
           }

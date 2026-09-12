@@ -4,6 +4,51 @@ import JsSIP from 'jssip'
 // Surface JsSIP internals in the console to aid troubleshooting (registration, ICE, etc.)
 try { JsSIP.debug.enable('JsSIP:*') } catch {}
 
+// A call can die about ten milliseconds after the click with no INVITE ever sent, because
+// JsSIP's very first step is getUserMedia: no microphone, no call. JsSIP reports every one of
+// those failures as the single cause 'User Denied Media Access' (RTCSession's getUserMedia
+// catch), which says nothing about a machine that simply has no audio input — the case
+// reported from a desktop browser, where the dial screen vanished instantly and the console
+// showed only NotFoundError. Name the real reason instead, before the call is attempted.
+export const MEDIA_FAIL_CAUSE = 'User Denied Media Access'
+
+// Does this browser have a microphone at all? enumerateDevices() needs no permission and does
+// not open the device, and Chromium-family browsers still list one entry per AVAILABLE kind
+// before permission is granted — so a non-empty list with no 'audioinput' is proof there is no
+// microphone. An empty list means the browser is withholding device info, which proves
+// nothing: report 'unknown' rather than warn about a microphone that is probably there.
+export async function audioInputPresence() {
+  const media = navigator.mediaDevices
+  if (!media || !media.getUserMedia) return 'insecure'
+  if (!media.enumerateDevices) return 'unknown'
+  try {
+    const devices = await media.enumerateDevices()
+    if (!devices.length) return 'unknown'
+    return devices.some((device) => device.kind === 'audioinput') ? 'present' : 'none'
+  } catch { return 'unknown' }
+}
+
+// What to tell the user, keyed by the DOMException name the browser reported (or a presence
+// verdict). The returned strings are the i18n keys; the caller translates them.
+export function microphoneMessage(reason) {
+  switch (reason) {
+    case 'none':
+    case 'NotFoundError':
+    case 'DevicesNotFoundError':      // legacy Chrome name for the same condition
+      return 'No microphone was found, so this browser cannot place a call. Connect a microphone or headset — or use a device that has one — and try again.'
+    case 'NotAllowedError':
+    case 'PermissionDeniedError':
+      return 'This site is not allowed to use the microphone, so the call cannot be placed. Allow microphone access for this site in the browser, then try again.'
+    case 'NotReadableError':
+    case 'TrackStartError':
+      return 'The microphone is being held by another application, so the call cannot be placed. Close whatever is using it, then try again.'
+    case 'insecure':
+      return 'Browsers only allow microphone access over HTTPS, so no call can be placed on this address. Open the web interface over HTTPS and try again.'
+    default:
+      return 'The browser could not open the microphone, so the call cannot be placed.'
+  }
+}
+
 export class Softphone {
   // audioEl: a persistent <audio> element rendered by React and handed in via ref. Using one
   // stable, DOM-attached element (instead of a per-call `new Audio()`) is what makes remote
@@ -119,6 +164,10 @@ export class Softphone {
     // -fire events; bind exactly once per session.
     if (session.__vowifiBound) return
     session.__vowifiBound = true
+    // getUserMedia is JsSIP's first step on BOTH an outgoing call() and an answer(), and it
+    // fires the session's 'failed' BEFORE this event — so 'failed' on its own can never say
+    // why a call died in milliseconds. Pass the DOMException name up so the UI can name it.
+    session.on('getusermediafailed', (err) => this.emit('mediafail', (err && err.name) || 'MediaError'))
     const dir = session.direction  // 'incoming' | 'outgoing'
     if (dir === 'incoming') {
       const from = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'Unknown'

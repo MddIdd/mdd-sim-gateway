@@ -4,6 +4,19 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- A browser call that fails because the machine has no microphone now says so, before it is
+  even placed. JsSIP's first step is `getUserMedia`, so on a PC with no audio input the call
+  died about ten milliseconds after the click with no INVITE ever sent -- and because JsSIP
+  reports every media failure as one generic cause, the screen showed only "Call ended",
+  which reads as a carrier problem. The dialler now warns while idle when the browser reports
+  no microphone, blocks the dial with the reason (missing, blocked by permission, held by
+  another application, or a non-HTTPS address), and names the cause on the call screen if the
+  device disappears mid-call or an incoming call is answered without one. The Call button also
+  reads the registration indicator it already draws, instead of sending an INVITE into a
+  websocket that is not connected ([#90](https://github.com/MddIdd/mdd-sim-gateway/issues/90)).
+
 ## [1.9.4] - 2026-09-12
 
 ### Added

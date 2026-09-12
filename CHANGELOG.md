@@ -4,6 +4,8 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.9.4] - 2026-09-12
+
 ### Added
 
 - A line can present its own SIP User-Agent, set under Advanced IMS identity. Carriers that

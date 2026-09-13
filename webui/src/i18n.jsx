@@ -211,6 +211,23 @@ const zh = {
   'Carrier replied': '运营商已回复',
   'This browser has WebRTC disabled, so no call can be placed. A privacy or ad-blocking extension is the usual cause — allow WebRTC for this site, or open it in a private window.':
     '此浏览器已禁用 WebRTC，无法拨打电话。通常是隐私或广告拦截扩展所致——请为本站点放行 WebRTC，或改用无痕窗口打开。',
+  'No microphone was found. Calls can still be placed and you will hear the other side, but they will not hear you.':
+    '未检测到麦克风。仍可拨打电话，你能听到对方，但对方听不到你。接入麦克风或耳机后重新拨号即可正常通话。',
+  'Microphone access is blocked for this site. Calls can still be placed and you will hear the other side, but they will not hear you until you allow it in the browser.':
+    '浏览器未允许本站点使用麦克风。仍可拨打电话，你能听到对方，但在浏览器中放行麦克风权限之前，对方听不到你。',
+  'The microphone is being held by another application. Calls can still be placed and you will hear the other side, but they will not hear you until it is released.':
+    '麦克风正被其他程序占用。仍可拨打电话，你能听到对方，但在占用解除之前，对方听不到你。',
+  'Browsers only allow microphone access over HTTPS. Calls can still be placed on this address and you will hear the other side, but they will not hear you.':
+    '浏览器仅在 HTTPS 下允许使用麦克风。当前地址仍可拨打电话，你能听到对方，但对方听不到你。',
+  'The browser could not open the microphone. Calls can still be placed and you will hear the other side, but they will not hear you.':
+    '浏览器无法打开麦克风。仍可拨打电话，你能听到对方，但对方听不到你。',
+  'Listen only · the other side cannot hear you': '仅收听 · 对方听不到你的声音',
+  'No mic': '无麦克风',
+  'Microphone unavailable': '麦克风不可用',
+  'This browser is not connected to the line’s engine, so the call cannot be placed. Check that the engine for this SIM is running.':
+    '浏览器尚未连接到该线路的引擎，无法拨打电话。请确认该卡的引擎正在运行。',
+  'This line is not registered right now, so the call cannot be placed. Wait for the Registered indicator, or check the line’s VoWiFi status.':
+    '该线路当前未注册成功，无法拨打电话。请等待状态变为“已注册”，或检查该线路的 VoWiFi 状态。',
   'The gateway did not send this code. Its engine image may be older than service-code support — reload the installation to update it.':
     '网关未能送出该代码。引擎镜像可能早于服务码支持——请重新加载安装以更新引擎。',
   'Carrier accepted the code. This kind of code returns no text.':

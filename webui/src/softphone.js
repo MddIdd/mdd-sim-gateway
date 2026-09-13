@@ -4,6 +4,74 @@ import JsSIP from 'jssip'
 // Surface JsSIP internals in the console to aid troubleshooting (registration, ICE, etc.)
 try { JsSIP.debug.enable('JsSIP:*') } catch {}
 
+// A call can die about ten milliseconds after the click with no INVITE ever sent, because
+// JsSIP's very first step is getUserMedia: no microphone, no call. JsSIP reports every one of
+// those failures as the single cause 'User Denied Media Access' (RTCSession's getUserMedia
+// catch), which says nothing about a machine that simply has no audio input — the case
+// reported from a desktop browser, where the dial screen vanished instantly and the console
+// showed only NotFoundError. Name the real reason instead, before the call is attempted.
+export const MEDIA_FAIL_CAUSE = 'User Denied Media Access'
+
+// Does this browser have a microphone at all? enumerateDevices() needs no permission and does
+// not open the device, and Chromium-family browsers still list one entry per AVAILABLE kind
+// before permission is granted — so a non-empty list with no 'audioinput' is proof there is no
+// microphone. An empty list means the browser is withholding device info, which proves
+// nothing: report 'unknown' rather than warn about a microphone that is probably there.
+export async function audioInputPresence() {
+  const media = navigator.mediaDevices
+  if (!media || !media.getUserMedia) return 'insecure'
+  if (!media.enumerateDevices) return 'unknown'
+  try {
+    const devices = await media.enumerateDevices()
+    if (!devices.length) return 'unknown'
+    return devices.some((device) => device.kind === 'audioinput') ? 'present' : 'none'
+  } catch { return 'unknown' }
+}
+
+// What to tell the user, keyed by the DOMException name the browser reported (or a presence
+// verdict). None of these stop a call: a call with no microphone still carries the carrier's
+// audio and is worth placing (a voicemail box, a service code, an announcement). They say
+// what the call WILL be, so nobody discovers it by being unheard. The returned strings are
+// the i18n keys; the caller translates them.
+export function microphoneMessage(reason) {
+  switch (reason) {
+    case 'none':
+    case 'NotFoundError':
+    case 'DevicesNotFoundError':      // legacy Chrome name for the same condition
+      return 'No microphone was found. Calls can still be placed and you will hear the other side, but they will not hear you.'
+    case 'NotAllowedError':
+    case 'PermissionDeniedError':
+      return 'Microphone access is blocked for this site. Calls can still be placed and you will hear the other side, but they will not hear you until you allow it in the browser.'
+    case 'NotReadableError':
+    case 'TrackStartError':
+      return 'The microphone is being held by another application. Calls can still be placed and you will hear the other side, but they will not hear you until it is released.'
+    case 'insecure':
+      return 'Browsers only allow microphone access over HTTPS. Calls can still be placed on this address and you will hear the other side, but they will not hear you.'
+    default:
+      return 'The browser could not open the microphone. Calls can still be placed and you will hear the other side, but they will not hear you.'
+  }
+}
+
+// A local audio track is not optional: WebRTC has no offer to make without one, which is why
+// a missing microphone used to end the call before an INVITE was ever sent. Silence is a
+// perfectly good track. An oscillator at zero gain keeps the graph running so the destination
+// really does produce (empty) frames rather than nothing at all.
+function silentAudioStream() {
+  const Ctx = window.AudioContext || window.webkitAudioContext
+  if (!Ctx) return null
+  try {
+    const ctx = new Ctx()
+    const dest = ctx.createMediaStreamDestination()
+    const osc = ctx.createOscillator()
+    const gain = ctx.createGain()
+    gain.gain.value = 0
+    osc.connect(gain).connect(dest)
+    osc.start()
+    ctx.resume?.().catch?.(() => {})
+    return { stream: dest.stream, ctx, osc }
+  } catch { return null }
+}
+
 export class Softphone {
   // audioEl: a persistent <audio> element rendered by React and handed in via ref. Using one
   // stable, DOM-attached element (instead of a per-call `new Audio()`) is what makes remote
@@ -19,6 +87,7 @@ export class Softphone {
     this._rec = null
     this._recCtx = null
     this._recChunks = []
+    this._local = null                // local audio handed to JsSIP; ours to release
   }
 
   emit(type, data) { try { this.onEvent(type, data) } catch {} }
@@ -119,6 +188,10 @@ export class Softphone {
     // -fire events; bind exactly once per session.
     if (session.__vowifiBound) return
     session.__vowifiBound = true
+    // getUserMedia is JsSIP's first step on BOTH an outgoing call() and an answer(), and it
+    // fires the session's 'failed' BEFORE this event — so 'failed' on its own can never say
+    // why a call died in milliseconds. Pass the DOMException name up so the UI can name it.
+    session.on('getusermediafailed', (err) => this.emit('mediafail', (err && err.name) || 'MediaError'))
     const dir = session.direction  // 'incoming' | 'outgoing'
     if (dir === 'incoming') {
       const from = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'Unknown'
@@ -140,8 +213,8 @@ export class Softphone {
     // 'ended' (BYE received/sent) and 'failed' (setup error / non-2xx) are the terminal
     // events. Always null the session and tell the view so the UI resets to idle even if
     // only one of them fires.
-    session.on('ended', (d) => { if (this.session === session) this.session = null; this.emit('ended', { cause: d && d.cause }) })
-    session.on('failed', (d) => { if (this.session === session) this.session = null; this.emit('failed', { cause: d && d.cause }) })
+    session.on('ended', (d) => { if (this.session === session) this.session = null; this._releaseLocal(); this.emit('ended', { cause: d && d.cause }) })
+    session.on('failed', (d) => { if (this.session === session) this.session = null; this._releaseLocal(); this.emit('failed', { cause: d && d.cause }) })
     session.on('peerconnection', (ev) => {
       const pc = ev.peerconnection
       // ontrack fires as the remote audio track arrives. te.streams[0] is the usual source,
@@ -178,14 +251,51 @@ export class Softphone {
     } catch {}
   }
 
-  call(number) {
+  // Open the local audio for a call. JsSIP would do this itself, but only by calling
+  // getUserMedia and killing the whole session if it rejects — which is how a PC with no
+  // microphone lost the call ~10ms after the click. Take it over: hand JsSIP a real stream
+  // when there is one, and silence when there is not, so the call is placed either way and
+  // the UI can say which of the two it got.
+  async _acquireLocal() {
+    this._releaseLocal()              // never leave a previous call's track open
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      this._local = { stream, silent: false }
+    } catch (err) {
+      // navigator.mediaDevices is absent on an insecure origin, so the failure there is a
+      // TypeError from the call itself rather than a DOMException that names a device fault.
+      const reason = !navigator.mediaDevices ? 'insecure' : (err && err.name) || 'MediaError'
+      const silent = silentAudioStream()
+      this._local = { ...(silent || { stream: null }), silent: true, reason }
+    }
+    return this._local
+  }
+
+  // JsSIP only stops tracks it generated itself, so a stream we passed in stays live (and the
+  // browser keeps showing the recording indicator) unless we release it here.
+  _releaseLocal() {
+    const local = this._local
+    this._local = null
+    if (!local) return
+    try { local.stream?.getTracks().forEach((track) => track.stop()) } catch {}
+    try { local.osc?.stop() } catch {}
+    try { local.ctx?.close() } catch {}
+  }
+
+  async call(number) {
     if (!this.ua) return
     const domain = this.ua.configuration.uri.host
+    this.emit('calling', { to: number })
+    const local = await this._acquireLocal()
+    // stop() can land while getUserMedia is still deciding (the user switched lines, or the
+    // page navigated away). Do not raise a call on a torn-down UA.
+    if (this._dead || !this.ua) { this._releaseLocal(); return }
+    if (local.silent) this.emit('mediafallback', local.reason)
     const opts = {
       mediaConstraints: { audio: true, video: false },
+      mediaStream: local.stream || undefined,
       pcConfig: { rtcpMuxPolicy: 'require', iceServers: [] },
     }
-    this.emit('calling', { to: number })
     // '#' is not a legal SIP URI user character (RFC 3261 25.1), and JsSIP rejects the whole
     // URI rather than escaping it, so service codes like #225# would never leave the browser.
     // Asterisk percent-decodes the user part before dialplan matching, so EXTEN is unchanged.
@@ -197,13 +307,29 @@ export class Softphone {
       // ua.call() can throw synchronously (bad target, no media, etc.) before any session
       // event fires — surface it as a terminal 'failed' so the UI doesn't hang on "calling".
       this.session = null
+      this._releaseLocal()
       this.emit('failed', { cause: (err && err.message) || 'Call failed' })
     }
   }
 
-  answer() {
-    if (this.session) {
-      this.session.answer({ mediaConstraints: { audio: true, video: false }, pcConfig: { iceServers: [] } })
+  // Answering runs through the same media path as dialling, so an incoming call is answerable
+  // without a microphone too — the caller is heard, and the UI says they cannot hear back.
+  async answer() {
+    const session = this.session
+    if (!session) return
+    const local = await this._acquireLocal()
+    if (this._dead || this.session !== session) { this._releaseLocal(); return }
+    if (local.silent) this.emit('mediafallback', local.reason)
+    try {
+      session.answer({ mediaConstraints: { audio: true, video: false },
+                       mediaStream: local.stream || undefined, pcConfig: { iceServers: [] } })
+    } catch (err) {
+      // answer() throws synchronously on a session that is no longer answerable. Awaiting the
+      // media above means that throw would otherwise surface as an unhandled rejection and
+      // leave the overlay ringing at a call that is already gone.
+      this.session = null
+      this._releaseLocal()
+      this.emit('failed', { cause: (err && err.message) || 'Answer failed' })
     }
   }
 
@@ -213,6 +339,7 @@ export class Softphone {
       this.session = null
       try { s.terminate() } catch {}
     }
+    this._releaseLocal()
   }
 
   // Reject an un-answered INCOMING call. JsSIP's bare terminate() on a ringing incoming
@@ -287,7 +414,7 @@ export class Softphone {
     // Mark dead FIRST so any late JsSIP event from ua.stop() (async 'disconnected'/'unregistered')
     // is swallowed by emit() and cannot clobber a newly-started line's state.
     this._dead = true
-    this.hangup()
+    this.hangup()                     // releases the local track on its way through
     if (this._rec) { try { this._rec.stop() } catch {}; this._rec = null }
     if (this.ua) { try { this.ua.stop() } catch {} this.ua = null }
     if (this.remoteAudio) {

@@ -110,11 +110,12 @@ function Avatar({ label, color = 'var(--primary)', size = 96 }) {
   )
 }
 
-function RoundBtn({ icon, label, color, bg, onClick, active }) {
+function RoundBtn({ icon, label, color, bg, onClick, active, disabled = false }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
-      <button onClick={onClick} style={{
-        width: 58, height: 58, borderRadius: '50%', cursor: 'pointer', fontSize: 22,
+      <button onClick={disabled ? undefined : onClick} disabled={disabled} style={{
+        width: 58, height: 58, borderRadius: '50%', cursor: disabled ? 'not-allowed' : 'pointer', fontSize: 22,
+        opacity: disabled ? 0.45 : 1,
         border: '1px solid ' + (active ? color : 'var(--border-strong)'),
         background: bg || (active ? color + '22' : 'var(--hover)'),
         color: active ? color : 'var(--text-soft)', display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -122,6 +123,14 @@ function RoundBtn({ icon, label, color, bg, onClick, active }) {
       <span style={{ fontSize: 11, color: 'var(--text-mute)' }}>{label}</span>
     </div>
   )
+}
+
+// Shown for the whole length of a call that went out on a silent track. The user can hear the
+// call perfectly, so nothing on screen would otherwise suggest they are not being heard.
+function ListenOnlyNote({ t }) {
+  return <div style={{ fontSize: 12, color: '#f59e0b', marginTop: 5 }}>
+    {t('Listen only · the other side cannot hear you')}
+  </div>
 }
 
 export default function Softphone({ selected, subscribe, instances, cards, devices, setSelected, showToast, initialLoading, loadErrors }) {
@@ -138,9 +147,13 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
   const [keypad, setKeypad] = useState(false)
   const [dtmfSeq, setDtmfSeq] = useState('')   // digits/symbols entered since the keypad opened
   const [recording, setRecording] = useState(false)
-  // 'present' | 'none' | 'insecure' | 'unknown'. Starts optimistic so the warning banner can
-  // only ever appear once the probe has actually answered.
+  // 'present' | 'none' | 'insecure' | 'unknown'. Starts optimistic so the notice can only
+  // ever appear once the probe has actually answered.
   const [micPresence, setMicPresence] = useState('present')
+  // Set when THIS call went out on a silent track. Kept per call rather than derived from
+  // micPresence: a call placed before the headset was unplugged is still a normal call, and
+  // one placed after it must keep saying so until it ends.
+  const [listenOnly, setListenOnly] = useState(null)
   const [calls, setCalls] = useState([])
   const [callSelMode, setCallSelMode] = useState(false)
   const [callSel, setCallSel] = useState(() => new Set())
@@ -289,6 +302,8 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
     setKeypad(false); setMuted(false); setRecording(false)
     loadCalls()
   }
+  // The listen-only notice belongs to one call; drop it once the screen goes back to idle.
+  useEffect(() => { if (!call) setListenOnly(null) }, [call])
   // How long the 'ended' screen stays up. A service code's answer is NOT carried by the call:
   // it rides an in-dialog request, is parsed by the manager and arrives over the websocket
   // after the call is already torn down. Clearing on the ordinary 2.5s would hide the very
@@ -347,7 +362,7 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
       else if (type === 'ws') setReg((r) => data === 'connected' ? (r === 'registered' ? r : 'connecting') : 'disconnected')
       else if (type === 'regfail') setReg('failed')
       else if (type === 'incoming') setCall({ dir: 'in', number: data.from || 'Unknown', state: 'incoming', transport: 'vowifi' })
-      else if (type === 'calling') setCall({ dir: 'out', number: data.to, state: 'calling', transport: 'vowifi', serviceCode: isServiceCode(data.to) })
+      else if (type === 'calling') { setListenOnly(null); setCall({ dir: 'out', number: data.to, state: 'calling', transport: 'vowifi', serviceCode: isServiceCode(data.to) }) }
       // 'progress' fires for BOTH directions. On an incoming call JsSIP auto-sends 180 and
       // emits progress('local'); mapping that to 'ringing' would blow away the 'incoming'
       // state and hide the Answer/Decline overlay. Only an OUTGOING call still in the
@@ -356,9 +371,12 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
       else if (type === 'active') setCall((c) => c ? { ...c, state: 'active', startedAt: Date.now() } : c)
       else if (type === 'ended') clearCallSoon(data && data.cause)
       else if (type === 'failed') clearCallSoon(data && data.cause)
-      // The device can also disappear or be grabbed between the pre-dial check and the call
-      // (or on answering an incoming one, which has no pre-dial check at all). 'failed' has
-      // already reset the screen by now; this is what tells the user why.
+      // The call is going out on silence: the carrier is audible, the user is not. Say it
+      // once here and keep saying it on the call screen for as long as the call lasts.
+      else if (type === 'mediafallback') { setListenOnly(data); toast(t(microphoneMessage(data))) }
+      // Last resort: the browser could not even produce a silent track, so JsSIP asked for
+      // the microphone itself and the call really did die. 'failed' has already reset the
+      // screen by now; this is what tells the user why.
       else if (type === 'mediafail') toast(t(microphoneMessage(data)))
     }, audioRef.current)
     ph.start(prov, prov.host || location.hostname)
@@ -516,17 +534,12 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
     }
     if (!phone.current) return
     // Must stay synchronous inside the click: it is the transient user activation that makes
-    // remote audio playable later. Harmless if the microphone check below then aborts.
+    // remote audio playable later.
     phone.current.unlockAudio()
-    // Re-probe rather than trust the banner's state: a microphone can be unplugged between
-    // the page loading and this click.
-    const presence = await audioInputPresence()
-    if (presence === 'none' || presence === 'insecure') {
-      setMicPresence(presence)
-      toast(t(microphoneMessage(presence)))
-      return
-    }
-    phone.current.call(target); setNum('')
+    // A missing microphone does NOT stop the call — it goes out on a silent track and the
+    // phone reports 'mediafallback', which is what puts the listen-only notice on screen.
+    phone.current.call(target)
+    setNum('')
   }
   const answer = () => { phone.current?.unlockAudio(); phone.current?.answer() }
   // Optimistically move to 'ended' on a local hangup. JsSIP will still fire 'ended'
@@ -686,6 +699,7 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
               <div style={{ fontSize: 13, color: 'var(--text-mute)', marginTop: 4 }}>{call.serviceCode
                 ? t('Sending the code to the carrier…')
                 : (call.state === 'ringing' ? t('Ringing…') : t('Calling…'))}</div>
+              {listenOnly && !call.serviceCode && <ListenOnlyNote t={t} />}
             </div>
             <div style={{ display: 'flex', justifyContent: 'center', marginTop: 10 }}>
               <RoundBtn icon="✕" label={t('End')} color="#fff" bg={RED} onClick={hangup} />
@@ -703,6 +717,7 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
                 ? <div style={{ fontSize: 13, color: GREEN, marginTop: 4 }}>{call.ussdText || t('Carrier accepted the code. Waiting for its reply…')}</div>
                 : <div style={{ fontSize: 15, color: GREEN, marginTop: 4, fontVariantNumeric: 'tabular-nums' }}>{fmtDur(dur)}</div>}
               {call.transport === 'cellular' && <div style={{ fontSize: 12, color: '#f59e0b', marginTop: 5 }}>{t('Cellular call connected · browser audio unavailable')}</div>}
+              {listenOnly && call.transport !== 'cellular' && !call.serviceCode && <ListenOnlyNote t={t} />}
               {recording && <div style={{ fontSize: 12, color: RED, marginTop: 2 }}>● Recording</div>}
             </div>
             {call.transport !== 'cellular' && !call.serviceCode && keypad && (
@@ -726,7 +741,8 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
                 signalling that the carrier answers and tears down in about a second. Offering
                 them implies an audio call that is not happening — only Hang up is real here. */}
             {call.transport !== 'cellular' && !call.serviceCode && <div style={{ display: 'flex', justifyContent: 'center', gap: 22, marginTop: 8 }}>
-              <RoundBtn icon={muted ? '🔇' : '🎙'} label={t(muted ? 'Unmute' : 'Mute')} color="#60a5fa" onClick={toggleMute} active={muted} />
+              <RoundBtn icon={listenOnly ? '🚫' : muted ? '🔇' : '🎙'} label={t(listenOnly ? 'No mic' : muted ? 'Unmute' : 'Mute')}
+                color="#60a5fa" onClick={toggleMute} active={muted} disabled={Boolean(listenOnly)} />
               <RoundBtn icon="⌨" label={t('Keypad')} color="#a78bfa" onClick={() => setKeypad((v) => !v)} active={keypad} />
               <RoundBtn icon="⏺" label={t(recording ? 'Stop' : 'Record')} color={RED} onClick={toggleRecord} active={recording} />
             </div>}

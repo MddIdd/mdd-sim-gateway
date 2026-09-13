@@ -67,9 +67,13 @@ export default function GlobalSoftphone({ instances, excludedId, showToast }) {
             setCall((current) => current ? { ...current, state: 'ended', endCause: data?.cause } : current)
             setMuted(false)
             clearTimer.current = setTimeout(() => setCall(null), 1800)
+          } else if (type === 'mediafallback') {
+            // Answered without a microphone: the caller is audible, the user is not. Say so
+            // on the overlay for the whole call, not just in a toast that scrolls away.
+            setCall((current) => current?.id === id ? { ...current, listenOnly: true } : current)
+            showToast?.(t(microphoneMessage(data)))
           } else if (type === 'mediafail') {
-            // Answering also starts with getUserMedia, so an incoming call dies the same way
-            // an outgoing one does — and the overlay would only say "Call ended".
+            // Last resort: not even a silent track could be built, so the call really died.
             showToast?.(t(microphoneMessage(data)))
           } else if (type === 'audioblocked') {
             showToast?.(t('Browser blocked call audio. Click the page once and try again.'))
@@ -121,6 +125,9 @@ export default function GlobalSoftphone({ instances, excludedId, showToast }) {
       <div className="mono" style={{ fontSize: 26, fontWeight: 800 }}>{call.number}</div>
       <div style={{ fontSize: 13, color: 'var(--text-mute)', marginTop: 7 }}>{call.line}</div>
       {call.state === 'active' && <div className="mono" style={{ color: GREEN, marginTop: 12 }}>{clock}</div>}
+      {call.listenOnly && call.state !== 'ended' && <div style={{ fontSize: 12, color: '#f59e0b', marginTop: 8 }}>
+        {t('Listen only · the other side cannot hear you')}
+      </div>}
 
       {call.state === 'incoming' && <div style={{ display: 'flex', justifyContent: 'center', gap: 56, marginTop: 34 }}>
         <ActionButton label={t('Decline')} icon="✕" color={RED} onClick={decline} />

@@ -211,16 +211,18 @@ const zh = {
   'Carrier replied': '运营商已回复',
   'This browser has WebRTC disabled, so no call can be placed. A privacy or ad-blocking extension is the usual cause — allow WebRTC for this site, or open it in a private window.':
     '此浏览器已禁用 WebRTC，无法拨打电话。通常是隐私或广告拦截扩展所致——请为本站点放行 WebRTC，或改用无痕窗口打开。',
-  'No microphone was found, so this browser cannot place a call. Connect a microphone or headset — or use a device that has one — and try again.':
-    '未检测到麦克风，此浏览器无法拨打电话。请接入麦克风或耳机（或换用带麦克风的设备）后重试。',
-  'This site is not allowed to use the microphone, so the call cannot be placed. Allow microphone access for this site in the browser, then try again.':
-    '浏览器未允许本站点使用麦克风，无法拨打电话。请在浏览器中为本站点放行麦克风权限后重试。',
-  'The microphone is being held by another application, so the call cannot be placed. Close whatever is using it, then try again.':
-    '麦克风正被其他程序占用，无法拨打电话。请关闭占用麦克风的程序后重试。',
-  'Browsers only allow microphone access over HTTPS, so no call can be placed on this address. Open the web interface over HTTPS and try again.':
-    '浏览器仅在 HTTPS 下允许使用麦克风，当前地址无法拨打电话。请改用 HTTPS 访问 Web 界面后重试。',
-  'The browser could not open the microphone, so the call cannot be placed.':
-    '浏览器无法打开麦克风，无法拨打电话。',
+  'No microphone was found. Calls can still be placed and you will hear the other side, but they will not hear you.':
+    '未检测到麦克风。仍可拨打电话，你能听到对方，但对方听不到你。接入麦克风或耳机后重新拨号即可正常通话。',
+  'Microphone access is blocked for this site. Calls can still be placed and you will hear the other side, but they will not hear you until you allow it in the browser.':
+    '浏览器未允许本站点使用麦克风。仍可拨打电话，你能听到对方，但在浏览器中放行麦克风权限之前，对方听不到你。',
+  'The microphone is being held by another application. Calls can still be placed and you will hear the other side, but they will not hear you until it is released.':
+    '麦克风正被其他程序占用。仍可拨打电话，你能听到对方，但在占用解除之前，对方听不到你。',
+  'Browsers only allow microphone access over HTTPS. Calls can still be placed on this address and you will hear the other side, but they will not hear you.':
+    '浏览器仅在 HTTPS 下允许使用麦克风。当前地址仍可拨打电话，你能听到对方，但对方听不到你。',
+  'The browser could not open the microphone. Calls can still be placed and you will hear the other side, but they will not hear you.':
+    '浏览器无法打开麦克风。仍可拨打电话，你能听到对方，但对方听不到你。',
+  'Listen only · the other side cannot hear you': '仅收听 · 对方听不到你的声音',
+  'No mic': '无麦克风',
   'Microphone unavailable': '麦克风不可用',
   'This browser is not connected to the line’s engine, so the call cannot be placed. Check that the engine for this SIM is running.':
     '浏览器尚未连接到该线路的引擎，无法拨打电话。请确认该卡的引擎正在运行。',

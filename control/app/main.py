@@ -4084,7 +4084,13 @@ async def _unified_devices() -> list[dict]:
                        "rekey_minutes": (inst or {}).get("rekey_minutes",
                            (cfg.get_settings().get("rekey") or {}).get("minutes", 30)),
                        "ike_rekey_minutes": (inst or {}).get("ike_rekey_minutes",
-                           (cfg.get_settings().get("rekey") or {}).get("ike_minutes", 150))},
+                           (cfg.get_settings().get("rekey") or {}).get("ike_minutes", 150)),
+                       # With the data-channel rekey at 0, whether the line accepts the ePDG's
+                       # own rekey decides what 0 means: the carrier renews the keys, or nobody
+                       # does and the first ePDG rekey rebuilds the tunnel. Same default as the
+                       # engine config (config.py).
+                       "accept_epdg_rekey": bool((inst or {}).get("accept_epdg_esp_rekey",
+                           (cfg.get_settings().get("rekey") or {}).get("accept_epdg", False)))},
             "egress": {"node": (egress.status().get("lines") or {}).get(
                 str(inst["id"]) if inst else "", {}).get("node") or "",
                 # The picker lives on the settings page, so without these the device page shows

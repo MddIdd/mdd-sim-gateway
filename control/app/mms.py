@@ -217,9 +217,23 @@ def parse_recipients(value) -> list[str]:
     return recipients
 
 
+def _limit(settings: dict) -> int:
+    return int(settings.get("max_size") or mms_transport.DEFAULT_MAX_SIZE)
+
+
+def _size_problem(size: int, settings: dict) -> str | None:
+    if size <= _limit(settings):
+        return None
+    return f"the MMS is {-(-size // 1024)} KB once packaged; this line allows " \
+           f"{_limit(settings) // 1024} KB"
+
+
 def validate_outgoing(recipients: list[str], text: str, attachments: list[dict],
-                      settings: dict) -> str | None:
-    """Why this MMS cannot be sent as composed, or None."""
+                      settings: dict, subject: str = "") -> str | None:
+    """Why this MMS cannot be sent as composed, or None.
+
+    The size limit applies to the m-send-req exactly as it would be submitted -- SMIL,
+    headers, recipients and subject included -- not just to the attachments."""
     if not recipients:
         return "at least one recipient is required"
     if len(recipients) > 20:
@@ -234,21 +248,15 @@ def validate_outgoing(recipients: list[str], text: str, attachments: list[dict],
         if not content_type.startswith(SENDABLE_TYPES):
             return f"{item.get('name') or 'attachment'}: {content_type or 'unknown'} " \
                    "cannot be sent by MMS"
+    # Cheap bound first, so an oversized upload is refused without being packaged.
     size = len((text or "").encode("utf-8")) + sum(len(a.get("data") or b"") for a in attachments)
-    if size > int(settings.get("max_size") or mms_transport.DEFAULT_MAX_SIZE):
-        return f"the MMS is {size // 1024} KB; this line allows " \
-               f"{int(settings.get('max_size')) // 1024} KB"
-    return None
+    if size > _limit(settings):
+        return _size_problem(size, settings)
+    request = build_request("0" * 20, recipients, subject, _compose_parts(text, attachments))
+    return _size_problem(len(request), settings)
 
 
-def create_outgoing(instance: str, recipients: list[str], text: str, attachments: list[dict],
-                    subject: str = "") -> dict:
-    """Store a composed MMS (state "sending") and return its message record."""
-    peer = store.canonical_peer(instance, recipients[0]) if len(recipients) == 1 \
-        else ", ".join(recipients)
-    rec = store.create_outgoing_mms(instance, peer, to_addrs=recipients, subject=subject,
-                                    body=text or subject,
-                                    transaction_id=uuid.uuid4().hex[:20])
+def _compose_parts(text: str, attachments: list[dict]) -> list[dict]:
     parts = []
     if (text or "").strip():
         parts.append({"content_type": "text/plain", "data": text.encode("utf-8"),
@@ -260,6 +268,33 @@ def create_outgoing(instance: str, recipients: list[str], text: str, attachments
         name = str(item.get("name") or f"attachment{index + 1}.{extension}")
         parts.append({"content_type": content_type, "data": bytes(item["data"]),
                       "name": name, "content_id": f"part{index + 1}"})
+    return parts
+
+
+def build_request(transaction_id: str, recipients: list[str], subject: str,
+                  parts: list[dict]) -> bytes:
+    """The m-send-req for stored or composed parts ({content_type, data, name, content_id,
+    charset}): unique references, a checked SMIL presentation, then the PDU itself."""
+    pdu_parts = mms_pdu.assign_references([
+        mms_pdu.MmsPart(p["content_type"], p["data"], name=p.get("name") or "",
+                        content_id=p.get("content_id") or "",
+                        content_location=p.get("name") or "", charset=p.get("charset") or "")
+        for p in parts])
+    pdu_parts.insert(0, mms_pdu.build_smil(pdu_parts))
+    return mms_pdu.encode_send_req(transaction_id=transaction_id, to=recipients,
+                                   parts=pdu_parts, subject=subject or "",
+                                   delivery_report=True)
+
+
+def create_outgoing(instance: str, recipients: list[str], text: str, attachments: list[dict],
+                    subject: str = "") -> dict:
+    """Store a composed MMS (state "sending") and return its message record."""
+    peer = store.canonical_peer(instance, recipients[0]) if len(recipients) == 1 \
+        else ", ".join(recipients)
+    rec = store.create_outgoing_mms(instance, peer, to_addrs=recipients, subject=subject,
+                                    body=text or subject,
+                                    transaction_id=uuid.uuid4().hex[:20])
+    parts = _compose_parts(text, attachments)
     store.save_mms_content(rec["id"], parts, subject=subject, body=text or subject,
                            size=sum(len(p["data"]) for p in parts))
     return store.get_message(rec["id"])
@@ -277,16 +312,13 @@ def send(inst: dict, message_id: int, *, client=None, runner=subprocess.run) -> 
         return {"ok": False, "status": "failed", "error": "no such MMS"}
     settings = mms_transport.resolve_settings(inst)
     try:
-        stored = store.mms_parts_with_data(message_id)
-        parts = mms_pdu.assign_references([
-            mms_pdu.MmsPart(p["content_type"], p["data"], name=p["name"],
-                            content_id=p["content_id"], content_location=p["name"],
-                            charset=p["charset"])
-            for p in stored])
-        parts.insert(0, mms_pdu.build_smil(parts))
-        request = mms_pdu.encode_send_req(
-            transaction_id=row["transaction_id"], to=json.loads(row["to_addrs"] or "[]"),
-            parts=parts, subject=row["subject"] or "", delivery_report=True)
+        request = build_request(row["transaction_id"], json.loads(row["to_addrs"] or "[]"),
+                                row["subject"] or "", store.mms_parts_with_data(message_id))
+        # Checked again as submitted: the line's limit may have changed since it was composed.
+        too_big = _size_problem(len(request), settings)
+        if too_big:
+            store.set_mms_state(message_id, "failed", error=too_big, message_status="failed")
+            return {"ok": False, "status": "failed", "error": too_big}
         with _exchange(inst, settings, client, runner) as client:
             response = client.request(
                 "POST", settings["mmsc"], body=request,

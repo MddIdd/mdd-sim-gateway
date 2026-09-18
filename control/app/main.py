@@ -5338,7 +5338,8 @@ async def api_mms_send(iid: str, request: Request):
         data = await upload.read(int(settings["max_size"]) + 1)
         attachments.append({"name": os.path.basename(upload.filename or "")[:80],
                             "content_type": upload.content_type or "", "data": data})
-    problem = mms.validate_outgoing(recipients, text, attachments, settings)
+    problem = await asyncio.to_thread(mms.validate_outgoing, recipients, text, attachments,
+                                      settings, subject)
     if problem:
         raise HTTPException(422, problem)
     rec = await asyncio.to_thread(mms.create_outgoing, iid, recipients, text, attachments,

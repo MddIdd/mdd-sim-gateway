@@ -485,6 +485,29 @@ class SendTests(DownloadTests):
         self.assertEqual(mms.parse_recipients("+447700900123; +447700900124,+447700900123"),
                          ["+447700900123", "+447700900124"])
 
+    def test_the_limit_applies_to_the_packaged_message(self):
+        jpeg = {"name": "p.jpg", "content_type": "image/jpeg",
+                "data": b"\xff\xd8\xff" + b"x" * 997}
+        request = mms.build_request("0" * 20, ["+447700900123"], "",
+                                    mms._compose_parts("hi", [jpeg]))
+        self.assertGreater(len(request), 1002, "SMIL and headers take room of their own")
+        exact = {"max_size": len(request)}
+        self.assertIsNone(mms.validate_outgoing(["+447700900123"], "hi", [jpeg], exact))
+        self.assertIn("once packaged", mms.validate_outgoing(
+            ["+447700900123"], "hi", [jpeg], {"max_size": len(request) - 1}))
+        self.assertIn("once packaged", mms.validate_outgoing(
+            ["+447700900123"], "hi", [jpeg], exact, subject="a subject takes room too"))
+
+    def test_a_message_over_the_limit_is_never_submitted(self):
+        rec = self.compose()
+        client = FakeClient([])
+        with patch.object(t, "resolve_settings",
+                          return_value={**t.resolve_settings(self.inst), "max_size": 64}):
+            result = mms.send(self.inst, rec["id"], client=client)
+        self.assertEqual((result["status"], client.requests), ("failed", []))
+        self.assertIn("once packaged", result["error"])
+        self.assertEqual(store.get_message(rec["id"])["status"], "failed")
+
     def test_accepted_send_records_the_mmsc_message_id(self):
         rec = self.compose()
         self.assertEqual((rec["status"], rec["mms"]["state"]), ("pending", "sending"))

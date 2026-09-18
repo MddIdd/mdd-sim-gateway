@@ -5322,11 +5322,12 @@ def api_messages(iid: str, peer: str):
     return {"messages": store.list_messages(iid, peer)}
 
 
-@app.post("/api/instances/{iid}/mms/send")
-async def api_mms_send(iid: str, request: Request):
-    """Compose and submit an MMS. multipart/form-data: to (comma-separated), text, subject,
-    and any number of `attachments` files. Returns at once with the stored message; the
-    upload itself can take minutes over the modem and is reported over the websocket."""
+# Largest file accepted as picked: a camera original is often several megabytes and is
+# converted and shrunk here to fit the line's limit (mms.fit_attachments).
+MMS_UPLOAD_LIMIT = 25 * 1024 * 1024
+
+
+async def _mms_line(iid: str) -> tuple[dict, dict]:
     inst = await asyncio.to_thread(cfg.get_instance, iid)
     if not inst:
         raise HTTPException(404, "no such line")
@@ -5335,27 +5336,52 @@ async def api_mms_send(iid: str, request: Request):
         raise HTTPException(409, "MMS is turned off for this line")
     if not settings.get("configured"):
         raise HTTPException(409, "no MMSC is known for this line's carrier")
+    return inst, settings
+
+
+async def _mms_form(request: Request):
     try:
-        form = await request.form(max_files=20, max_fields=20,
-                                  max_part_size=int(settings["max_size"]) + 1024)
+        return await request.form(max_files=20, max_fields=40,
+                                  max_part_size=MMS_UPLOAD_LIMIT + 1024)
     except Exception as exc:  # noqa
         raise HTTPException(413 if "size" in str(exc).lower() else 422,
                             f"unreadable MMS form: {exc}") from None
-    recipients = mms.parse_recipients(form.get("to") or "")
+
+
+async def _read_upload(upload) -> dict:
+    data = await upload.read(MMS_UPLOAD_LIMIT + 1)
+    if len(data) > MMS_UPLOAD_LIMIT:
+        raise HTTPException(413, f"{upload.filename or 'the file'} is larger than "
+                                 f"{MMS_UPLOAD_LIMIT // (1024 * 1024)} MB")
+    return {"name": upload.filename or "", "content_type": upload.content_type or "",
+            "data": data}
+
+
+def _recipient_list(value) -> list[str]:
+    return mms.parse_recipients(value or "")
+
+
+@app.post("/api/instances/{iid}/mms/send")
+async def api_mms_send(iid: str, request: Request):
+    """Compose and submit an MMS. multipart/form-data: to (comma-separated), text, subject,
+    and any number of `attachments` files. Every attachment is converted and shrunk to fit
+    the line's limit.
+    Returns at once with the stored message; the upload to the MMSC can take minutes over
+    the modem and is reported over the websocket."""
+    _inst, settings = await _mms_line(iid)
+    form = await _mms_form(request)
+    recipients = _recipient_list(form.get("to"))
     text = str(form.get("text") or "")
     subject = str(form.get("subject") or "").strip()[:80]
     attachments = []
     for upload in form.getlist("attachments"):
-        if not hasattr(upload, "read"):
-            continue
-        data = await upload.read(int(settings["max_size"]) + 1)
-        attachments.append({"name": upload.filename or "",
-                            "content_type": upload.content_type or "", "data": data})
-    problem = await asyncio.to_thread(mms.validate_outgoing, recipients, text, attachments,
-                                      settings, subject)
+        if hasattr(upload, "read"):
+            attachments.append(await _read_upload(upload))
+    prepared, problem, _summary = await asyncio.to_thread(
+        mms.prepare_outgoing, recipients, text, attachments, settings, subject)
     if problem:
         raise HTTPException(422, problem)
-    rec = await asyncio.to_thread(mms.create_outgoing, iid, recipients, text, attachments,
+    rec = await asyncio.to_thread(mms.create_outgoing, iid, recipients, text, prepared,
                                   subject)
     await hub.broadcast({"type": "sms", "instance": str(iid), "message": rec})
     asyncio.create_task(_send_mms_task(str(iid), int(rec["id"])))
@@ -5426,7 +5452,7 @@ def _mms_settings_view(inst: dict) -> dict:
                                  if k != "password"}
     own = dict(inst.get("mms") or {})
     own["password_set"] = bool(own.pop("password", ""))
-    return {"effective": effective, "line": own, "formats": mms_media.capabilities()}
+    return {"effective": effective, "line": own, "formats": mms.attachment_formats()}
 
 
 @app.get("/api/instances/{iid}/mms/settings")

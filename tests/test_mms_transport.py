@@ -462,6 +462,10 @@ class DownloadTests(unittest.TestCase):
         self.assertEqual(store.get_message(out["id"])["status"], "unknown")
 
 
+# 40 frames (0.8 s) of 12.2 kbit/s AMR: 1286 bytes that no converter can shrink.
+AMR = b"#!AMR\n" + (bytes([7 << 3 | 0x04]) + b"\x00" * 31) * 40
+
+
 class SendTests(DownloadTests):
     def compose(self, text="hello", attachments=None):
         return mms.create_outgoing("1", ["+447700900123"], text,
@@ -477,8 +481,9 @@ class SendTests(DownloadTests):
                                                                       [], settings))
         self.assertIn("cannot be sent", mms.validate_outgoing(
             ["+447700900123"], "", [{"content_type": "text/html", "data": b"x"}], settings))
+        # Sound cannot be made smaller, so it counts as it is.
         self.assertIn("allows 1 KB", mms.validate_outgoing(
-            ["+447700900123"], "", [{"content_type": "image/png", "data": b"x" * 2000}],
+            ["+447700900123"], "", [{"content_type": "audio/amr", "data": AMR * 2}],
             settings))
         self.assertIsNone(mms.validate_outgoing(["+447700900123", "a@example.test"], "hi", [],
                                                 settings))
@@ -486,11 +491,10 @@ class SendTests(DownloadTests):
                          ["+447700900123", "+447700900124"])
 
     def test_the_limit_applies_to_the_packaged_message(self):
-        jpeg = {"name": "p.jpg", "content_type": "image/jpeg",
-                "data": b"\xff\xd8\xff" + b"x" * 997}
+        jpeg = {"name": "memo.amr", "content_type": "audio/amr", "data": AMR}
         request = mms.build_request("0" * 20, ["+447700900123"], "",
                                     mms._compose_parts("hi", [jpeg]))
-        self.assertGreater(len(request), 1002, "SMIL and headers take room of their own")
+        self.assertGreater(len(request), len(AMR) + 2, "SMIL and headers take room of their own")
         exact = {"max_size": len(request)}
         self.assertIsNone(mms.validate_outgoing(["+447700900123"], "hi", [jpeg], exact))
         self.assertIn("once packaged", mms.validate_outgoing(

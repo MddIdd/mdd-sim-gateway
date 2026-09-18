@@ -31,7 +31,7 @@ sudo ./install.sh install --mode docker   # 控制面也运行在 Docker
 `MDD_BUILD_IMAGES=1` 进行审核用源码构建。Release 资产下载或身份校验失败时安装会停止，不会
 悄悄退回一次耗时且占用大量临时空间的编译。
 
-可用环境变量：`MDD_PORT`、`MDD_DATA_DIR`、`MDD_BIND`、`MDD_ADVERTISE_ADDR`、`MDD_SINGBOX_VERSION`、`MDD_XRAY_VERSION`、`MDD_LPAC_VERSION`。安装程序会校验 sing-box 与 Xray-core 归档的 SHA-256；Xray-core 仅用于 Reality/XHTTP 节点的本机回环兼容层。更换固定依赖版本时必须同步审核并更新 SHA-256。离线迁移或显式执行源码构建时，可设置 `MDD_ENGINE_BASE_IMAGE`，从本机已审核的兼容引擎镜像创建只覆盖 MDD 运行脚本与模板的镜像；已经在可信构建机完成 `npm ci && npm run build` 时，也可设置 `MDD_REUSE_WEBUI=1` 复用随源码传入的 `webui/dist`。正式源码包的全新在线安装不需要设置这两项，安装程序会默认使用经校验的预构建镜像。必须执行全量 Engine 构建、但安装网络无法访问默认 GitHub mirror 时，可将 `PJPROJECT_REPOSITORY` 和 `ASTERISK_REPOSITORY` 显式指向另一条经过审核且包含相同固定 commit 的 HTTPS Git 仓库；未设置时继续使用 Dockerfile 中的项目 mirror。不得关闭 TLS 验证或改用未经审核的源码。
+可用环境变量：`MDD_PORT`、`MDD_DATA_DIR`、`MDD_BIND`、`MDD_ADVERTISE_ADDR`、`MDD_TURN_PORT`、`MDD_TURN_HOST`、`MDD_TURN_PUBLIC_PORT`、`MDD_ENGINE_SUBNET`、`MDD_MEDIA_SUBNET`、`MDD_SINGBOX_VERSION`、`MDD_XRAY_VERSION`、`MDD_LPAC_VERSION`。安装程序会校验 sing-box 与 Xray-core 归档的 SHA-256；Xray-core 仅用于 Reality/XHTTP 节点的本机回环兼容层。更换固定依赖版本时必须同步审核并更新 SHA-256。离线迁移或显式执行源码构建时，可设置 `MDD_ENGINE_BASE_IMAGE`，从本机已审核的兼容引擎镜像创建只覆盖 MDD 运行脚本与模板的镜像；已经在可信构建机完成 `npm ci && npm run build` 时，也可设置 `MDD_REUSE_WEBUI=1` 复用随源码传入的 `webui/dist`。正式源码包的全新在线安装不需要设置这两项，安装程序会默认使用经校验的预构建镜像。必须执行全量 Engine 构建、但安装网络无法访问默认 GitHub mirror 时，可将 `PJPROJECT_REPOSITORY` 和 `ASTERISK_REPOSITORY` 显式指向另一条经过审核且包含相同固定 commit 的 HTTPS Git 仓库；未设置时继续使用 Dockerfile 中的项目 mirror。不得关闭 TLS 验证或改用未经审核的源码。
 
 4G 模块收到的短信写入数据库后，新安装默认从 Modem/SIM 存储中删除，以免存储写满后无法再收短信；从旧版本升级的安装首次启动时会在配置中写入 `cellular_sms_storage: keep`，不自动清空模块，需要时手动改为 `delete`。可在控制服务的环境中设置 `MDD_CELLULAR_SMS_STORAGE`：`delete`（默认，入库后删除）、`when_full`（保留在模块中，仅在存储将满时删除最早的已入库短信）或 `keep`（始终保留）。`when_full` 通过 `AT+CPMS?` 读取容量，需要 ModemManager 以 `--debug` 运行；否则按 `MDD_CELLULAR_SMS_STORAGE_LIMIT`（默认 20 条）计算。配置文件 `settings.cellular_sms_storage` 若已设置，则优先于环境变量。
 
@@ -54,7 +54,20 @@ Docker 的保守 dangling-only 清理；“清理旧版与回滚镜像”是显�
 
 安装完成后，在受信的局域网或 VPN 中立即打开 `https://主机地址:8443`，创建至少 10 字符的管理员密码。首次设置完成前，任何能访问该端口的客户端都可申领初始管理员。配置自有证书时，证书和私钥应只允许 root 读取。运行数据目录默认为 `0700`，凭据文件为 `0600`。
 
-浏览器电话与 WebUI 同源：信令走 `wss://主机地址:8443/api/instances/<线路>/softphone/ws`，由控制面经 Docker 网桥转发到对应线路的引擎，引擎不向主机发布信令端口，也不需要单独信任证书。放在反向代理之后时，只需让 WebUI 地址本身转发 WebSocket 升级（`Upgrade`/`Connection` 头），无需为软电话另开路径或端口。通话音频仍使用各线路的 RTP 端口。
+浏览器电话与 WebUI 同源：信令走 `wss://主机地址:8443/api/instances/<线路>/softphone/ws`，由控制面经 Docker 网桥转发到对应线路的引擎，引擎不向主机发布信令端口，也不需要单独信任证书。放在反向代理之后时，只需让 WebUI 地址本身转发 WebSocket 升级（`Upgrade`/`Connection` 头），无需为软电话另开路径或端口。
+
+浏览器电话的通话音频经媒体中继（coturn）传输，所有线路共用一个端口，默认 `8478`，UDP 和 TCP 都需要放行；引擎本身不向主机发布任何端口。引擎位于两个固定网段的 Docker 网络：`mdd-engine`（默认 `172.29.0.0/24`，隧道外层、AMI 与信令）和仅中继可达的内部网络 `mdd-media`（默认 `172.29.1.0/24`，浏览器侧 RTP）。安装程序会先检查这两个网段是否与主机路由、其他 Docker 网络或国家出口隧道重叠，有冲突会停止并指出冲突对象，可用 `MDD_ENGINE_SUBNET`、`MDD_MEDIA_SUBNET` 改用其他网段。中继只允许 UDP 发往引擎的 RTP 端口，访问不到隧道、AMI、主机或其他网络；凭据有效期 24 小时，只发给已登录的浏览器。
+
+从外网或经反向代理使用浏览器电话时，除 WebUI 地址外还需把中继端口转发到网关，至少转发 UDP，TCP 用于受限网络下的兜底。浏览器默认使用访问 WebUI 的主机名连接中继；中继对外使用不同的主机名或端口时，设置 `MDD_TURN_HOST` / `MDD_TURN_PUBLIC_PORT` 后重新执行 `install.sh reload`。Nginx 可用 stream 模块转发，例如：
+
+```nginx
+stream {
+    server { listen 8478 udp; proxy_pass 网关地址:8478; proxy_timeout 1h; }
+    server { listen 8478;     proxy_pass 网关地址:8478; proxy_timeout 1h; }
+}
+```
+
+中继不提供 TURNS（TLS）：通话音频本身是端到端的 DTLS-SRTP，TURN 认证使用 HMAC，而浏览器不会把 WebUI 页面上接受的自签证书例外用于 TURNS。需要经 443 等 TLS 端口穿越严格防火墙时，由持有正式证书的反向代理终结 TLS 后转发到中继的 TCP 端口。
 
 ## 更新
 

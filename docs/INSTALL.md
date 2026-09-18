@@ -54,6 +54,8 @@ Docker 的保守 dangling-only 清理；“清理旧版与回滚镜像”是显�
 
 安装完成后，在受信的局域网或 VPN 中立即打开 `https://主机地址:8443`，创建至少 10 字符的管理员密码。首次设置完成前，任何能访问该端口的客户端都可申领初始管理员。配置自有证书时，证书和私钥应只允许 root 读取。运行数据目录默认为 `0700`，凭据文件为 `0600`。
 
+浏览器电话与 WebUI 同源：信令走 `wss://主机地址:8443/api/instances/<线路>/softphone/ws`，由控制面经 Docker 网桥转发到对应线路的引擎，引擎不向主机发布信令端口，也不需要单独信任证书。放在反向代理之后时，只需让 WebUI 地址本身转发 WebSocket 升级（`Upgrade`/`Connection` 头），无需为软电话另开路径或端口。通话音频仍使用各线路的 RTP 端口。
+
 ## 更新
 
 系统设置可在“自动更新”和“提示更新”中二选一，并分别选择全部版本或主版本。`update-policy.json` 为两类用户保存独立目标：`channels.all` 始终指向获准推送的最新正式 Release，`channels.main` 指向当前获准推送的主版本，即使其后已经发布补丁，落后的主版本设备仍能按 tag 找到并安装该版本。新安装默认自动更新主版本；每个通道仍须匹配目标版本并到达自己的 `not_before` 时间，单纯发布 Release 不会触发安装。提示模式默认提示全部版本，左下角版本号出现红点后，由管理员查看说明并确认“立即升级”。更新时控制面把请求写入编排器目录，主机上的 `mdd-sim-gateway-orchestrator` 以独立的临时 systemd 单元（`mdd-sim-gateway-update`）运行 `host/mdd_update.py` —— 下载对应 `vX.Y.Z` Release 资产、校验 SHA-256 和版本，并比较新源码与本机 Engine 指纹。Engine 输入发生变化时，更新器通过同一条直连或代理回退线路下载该版本与主机架构匹配的 Engine 资产，校验后导入 Docker，再核对架构、版本和两类指纹；输入未变化时不会重复下载。备份与覆盖源码后，安装器保存旧 Engine 的 `:previous` 回滚标签，启用新镜像并只重建旧镜像上的线路，控制面重新扫描在位 SIM 使线路自愈。Docker 控制面模式还会取得同架构、已校验的 Control 镜像并执行 `docker load`。`data/`、`.env`、`.git` 和虚拟环境均保留。日志见 `journalctl -u mdd-sim-gateway-update`、数据目录下 `update/reload.log` 与 `update/engine-image.log`。

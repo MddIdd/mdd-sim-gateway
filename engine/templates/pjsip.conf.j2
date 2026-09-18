@@ -109,14 +109,14 @@ transport=volte_ims
    (domain wins if set, else the manager-supplied advertise_addr = host LAN IP). #}
 {% set local_ext = domain or advertise_addr %}
 {% if webrtc_enable %}
-; WebRTC (wss) rides on the built-in HTTP/TLS server configured in http.conf.
-; bind is still REQUIRED (transport_apply rejects the object without it) even though
-; the actual listener is http.conf's tlsbindaddr; without it the transport object is
-; never created and any INVITE on the webrtc endpoint dies with 500
-; ("Unable to retrieve PJSIP transport 'transport-wss'").
-[transport-wss]
+; WebRTC (ws) rides on the built-in HTTP server configured in http.conf, reached only through
+; the control surface relay. bind is still REQUIRED (transport_apply rejects the object without
+; it) even though the actual listener is http.conf's bindaddr; without it the transport object
+; is never created and any INVITE on the webrtc endpoint dies with 500
+; ("Unable to retrieve PJSIP transport 'transport-ws'").
+[transport-ws]
 type=transport
-protocol=wss
+protocol=ws
 bind=0.0.0.0
 {% if local_ext %}
 external_media_address={{ local_ext }}
@@ -172,7 +172,7 @@ remove_existing=yes
 [{{ webrtc_user }}](endpoint-local)
 auth=auth-{{ webrtc_user }}
 aors={{ webrtc_user }}
-transport=transport-wss
+transport=transport-ws
 webrtc=yes
 dtls_auto_generate_cert=yes
 [auth-{{ webrtc_user }}](auth-local)

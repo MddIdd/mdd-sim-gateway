@@ -136,7 +136,7 @@ res_pjsip_header_funcs.so          # PJSIP_HEADER(add,P-Preferred-Identity)
 res_pjsip_rfc3329.so               # IMS sec-agree (Security-Client/Server) — pjsip.conf sec_encryption=yes
 res_pjsip_rfc3326.so               # Reason header -> HANGUPCAUSE
 res_pjsip_nat.so                   # rewrite_contact=yes, force_rport=yes
-res_pjsip_transport_websocket.so   # the wss softphone transport
+res_pjsip_transport_websocket.so   # the softphone WebSocket transport
 res_pjsip_authenticator_digest.so
 res_pjsip_outbound_authenticator_digest.so
 res_pjsip_endpoint_identifier_ip.so    # type=identify, match=<pcscf>
@@ -174,7 +174,7 @@ res_pjproject.so                   # mandatory pjproject glue
 res_resolver_unbound.so            # DNS for the IMS realm / SRV / NAPTR
 res_rtp_asterisk.so                # RTP, ICE, DTLS-SRTP, RFC 4733 DTMF. Critical.
 res_srtp.so                        # WebRTC media encryption
-res_http_websocket.so              # the wss listener behind transport-wss
+res_http_websocket.so              # the WS listener behind transport-ws
 res_sorcery_config.so              # pjsip.conf is read through sorcery
 res_sorcery_memory.so
 res_sorcery_astdb.so

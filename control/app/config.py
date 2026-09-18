@@ -220,10 +220,14 @@ def internal_event_token() -> str:
         save(data)
         return token
 
-# Port block allocation per instance index (avoids collisions across SIMs)
-PORT_BASE = {"sip_udp": 5060, "sip_tls": 5061, "webrtc": 8089, "ami": 5038,
+# Port block allocation per instance index (avoids collisions across SIMs).
+# A block saved by an older version may also carry "webrtc". Despite the name, that was only
+# the browser softphone's WSS *signalling* port (8089, 8099, ...). Signalling now reaches the
+# engine through the control surface relay (softphone_ws), so the key is ignored. WebRTC
+# *media* (ICE, DTLS-SRTP) is unaffected and still uses the rtp_start..rtp_span range below.
+PORT_BASE = {"sip_udp": 5060, "sip_tls": 5061, "ami": 5038,
              "rtp_start": 10000, "rtp_end": 11000}
-PORT_STRIDE = {"sip_udp": 10, "sip_tls": 10, "webrtc": 10, "ami": 10,
+PORT_STRIDE = {"sip_udp": 10, "sip_tls": 10, "ami": 10,
                "rtp_start": 2000, "rtp_end": 2000}
 
 
@@ -583,8 +587,8 @@ def rtp_span(block: dict) -> int:
 
 
 def _block_ports(block: dict) -> set[int]:
-    """Every host port a port-block occupies: the 4 fixed services + the RTP span."""
-    used = {block["sip_udp"], block["sip_tls"], block["webrtc"], block["ami"]}
+    """Every host port a port-block occupies: the 3 fixed services + the RTP span."""
+    used = {block["sip_udp"], block["sip_tls"], block["ami"]}
     used |= set(range(block["rtp_start"], block["rtp_start"] + rtp_span(block)))
     return used
 
@@ -620,13 +624,13 @@ def _host_port_free(port: int) -> bool:
 
 def _block_free(block: dict, reserved: set[int]) -> bool:
     """A candidate block is usable if none of its ports collide with reserved ports and
-    none of its 4 service ports are already listening on the host."""
+    none of its 3 service ports are already listening on the host."""
     bp = _block_ports(block)
     if bp & reserved:
         return False
-    # Only probe the 4 service ports on the host (probing 60 RTP ports every try is slow;
+    # Only probe the 3 service ports on the host (probing 60 RTP ports every try is slow;
     # RTP conflicts are caught by the reserved-set check against other instances).
-    for port in (block["sip_udp"], block["sip_tls"], block["webrtc"], block["ami"]):
+    for port in (block["sip_udp"], block["sip_tls"], block["ami"]):
         if not _host_port_free(port):
             return False
     return True
@@ -669,13 +673,13 @@ def ports_from_sip_base(data: dict, sip_udp: int, exclude_iid: str | None = None
         if sip_udp in clash or block["sip_tls"] in clash:
             raise ValueError(f"port {sip_udp} is already used by another line. "
                              f"Choose a different port or use Automatic.")
-        # A derived service/RTP port (WebRTC/control/RTP) overlaps a neighbouring line's
+        # A derived service/RTP port (control/RTP) overlaps a neighbouring line's
         # block. Tell the user what to avoid without exposing internal port math.
         raise ValueError(f"port {sip_udp} overlaps another line's port range "
                          f"(conflict at {min(clash)}). Try a port at least 10 away, or "
                          f"use Automatic.")
     for port, name in ((block["sip_udp"], "SIP/UDP"), (block["sip_tls"], "SIP/TLS"),
-                       (block["webrtc"], "WebRTC"), (block["ami"], "control")):
+                       (block["ami"], "control")):
         if not _host_port_free(port):
             raise ValueError(f"port {port} ({name}) is already in use on the host. "
                              f"Choose a different port or use Automatic.")
@@ -1123,7 +1127,6 @@ def render_instance_json(inst: dict, settings: dict) -> dict:
         # rtp_end to the published span rather than the (larger) block-allocation rtp_end.
         "rtp_end": min(ports["rtp_end"], ports["rtp_start"] + rtp_span(ports) - 1),
         "sip": {
-            "listen_addr": sip.get("listen_addr", "0.0.0.0"),
             "external": [],
             "advertise_address": advertise_address(settings),
             # ICE host-candidate mappings require an IP literal even when PJSIP itself uses
@@ -1154,7 +1157,6 @@ def render_instance_json(inst: dict, settings: dict) -> dict:
                 "enable": bool(webrtc.get("enable", True)),
                 "username": webrtc.get("username", "webrtc"),
                 "password": webrtc_password,
-                "port": 8089,
             },
         },
         # Defence in depth for instance.json files rendered from old or imported configs.

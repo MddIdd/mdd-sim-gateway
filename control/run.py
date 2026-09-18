@@ -46,8 +46,8 @@ def _self_signed(cert_path, key_path):
     except Exception:
         pass
     # Include the host LAN IP the WebUI/softphone actually connect to (the container's own
-    # hostname resolves to the docker-bridge IP, not the routable host IP). Both the 8443
-    # WebUI and the engine's 8089 WSS share this self-signed cert.
+    # hostname resolves to the docker-bridge IP, not the routable host IP). The browser softphone
+    # rides the same origin, so this is the only certificate a browser has to trust.
     adv = os.environ.get("MDD_ADVERTISE_ADDR", "").strip()
     if adv:
         try:

@@ -1,9 +1,11 @@
 [general]
 enabled=yes
+{% if webrtc_enable and local_addr %}
+; Browser softphone SIP-over-WebSocket. Plain WS on the docker-bridge address only: the control
+; surface relays it by line path and terminates TLS itself, nothing publishes this port to the
+; host, and the VoWiFi tunnel's inner address is deliberately not bound.
+bindaddr={{ local_addr }}
+bindport={{ webrtc_ws_port }}
+{% else %}
 bindaddr=127.0.0.1
-{% if webrtc_enable %}
-tlsenable=yes
-tlsbindaddr={{ sip_listen }}:{{ webrtc_port }}
-tlscertfile=/etc/asterisk/certificate.crt
-tlsprivatekey=/etc/asterisk/certificate.key
 {% endif %}

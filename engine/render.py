@@ -198,11 +198,11 @@ def build_context(cfg):
         "ami_user": cfg.get("ami_user", "vowifi"),
         "ami_secret": ami_secret,
         "manager_url": cfg.get("manager_url", ""),
-        "sip_listen": sip.get("listen_addr", "0.0.0.0"),
         "webrtc_enable": bool(webrtc.get("enable", True)),
         "webrtc_user": webrtc.get("username", "webrtc"),
         "webrtc_password": webrtc_password,
-        "webrtc_port": webrtc.get("port", 8089),
+        # Container-internal plain WS listener; must match control/app/softphone_ws.py.
+        "webrtc_ws_port": 8088,
         "domain": cfg.get("domain", ""),
         # Host-reachable address to advertise to LOCAL SIP clients (Contact + SDP). The
         # container's own IP is not routable off the docker bridge, so in-dialog requests

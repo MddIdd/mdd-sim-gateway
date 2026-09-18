@@ -5,7 +5,7 @@ import { useI18n } from '../i18n.jsx'
 const emptyInstance = () => ({
   id: '', name: '', imsi: '', mcc: '', mnc: '', imei: '', imeisv: '', pin: '', reader: '', proxy_country: '',
   reader_index: 0, reader_port: '', msisdn: '', smsc: '', enabled: true, apn: 'ims', idr_mode: 'apn', cp_mode: 'auto',
-  sip: { listen_addr: '0.0.0.0', webrtc: { enable: true } },
+  sip: { webrtc: { enable: true } },
   debug: { asterisk: false, charon: false },
 })
 

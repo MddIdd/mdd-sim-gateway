@@ -4,6 +4,16 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Changed
+
+- The browser softphone now connects to the same address as the WebUI, at
+  `/api/instances/<line>/softphone/ws`, and the control surface relays it to that line's engine
+  over the Docker bridge. Engines no longer publish a WSS port (8089, 8099, ...) to the host, no
+  longer need a TLS certificate mounted, and their SIP WebSocket no longer listens on the VoWiFi
+  tunnel's address. A second certificate exception for the softphone port is gone, and a reverse
+  proxy only has to forward WebSocket upgrades for the WebUI's own address -- a separate
+  `location` pointing at the engine port is no longer needed. RTP media ports are unchanged.
+
 ## [1.10.0] - 2026-09-18
 
 ### Upgrade notes

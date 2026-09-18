@@ -147,10 +147,11 @@ export class Softphone {
     })
   }
 
-  // prov: { username, password, ws_port, host, realm }
+  // prov: { username, password, ws_path, host, realm }
   start(prov, host) {
     if (this.ua) this.stop()
-    const wsUrl = `wss://${host}:${prov.ws_port}/ws`
+    // Same origin as the page: the control surface relays the socket to this line's engine.
+    const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${prov.ws_path}`
     const socket = new JsSIP.WebSocketInterface(wsUrl)
     const domain = prov.domain || host
     this.ua = new JsSIP.UA({

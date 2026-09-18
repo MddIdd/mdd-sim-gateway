@@ -2385,8 +2385,8 @@ class swu():
 
         Without this, every reply the container sources from its docker-bridge address (SWU_SOURCE,
         e.g. 172.17.0.3) — DNS lookups AND, crucially, the SYN-ACK/return traffic of any published
-        port (the WebRTC WSS softphone on 8089, the manager AMI) — matches a /1 route
-        and is sent into the ePDG, which drops it. Symptom: a LAN client's TCP to the mapped WSS port
+        port or bridge peer (the softphone WS relay, the manager AMI) — matches a /1 route
+        and is sent into the ePDG, which drops it. Symptom: a LAN client's TCP to a mapped port
         never completes its handshake (SYN in on eth0, SYN-ACK out on ipsec0, lost), so the softphone
         can't connect; and container DNS times out (40s).
 
@@ -2760,7 +2760,7 @@ class swu():
             # packet the container sources from its docker-bridge address (SWU_SOURCE): DNS lookups
             # (-> 40s timeouts, delaying the IMS SMS RP-ACK past its correlation window so the SMSC
             # 488s it and re-pushes the same SM forever) AND the return traffic of any published port
-            # (the WebRTC WSS softphone, AMI) — a LAN client's SYN-ACK goes out ipsec0
+            # (the softphone WS relay, AMI) — a LAN client's SYN-ACK goes out ipsec0
             # and is lost, so the softphone can never connect. Fix both at once with SOURCE-based
             # policy routing: traffic sourced from the container's LAN address goes out the LAN link,
             # while IMS traffic (sourced from the tunnel INNER address) still uses the /1 tunnel

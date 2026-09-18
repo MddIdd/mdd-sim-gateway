@@ -1,14 +1,19 @@
 """Attachments are converted and shrunk on the gateway to fit a line's MMS limit."""
 from __future__ import annotations
 
+import asyncio
 import io
+import os
 import random
+import tempfile
+import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from PIL import Image
 
-from control.app import mms, mms_convert, mms_pdu
+from control.app import main, mms, mms_convert, mms_pdu, mms_staging, store
 
 TO = ["+447700900123"]
 
@@ -185,6 +190,61 @@ class ImageFitTests(unittest.TestCase):
             _fitted, problem, _summary = fit([{"name": "a.webp", "content_type": "image/webp",
                                                "data": photo(64, 64, "WEBP")}], 600 * 1024)
             self.assertIn("cannot convert", problem)
+
+
+class StagingTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.patch = patch.object(store, "DATA_DIR", self.temp.name)
+        self.patch.start()
+
+    def tearDown(self):
+        self.patch.stop()
+        self.temp.cleanup()
+
+    def test_an_upload_is_kept_until_removed(self):
+        meta = mms_staging.stage("1", "../IMG 1.heic", "image/heic", b"original")
+        self.assertEqual(meta["name"], "IMG 1.heic")
+        self.assertEqual(mms_staging.load("1", [meta["id"]])[0]["data"], b"original")
+        with self.assertRaises(KeyError):
+            mms_staging.load("2", [meta["id"]])
+        with self.assertRaises(KeyError):
+            mms_staging.load("1", ["../../etc"])
+        self.assertEqual(mms_staging.preview_file("1", meta["id"])[1], "image/heic")
+        mms_staging.save_fitted("1", meta["id"], "image/jpeg", b"small")
+        path, content_type = mms_staging.preview_file("1", meta["id"])
+        self.assertEqual((Path(path).read_bytes(), content_type), (b"small", "image/jpeg"))
+        mms_staging.remove("1", [meta["id"]])
+        with self.assertRaises(KeyError):
+            mms_staging.load("1", [meta["id"]])
+
+    def test_a_line_holds_a_bounded_number_and_old_uploads_are_swept(self):
+        ids = [mms_staging.stage("1", f"{i}.jpg", "image/jpeg", b"x")["id"]
+               for i in range(mms_staging.MAX_PER_LINE)]
+        with self.assertRaises(OverflowError):
+            mms_staging.stage("1", "one-more.jpg", "image/jpeg", b"x")
+        self.assertEqual(mms_staging.sweep(), 0)
+        self.assertEqual(mms_staging.sweep(now=time.time() + mms_staging.TTL_SECONDS + 1),
+                         len(ids))
+        self.assertEqual(mms_staging.list_ids("1"), [])
+
+
+class FitEndpointTests(StagingTests):
+    def test_the_composer_learns_each_size_and_the_total(self):
+        original = photo()
+        meta = mms_staging.stage("1", "IMG_1.jpg", "image/jpeg", original)
+        settings = {"enabled": True, "configured": True, "max_size": 150 * 1024}
+        with patch.object(main.cfg, "get_instance", return_value={"id": "1"}), \
+                patch.object(main.mms_transport, "resolve_settings", return_value=settings):
+            result = asyncio.run(main.api_mms_attachments_fit(
+                "1", {"ids": [meta["id"]], "text": "hello", "to": "+447700900123"}))
+        self.assertTrue(result["ok"])
+        self.assertLessEqual(result["size"], result["limit"])
+        entry = result["attachments"][0]
+        self.assertEqual((entry["id"], entry["original_size"]), (meta["id"], len(original)))
+        path, content_type = mms_staging.preview_file("1", meta["id"])
+        self.assertEqual(content_type, "image/jpeg")
+        self.assertEqual(os.path.getsize(path), entry["size"])
 
 
 if __name__ == "__main__":

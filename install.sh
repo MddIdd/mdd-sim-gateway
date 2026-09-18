@@ -36,6 +36,11 @@
 #   MDD_DATA_DIR        runtime data dir                           (default <repo>/data)
 #   MDD_ADVERTISE_ADDR  host LAN IP for SIP/WebRTC media           (default: auto-detect)
 #   MDD_BIND            control bind addr                          (default 0.0.0.0)
+#   MDD_TURN_PORT       host port (udp+tcp) of the softphone media relay (default 8478)
+#   MDD_TURN_HOST       host name browsers use for the relay, if not the WebUI's own
+#   MDD_TURN_PUBLIC_PORT relay port browsers use, if a proxy/NAT forwards a different one
+#   MDD_ENGINE_SUBNET   engines' Docker network (eth0)             (default 172.29.0.0/24)
+#   MDD_MEDIA_SUBNET    internal media network (eth1, relay only)  (default 172.29.1.0/24)
 #   MDD_ENGINE_BASE_IMAGE optional trusted local engine image for an offline overlay migration
 #   MDD_ENGINE_DISTRIBUTION_IMAGE optional already-pulled, release-matched Engine image
 #   PJPROJECT_REPOSITORY optional reviewed pjproject Git repository override for a full build
@@ -65,12 +70,23 @@ else
 fi
 MDD_BIND="${MDD_BIND:-0.0.0.0}"
 MDD_ADVERTISE_ADDR="${MDD_ADVERTISE_ADDR:-}"
+MDD_TURN_PORT="${MDD_TURN_PORT:-8478}"
+MDD_TURN_HOST="${MDD_TURN_HOST:-}"
+MDD_TURN_PUBLIC_PORT="${MDD_TURN_PUBLIC_PORT:-}"
+MDD_ENGINE_SUBNET="${MDD_ENGINE_SUBNET:-172.29.0.0/24}"
+MDD_MEDIA_SUBNET="${MDD_MEDIA_SUBNET:-172.29.1.0/24}"
 
 CONTROL_IMAGE="mdd-sim-gateway/control"
 ENGINE_IMAGE="mdd-sim-gateway/engine"
 ENGINE_HANDOFF_MANIFEST="$REPO_DIR/engine/release-image.SHA256SUMS"
 CONTROL_NAME="mdd-sim-gateway-control"
 ENGINE_PREFIX="mdd-sim-gateway-engine-"
+# The softphone's media relay and the networks engines sit on (control/app/turn.py).
+TURN_VERSION="4.17.2"
+TURN_IMAGE="mdd-sim-gateway/turn:$TURN_VERSION"
+TURN_NAME="mdd-sim-gateway-turn"
+ENGINE_NETWORK="mdd-engine"
+MEDIA_NETWORK="mdd-media"
 MDD_DOCKER_LABEL="io.mdd-sim-gateway.managed"
 WEBUI_BUILD_IMAGE="node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32"
 
@@ -461,6 +477,22 @@ docker_preflight() {
     esac
   done
 
+  case "$MDD_TURN_PORT" in ''|*[!0-9]*) die "MDD_TURN_PORT must be a number between 1 and 65535";; esac
+  [ "$MDD_TURN_PORT" -ge 1 ] && [ "$MDD_TURN_PORT" -le 65535 ] || die "MDD_TURN_PORT must be between 1 and 65535"
+  [ "$MDD_TURN_PORT" != "$MDD_PORT" ] || die "MDD_TURN_PORT and MDD_PORT must differ"
+  if docker inspect "$TURN_NAME" >/dev/null 2>&1 && ! docker_container_owned "$TURN_NAME"; then
+    die "container name '$TURN_NAME' is already used by another project"
+  fi
+  turn_publishers=$(docker ps --filter "publish=$MDD_TURN_PORT" --format '{{.Names}}' 2>/dev/null || true)
+  for name in $turn_publishers; do
+    [ "$name" = "$TURN_NAME" ] && docker_container_owned "$name" && continue
+    die "port $MDD_TURN_PORT (softphone media relay) is already published by Docker container '$name'; set MDD_TURN_PORT"
+  done
+  if [ -z "$turn_publishers" ] && have ss && ss -lntuH 2>/dev/null | awk '{print $5}' | \
+      grep -Eq "(^|:)$MDD_TURN_PORT$"; then
+    die "port $MDD_TURN_PORT (softphone media relay) is already in use by a non-MDD process; set MDD_TURN_PORT"
+  fi
+
   publishers=$(docker ps --filter "publish=$MDD_PORT" --format '{{.Names}}' 2>/dev/null || true)
   for name in $publishers; do
     [ "$name" = "$CONTROL_NAME" ] && docker_container_owned "$name" && continue
@@ -473,6 +505,67 @@ docker_preflight() {
     fi
   fi
   info "existing Docker daemon passed ownership, port and privilege checks; daemon configuration was left unchanged"
+}
+
+# Engines join two fixed-subnet networks: mdd-engine (eth0: tunnel, AMI, softphone WebSocket)
+# and the internal mdd-media (eth1: the browser leg's RTP, reachable only by the media relay).
+# The control plane can create them too; doing it here first checks the subnets against host
+# routes, other Docker networks and the country tunnels, and lets a Docker-mode control plane
+# join mdd-engine at start.
+ensure_networks() {
+  python3 "$REPO_DIR/host/mdd_networks.py" \
+    --engine-name "$ENGINE_NETWORK" --engine-subnet "$MDD_ENGINE_SUBNET" \
+    --media-name "$MEDIA_NETWORK" --media-subnet "$MDD_MEDIA_SUBNET" || \
+    die "choose free subnets with MDD_ENGINE_SUBNET / MDD_MEDIA_SUBNET and re-run"
+  for spec in "$ENGINE_NETWORK $MDD_ENGINE_SUBNET" "$MEDIA_NETWORK $MDD_MEDIA_SUBNET"; do
+    set -- $spec
+    name=$1; subnet=$2
+    if docker network inspect "$name" >/dev/null 2>&1; then
+      label=$(docker network inspect -f "{{ index .Labels \"$MDD_DOCKER_LABEL\" }}" "$name" 2>/dev/null || true)
+      [ "$label" = true ] || die "Docker network '$name' exists but was not created by MDD"
+      current=$(docker network inspect -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}' "$name")
+      case " $current " in
+        *" $subnet "*) ;;
+        *) die "Docker network '$name' uses $current, not $subnet: stop MDD's containers and run 'docker network rm $name', or set the subnet back";;
+      esac
+      continue
+    fi
+    gateway=$(python3 -c 'import ipaddress, sys; print(ipaddress.ip_network(sys.argv[1])[1])' "$subnet")
+    set -- --driver bridge --subnet "$subnet" --gateway "$gateway" \
+      --label "$MDD_DOCKER_LABEL=true" --label io.mdd-sim-gateway.component=network
+    [ "$name" = "$MEDIA_NETWORK" ] && set -- "$@" --internal
+    docker network create "$@" "$name" >/dev/null || die "could not create Docker network $name ($subnet)"
+    info "created Docker network $name ($subnet)"
+  done
+}
+
+turn_fingerprint() {
+  cat "$REPO_DIR/turn/Dockerfile" "$REPO_DIR/turn/entrypoint.sh" | sha256sum | cut -d' ' -f1
+}
+
+# The relay image: coturn pinned by digest (turn/Dockerfile) plus nftables. Rebuilt only when
+# turn/ changes; the control plane replaces the running relay when the image does.
+ensure_turn_image() {
+  fp=$(turn_fingerprint)
+  current=$(docker image inspect -f '{{ index .Config.Labels "io.mdd-sim-gateway.turn-fp" }}' \
+    "$TURN_IMAGE" 2>/dev/null || true)
+  if [ "$current" = "$fp" ]; then
+    info "media relay image $TURN_IMAGE is current"
+    return
+  fi
+  info "building media relay image $TURN_IMAGE (coturn $TURN_VERSION)…"
+  docker build --build-arg TURN_FP="$fp" -t "$TURN_IMAGE" "$REPO_DIR/turn" || \
+    die "could not build the media relay image"
+}
+
+remove_turn() {
+  if docker inspect "$TURN_NAME" >/dev/null 2>&1 && docker_container_owned "$TURN_NAME"; then
+    docker rm -f "$TURN_NAME" >/dev/null 2>&1 || true
+  fi
+  for name in "$ENGINE_NETWORK" "$MEDIA_NETWORK"; do
+    label=$(docker network inspect -f "{{ index .Labels \"$MDD_DOCKER_LABEL\" }}" "$name" 2>/dev/null || true)
+    [ "$label" = true ] && docker network rm "$name" >/dev/null 2>&1 || true
+  done
 }
 
 managed_control_exists() {
@@ -977,6 +1070,12 @@ Environment=MDD_ADVERTISE_ADDR=$LAN_IP
 Environment=MDD_ENGINE_IMAGE=$ENGINE_IMAGE
 Environment=MDD_MANAGER_URL=https://host.docker.internal:$MDD_PORT
 Environment=MDD_PCSCD_DIR=/run/pcscd
+Environment=MDD_TURN_IMAGE=$TURN_IMAGE
+Environment=MDD_TURN_PORT=$MDD_TURN_PORT
+Environment=MDD_TURN_HOST=$MDD_TURN_HOST
+Environment=MDD_TURN_PUBLIC_PORT=$MDD_TURN_PUBLIC_PORT
+Environment=MDD_ENGINE_SUBNET=$MDD_ENGINE_SUBNET
+Environment=MDD_MEDIA_SUBNET=$MDD_MEDIA_SUBNET
 Environment=PYTHONUNBUFFERED=1
 ExecStart=$VENV_DIR/bin/python run.py
 Restart=on-failure
@@ -1193,7 +1292,16 @@ run_control() {
     -e MDD_PCSCD_DIR=/run/pcscd \
     -e MDD_SINGBOX_BIN=/usr/local/bin/sing-box \
     -e MDD_XRAY_BIN=/usr/local/bin/xray \
+    -e MDD_TURN_IMAGE="${TURN_IMAGE}" \
+    -e MDD_TURN_PORT="${MDD_TURN_PORT}" \
+    -e MDD_TURN_HOST="${MDD_TURN_HOST}" \
+    -e MDD_TURN_PUBLIC_PORT="${MDD_TURN_PUBLIC_PORT}" \
+    -e MDD_ENGINE_SUBNET="${MDD_ENGINE_SUBNET}" \
+    -e MDD_MEDIA_SUBNET="${MDD_MEDIA_SUBNET}" \
     "$CONTROL_IMAGE"
+  # AMI and the softphone WebSocket are reached on the engines' own network.
+  docker network connect "$ENGINE_NETWORK" "$CONTROL_NAME" || \
+    die "could not attach the control plane to $ENGINE_NETWORK"
 }
 
 # Re-scan present cards after old engine containers have been removed. Restart only the control
@@ -1250,6 +1358,8 @@ cmd_install() {
   fi
   prepare_release_images
   ensure_engine_image
+  ensure_turn_image
+  ensure_networks
   persist_mode "$MODE"
   if [ "$MODE" = docker ]; then
     setup_venv
@@ -1275,6 +1385,7 @@ cmd_install() {
     printf '   %sControl:%s Docker container (%s); engines run in Docker\n' "$B" "$N" "$CONTROL_NAME"
   fi
   printf '   %sManage:%s  %s status | logs | reload | disable-autostart | uninstall\n' "$B" "$N" "$0"
+  printf '   %sCalls:%s   browser softphone media uses port %s (udp+tcp); allow it through any firewall\n' "$B" "$N" "$MDD_TURN_PORT"
   printf '   Accept the self-signed cert in your browser, then provision your SIM in the dashboard.\n'
 }
 
@@ -1321,6 +1432,8 @@ cmd_reload() {
   else
     ensure_engine_image
   fi
+  ensure_turn_image
+  ensure_networks
   if [ "$MODE" = docker ]; then
     setup_venv
     build_control_image
@@ -1460,10 +1573,11 @@ cmd_uninstall() {
   info "removing MDD containers…"
   if managed_control_exists; then docker rm -f "$CONTROL_NAME" >/dev/null; fi
   for n in $(engine_names); do docker rm -f "$n" >/dev/null 2>&1 || true; done
+  remove_turn
   if [ "$PURGE" = 1 ]; then
     # Full teardown: also drop images (incl. the slow, patched engine image) and data+venv.
     info "removing MDD images…"
-    docker rmi -f "$CONTROL_IMAGE" "$ENGINE_IMAGE" >/dev/null 2>&1 || true
+    docker rmi -f "$CONTROL_IMAGE" "$ENGINE_IMAGE" "$TURN_IMAGE" >/dev/null 2>&1 || true
     warn "purging data dir: $(data_dir_abs) and venv $VENV_DIR"
     rm -rf "$MDD_DATA_DIR" "$VENV_DIR"
     rm -f "$DATA_DIR_STATE"
@@ -1498,6 +1612,8 @@ cmd_status() {
   fi
   printf '%sEngines:%s\n' "$B" "$N"
   docker ps -a --filter "name=^${ENGINE_PREFIX}" --format '  {{.Names}}  {{.Status}}' 2>/dev/null || true
+  printf '%sMedia relay:%s\n' "$B" "$N"
+  docker ps -a --filter "name=^${TURN_NAME}$" --format '  {{.Names}}  {{.Status}}  {{.Ports}}' 2>/dev/null || true
   printf '%sDependencies:%s\n' "$B" "$N"
   if have sing-box; then printf '  sing-box  %s\n' "$(sing-box version 2>/dev/null | head -1)"; else printf '  sing-box  (not installed)\n'; fi
   if have xray; then printf '  Xray-core  %s\n' "$(xray version 2>/dev/null | head -1)"; else printf '  Xray-core  (not installed)\n'; fi

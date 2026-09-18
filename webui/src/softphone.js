@@ -31,6 +31,12 @@ export async function audioInputPresence() {
 // The i18n key shown when a call cannot carry audio because the gateway's media relay is down.
 export const RELAY_UNAVAILABLE =
   'The media relay is not running, so calls would have no audio. Check the gateway, then try again.'
+// ...and when the relay runs but this browser cannot reach its port.
+export const RELAY_UNREACHABLE =
+  'This browser cannot reach the media relay. Check that its port (8478 by default) is forwarded to the gateway, then try again.'
+// How long to wait for a relay candidate once ICE gathering starts. A reachable relay answers
+// within a round trip or two; an unreachable one would otherwise be retried for tens of seconds.
+const RELAY_GATHER_TIMEOUT_MS = 8000
 
 // What to tell the user, keyed by the DOMException name the browser reported (or a presence
 // verdict). None of these stop a call: a call with no microphone still carries the carrier's
@@ -207,11 +213,41 @@ export class Softphone {
     // slowest TURN transport: a relay port forwarded for UDP only would hold every call until
     // the TCP attempt times out.
     let relayCandidate = false
+    let relayTimer = null
     session.on('icecandidate', (event) => {
       if (relayCandidate || !event.candidate || event.candidate.type !== 'relay') return
       relayCandidate = true
+      clearTimeout(relayTimer)
       event.ready()
     })
+    // No relay candidate means this browser cannot reach the relay's port, typically because a
+    // proxy or router in front of the gateway does not forward it. The browser keeps retrying
+    // the TURN server for tens of seconds before JsSIP sends anything, so the call would simply
+    // never ring. Give up early and say why. The clock starts when gathering does, which for an
+    // incoming call is on answer, not while it rings.
+    const relayUnreachable = () => {
+      clearTimeout(relayTimer)
+      if (relayCandidate || this.session !== session) return
+      this.emit('relayunreachable')
+      try { session.terminate() } catch {}
+    }
+    const watchGathering = (pc) => {
+      if (!pc || pc.__relayWatched) return
+      pc.__relayWatched = true
+      const check = () => {
+        const state = pc.iceGatheringState
+        if (state === 'gathering' && !relayTimer) relayTimer = setTimeout(relayUnreachable, RELAY_GATHER_TIMEOUT_MS)
+        else if (state === 'complete') relayUnreachable()
+      }
+      pc.addEventListener('icegatheringstatechange', check)
+      check()
+    }
+    // An outgoing call's RTCPeerConnection already exists (JsSIP creates it inside ua.call(),
+    // before 'peerconnection' could be heard here); an incoming one's is created on answer.
+    watchGathering(session.connection)
+    session.on('peerconnection', ({ peerconnection }) => watchGathering(peerconnection))
+    session.on('ended', () => clearTimeout(relayTimer))
+    session.on('failed', () => clearTimeout(relayTimer))
     const dir = session.direction  // 'incoming' | 'outgoing'
     if (dir === 'incoming') {
       const from = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'Unknown'

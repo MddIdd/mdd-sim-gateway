@@ -125,14 +125,30 @@ class BrowserTests(unittest.TestCase):
         self.assertIn("event.candidate.type !== 'relay'", handler)
         self.assertIn("event.ready()", handler)
 
-    def test_both_softphones_can_refresh_provisioning_and_report_a_missing_relay(self):
-        for source in (GLOBAL, VIEW):
-            self.assertIn("() => api.softphone(id))", source)
-            self.assertIn("'relayunavailable'", source)
-            self.assertIn("t(RELAY_UNAVAILABLE)", source)
-        key = SOFTPHONE_LIB[SOFTPHONE_LIB.index("RELAY_UNAVAILABLE ="):].split("'")[1]
+    def test_an_unreachable_relay_ends_the_attempt_early_and_says_why(self):
+        body = SOFTPHONE_LIB[SOFTPHONE_LIB.index("const relayUnreachable = () => {"):]
+        body = body[:body.index("session.on('ended', () => clearTimeout(relayTimer))")]
+        # Only once gathering has started, so an incoming call may ring as long as it likes.
+        self.assertIn("state === 'gathering' && !relayTimer", body)
+        # JsSIP creates an outgoing call's connection before handleSession can listen for it.
+        self.assertIn("watchGathering(session.connection)", body)
+        self.assertIn("session.on('peerconnection', ({ peerconnection }) => watchGathering(peerconnection))", body)
+        self.assertIn("setTimeout(relayUnreachable, RELAY_GATHER_TIMEOUT_MS)", body)
+        self.assertIn("state === 'complete') relayUnreachable()", body)
+        self.assertIn("if (relayCandidate || this.session !== session) return", body)
+        self.assertIn("this.emit('relayunreachable')", body)
+        self.assertIn("session.terminate()", body)
+
+    def test_both_softphones_can_refresh_provisioning_and_report_relay_problems(self):
         zh = I18N[I18N.index("const zh"):I18N.index("const en")]
-        self.assertIn(f"'{key}'", zh)
+        for event, name in (("relayunavailable", "RELAY_UNAVAILABLE"),
+                            ("relayunreachable", "RELAY_UNREACHABLE")):
+            for source in (GLOBAL, VIEW):
+                self.assertIn("() => api.softphone(id))", source)
+                self.assertIn(f"'{event}'", source)
+                self.assertIn(f"t({name})", source)
+            key = SOFTPHONE_LIB[SOFTPHONE_LIB.index(f"{name} ="):].split("'")[1]
+            self.assertIn(f"'{key}'", zh)
 
 
 if __name__ == "__main__":

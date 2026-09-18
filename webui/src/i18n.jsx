@@ -47,6 +47,7 @@ const zh = {
   'Browser blocked call audio. Click the page once and try again.': '浏览器阻止了通话音频。请点击一次页面后重试。',
   'The media relay is not running, so calls would have no audio. Check the gateway, then try again.': '媒体中继未运行，通话将没有声音。请检查网关后重试。',
   'Media relay unavailable': '媒体中继不可用',
+  'This browser cannot reach the media relay. Check that its port (8478 by default) is forwarded to the gateway, then try again.': '浏览器连接不到媒体中继。请确认中继端口（默认 8478）已转发到网关后重试。',
   'Detecting card readers…': '正在检测读卡器…', 'No PC/SC smart-card reader found': '未找到 PC/SC 智能卡读卡器',
   'Connect a USB smart-card reader with your SIM inserted — it is detected automatically and this page updates in real time. Softphone, Messages and SIM Config are disabled until a reader is present.': '请连接已插入 SIM 卡的 USB 智能卡读卡器。系统会自动检测并实时更新；在检测到读卡器前，软电话、短信和 SIM 配置不可用。',
   'No card readers detected. Plug in a PC/SC reader and insert a SIM.': '未检测到读卡器。请连接 PC/SC 读卡器并插入 SIM 卡。',

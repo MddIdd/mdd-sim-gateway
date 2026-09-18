@@ -278,10 +278,11 @@ def send(inst: dict, message_id: int, *, client=None, runner=subprocess.run) -> 
     settings = mms_transport.resolve_settings(inst)
     try:
         stored = store.mms_parts_with_data(message_id)
-        parts = [mms_pdu.MmsPart(p["content_type"], p["data"], name=p["name"],
-                                 content_id=p["content_id"] or f"p{p['seq']}",
-                                 content_location=p["name"], charset=p["charset"])
-                 for p in stored]
+        parts = mms_pdu.assign_references([
+            mms_pdu.MmsPart(p["content_type"], p["data"], name=p["name"],
+                            content_id=p["content_id"], content_location=p["name"],
+                            charset=p["charset"])
+            for p in stored])
         parts.insert(0, mms_pdu.build_smil(parts))
         request = mms_pdu.encode_send_req(
             transaction_id=row["transaction_id"], to=json.loads(row["to_addrs"] or "[]"),
@@ -308,7 +309,8 @@ def send(inst: dict, message_id: int, *, client=None, runner=subprocess.run) -> 
         store.set_mms_state(message_id, "sent", error="", message_ref=conf.message_id,
                             message_status="sent")
         return {"ok": True, "status": "sent", "error": None}
-    except (mms_transport.MmsTransportError, mms_pdu.MmsDecodeError, OSError) as exc:
+    except (mms_transport.MmsTransportError, mms_pdu.MmsDecodeError, OSError,
+            ValueError) as exc:
         status = "unknown" if getattr(exc, "after_send", False) or \
             isinstance(exc, mms_pdu.MmsDecodeError) else "failed"
         store.set_mms_state(message_id, "failed", error=str(exc), message_status=status)

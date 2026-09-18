@@ -502,6 +502,24 @@ class SendTests(DownloadTests):
         self.assertEqual((stored["status"], stored["mms"]["state"], stored["mms"]["message_ref"]),
                          ("sent", "sent", "MSG-7"))
 
+    def test_same_named_attachments_are_sent_with_distinct_references(self):
+        jpeg = b"\xff\xd8\xff\xe0" + b"x" * 8
+        rec = self.compose("caption & more", [
+            {"name": "photo.jpg", "content_type": "image/jpeg", "data": jpeg + b"1"},
+            {"name": "photo.jpg", "content_type": "image/jpeg", "data": jpeg + b"2"}])
+        conf = bytes([0x8C, 0x81, 0x98]) + m.write_text_string("x") + b"\x8D\x92" + \
+            bytes([0x92, 0x80])
+        client = FakeClient([t.HttpResponse(200, {}, conf)])
+        self.assertEqual(mms.send(self.inst, rec["id"], client=client)["status"], "sent")
+        sent = m.decode_pdu(client.requests[0][2])
+        smil = sent.parts[0]
+        by_id = {p.content_id: p for p in sent.parts}
+        self.assertEqual(len(by_id), 4)
+        m.check_smil(smil, sent.parts[1:])
+        images = [p for p in sent.parts if p.content_type == "image/jpeg"]
+        self.assertEqual([p.name for p in images], ["photo.jpg", "photo.jpg"])
+        self.assertEqual(len({p.content_location for p in images}), 2)
+
     def test_refusal_is_failed_and_a_lost_answer_is_unknown(self):
         rec = self.compose()
         refused = bytes([0x8C, 0x81, 0x98]) + m.write_text_string("x") + b"\x8D\x92" + \

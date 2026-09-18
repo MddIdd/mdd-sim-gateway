@@ -1,0 +1,191 @@
+"""Attachments are converted and shrunk on the gateway to fit a line's MMS limit."""
+from __future__ import annotations
+
+import io
+import random
+import unittest
+from unittest.mock import patch
+
+from PIL import Image
+
+from control.app import mms, mms_convert, mms_pdu
+
+TO = ["+447700900123"]
+
+
+def photo(width=3000, height=2000, fmt="JPEG", mode="RGB", **options) -> bytes:
+    """A noisy picture, which compresses about as badly as a real photo."""
+    rng = random.Random(width * height)
+    image = Image.frombytes(mode, (width // 8, height // 8),
+                            bytes(rng.randrange(256) for _ in range(
+                                (width // 8) * (height // 8) * len(mode))))
+    image = image.resize((width, height), Image.BILINEAR)
+    out = io.BytesIO()
+    image.save(out, fmt, **options)
+    return out.getvalue()
+
+
+def fit(attachments, limit, text="hi"):
+    return mms.fit_attachments(attachments, text, "", TO, {"max_size": limit})
+
+
+class ImageFitTests(unittest.TestCase):
+    def test_a_camera_photo_is_shrunk_into_the_limit(self):
+        original = photo()
+        self.assertGreater(len(original), 300 * 1024)
+        fitted, problem, summary = fit([{"name": "IMG_1.jpg", "content_type": "image/jpeg",
+                                         "data": original}], 100 * 1024)
+        self.assertIsNone(problem)
+        self.assertTrue(summary["fits"])
+        self.assertLessEqual(summary["size"], 100 * 1024)
+        item = summary["attachments"][0]
+        self.assertTrue(item["converted"])
+        self.assertEqual((item["original_size"], item["content_type"]),
+                         (len(original), "image/jpeg"))
+        self.assertLessEqual(max(item["width"], item["height"]), mms_convert.IMAGE_EDGES[0])
+        picture = Image.open(io.BytesIO(fitted[0]["data"]))
+        self.assertEqual(picture.format, "JPEG")
+        self.assertFalse(picture.info.get("progressive"), "baseline JPEG for older phones")
+
+    def test_a_small_picture_that_fits_is_sent_untouched(self):
+        original = photo(400, 300, "PNG")
+        fitted, problem, summary = fit([{"name": "a.png", "content_type": "image/png",
+                                         "data": original}], 600 * 1024)
+        self.assertIsNone(problem)
+        self.assertEqual(fitted[0]["data"], original)
+        self.assertFalse(summary["attachments"][0]["converted"])
+
+    def test_a_picture_sent_as_it_is_loses_its_location_but_no_pixel(self):
+        image = Image.open(io.BytesIO(photo(400, 300)))
+        exif = Image.Exif()
+        exif[0x010F] = "PhoneMaker"                               # Make
+        exif.get_ifd(0x8825)[2] = (51.0, 30.0, 0.0)               # GPSLatitude
+        out = io.BytesIO()
+        image.save(out, "JPEG", exif=exif, quality=85)
+        original = out.getvalue()
+        self.assertIn(b"PhoneMaker", original)
+        fitted, problem, summary = fit([{"name": "a.jpg", "content_type": "image/jpeg",
+                                         "data": original}], 600 * 1024)
+        self.assertIsNone(problem)
+        sent = fitted[0]["data"]
+        self.assertNotIn(b"Exif", sent)
+        self.assertNotIn(b"PhoneMaker", sent)
+        self.assertFalse(summary["attachments"][0]["converted"], "not re-encoded")
+        self.assertEqual(Image.open(io.BytesIO(sent)).tobytes(),
+                         Image.open(io.BytesIO(original)).tobytes(), "the same pixels")
+
+        png = io.BytesIO()
+        info = __import__("PIL.PngImagePlugin", fromlist=["PngInfo"]).PngInfo()
+        info.add_text("Location", "somewhere")
+        Image.new("RGB", (40, 40), "red").save(png, "PNG", pnginfo=info)
+        fitted, _problem, _summary = fit([{"name": "a.png", "content_type": "image/png",
+                                           "data": png.getvalue()}], 600 * 1024)
+        self.assertNotIn(b"somewhere", fitted[0]["data"])
+        self.assertEqual(Image.open(io.BytesIO(fitted[0]["data"])).getpixel((5, 5)),
+                         (255, 0, 0))
+
+    def test_a_rotated_photo_is_turned_upright_rather_than_losing_its_rotation(self):
+        image = Image.open(io.BytesIO(photo(400, 300)))
+        exif = Image.Exif()
+        exif[0x0112] = 6                                          # rotate 90 degrees
+        out = io.BytesIO()
+        image.save(out, "JPEG", exif=exif)
+        fitted, _problem, summary = fit([{"name": "r.jpg", "content_type": "image/jpeg",
+                                          "data": out.getvalue()}], 600 * 1024)
+        sent = Image.open(io.BytesIO(fitted[0]["data"]))
+        self.assertEqual(sent.size, (300, 400))
+        self.assertNotIn(0x0112, sent.getexif())
+        self.assertTrue(summary["attachments"][0]["converted"])
+
+    def test_formats_phones_do_not_show_become_jpeg_even_when_small(self):
+        for fmt, content_type, name in (("WEBP", "image/webp", "a.webp"),
+                                        ("BMP", "image/bmp", "a.bmp"),
+                                        ("HEIF", "image/heic", "IMG_2.HEIC"),
+                                        ("AVIF", "image/avif", "a.avif")):
+            with self.subTest(fmt):
+                fitted, problem, summary = fit([{"name": name, "content_type": content_type,
+                                                 "data": photo(320, 240, fmt)}], 600 * 1024)
+                self.assertIsNone(problem)
+                self.assertEqual(fitted[0]["content_type"], "image/jpeg")
+                self.assertTrue(fitted[0]["name"].endswith(".jpg"))
+                self.assertEqual(summary["attachments"][0]["original_type"], content_type)
+
+    def test_transparency_becomes_white(self):
+        image = Image.new("RGBA", (40, 40), (0, 0, 0, 0))
+        out = io.BytesIO()
+        image.save(out, "WEBP", lossless=True)
+        fitted, _problem, _summary = fit([{"name": "t.webp", "content_type": "image/webp",
+                                          "data": out.getvalue()}], 600 * 1024)
+        pixel = Image.open(io.BytesIO(fitted[0]["data"])).getpixel((20, 20))
+        self.assertTrue(all(channel > 240 for channel in pixel))
+
+    def test_pictures_share_the_room_and_a_small_one_keeps_its_size(self):
+        small = photo(300, 200)
+        big = [photo(2400 + i * 8, 1800) for i in range(2)]
+        attachments = [{"name": "s.jpg", "content_type": "image/jpeg", "data": small}] + \
+            [{"name": "photo.jpg", "content_type": "image/jpeg", "data": b} for b in big]
+        fitted, problem, summary = fit(attachments, 200 * 1024)
+        self.assertIsNone(problem)
+        self.assertLessEqual(summary["size"], 200 * 1024)
+        self.assertEqual(fitted[0]["data"], small)
+        sizes = [a["size"] for a in summary["attachments"][1:]]
+        self.assertLess(abs(sizes[0] - sizes[1]), 0.3 * max(sizes), "an even share each")
+
+    def test_what_cannot_shrink_is_counted_as_it_is(self):
+        amr = b"#!AMR\n" + (bytes([7 << 3 | 0x04]) + b"\x00" * 31) * 2000   # 40 s, 64 KB
+        _fitted, problem, summary = fit([{"name": "m.amr", "content_type": "audio/amr",
+                                          "data": amr},
+                                         {"name": "p.jpg", "content_type": "image/jpeg",
+                                          "data": photo()}], 100 * 1024)
+        self.assertIsNone(problem)
+        self.assertFalse(summary["attachments"][0]["adjustable"])
+        self.assertEqual(summary["attachments"][0]["size"], len(amr))
+        _fitted, problem, _summary = fit([{"name": "m.amr", "content_type": "audio/amr",
+                                           "data": amr}], 32 * 1024)
+        self.assertIn("once packaged", problem)
+
+    def test_an_animated_gif_is_never_re_encoded(self):
+        frames = [Image.new("L", (400, 400), i * 12) for i in range(20)]
+        out = io.BytesIO()
+        frames[0].save(out, "GIF", save_all=True, append_images=frames[1:])
+        gif = {"name": "a.gif", "content_type": "image/gif", "data": out.getvalue()}
+        fitted, problem, summary = fit([gif], 600 * 1024)
+        self.assertEqual((problem, fitted[0]["data"]), (None, gif["data"]))
+        self.assertFalse(summary["attachments"][0]["adjustable"])
+        _fitted, problem, _summary = fit([gif], len(gif["data"]) // 2)
+        self.assertIn("once packaged", problem)
+
+    def test_an_unreadable_picture_is_refused(self):
+        _fitted, problem, _summary = fit([{"name": "bad.jpg", "content_type": "image/jpeg",
+                                           "data": b"\xff\xd8\xff\xe0" + b"x" * 64}], 600 * 1024)
+        self.assertIn("bad.jpg", problem)
+        self.assertIn("could not be read", problem)
+
+    def test_a_limit_too_small_for_any_picture_says_so(self):
+        _fitted, problem, _summary = fit([{"name": "p.jpg", "content_type": "image/jpeg",
+                                           "data": photo()}], 2 * 1024)
+        self.assertIn("p.jpg", problem)
+
+    def test_the_fitted_message_packages_with_a_valid_smil(self):
+        fitted, _problem, _summary = fit([{"name": "p.heic", "content_type": "image/heic",
+                                           "data": photo(800, 600, "HEIF")}], 300 * 1024)
+        request = mms.build_request("0" * 20, TO, "", mms._compose_parts("hi", fitted))
+        pdu = mms_pdu.decode_pdu(request)
+        mms_pdu.check_smil(pdu.parts[0], pdu.parts[1:])
+        self.assertIn(b'src="p.jpg"', pdu.parts[0].data)
+
+    def test_the_table_offers_what_the_gateway_can_convert(self):
+        formats = {f["content_type"]: f for f in mms.attachment_formats()}
+        self.assertTrue(formats["image/heic"]["attachable"])
+        self.assertTrue(formats["image/jpeg"]["attachable"])
+        self.assertFalse(formats["video/quicktime"]["attachable"])
+        with patch.dict(mms_convert.CONVERTERS, clear=True):
+            self.assertFalse({f["content_type"]: f for f in mms.attachment_formats()}
+                             ["image/heic"]["attachable"])
+            _fitted, problem, _summary = fit([{"name": "a.webp", "content_type": "image/webp",
+                                               "data": photo(64, 64, "WEBP")}], 600 * 1024)
+            self.assertIn("cannot convert", problem)
+
+
+if __name__ == "__main__":
+    unittest.main()

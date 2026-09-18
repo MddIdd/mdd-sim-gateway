@@ -2,13 +2,14 @@
 
 One capability table serves every client that composes an MMS -- the WebUI today, a SIP user
 agent submitting MMS through the gateway later -- and the gateway itself, which is what
-decides: a client may filter and convert ahead of time to spare the user a round trip, but
-nothing is sent that check_attachment() has not accepted.
+decides: a client may filter ahead of time to spare the user a round trip, but nothing is sent
+that check_attachment() has not accepted. Converting and shrinking happen on the gateway too
+(mms_convert), so every client gets the same result.
 
 Each format has a policy:
   send     sent as is once its content has been checked;
-  convert  never sent as is: a client re-encodes it first (the WebUI turns these pictures into
-           JPEG), and the gateway refuses it unconverted;
+  convert  never sent as is: the gateway re-encodes it (see mms_convert) when it has a
+           converter for it, and refuses it otherwise;
   receive  never sent; a copy that arrives is stored and offered for download.
 Anything not in the table is treated like "receive".
 
@@ -99,10 +100,14 @@ def previewable(content_type: str) -> bool:
     return bool(found and found.preview)
 
 
-def capabilities() -> list[dict]:
-    """The table as data, for clients that filter or convert before uploading."""
+def capabilities(can_convert=None) -> list[dict]:
+    """The table as data, for clients choosing what to offer. "attachable" says whether this
+    gateway takes the format from a client: a "send" format always, a "convert" one when
+    `can_convert(kind, content_type)` says it has a converter for it."""
     return [{"content_type": f.content_type, "kind": f.kind, "extensions": list(f.extensions),
-             "policy": f.policy, "preview": f.preview, "aliases": list(f.aliases)}
+             "policy": f.policy, "preview": f.preview, "aliases": list(f.aliases),
+             "attachable": f.policy == SEND or (f.policy == CONVERT and can_convert is not None
+                                                and bool(can_convert(f.kind, f.content_type)))}
             for f in FORMATS]
 
 
@@ -114,6 +119,7 @@ class Checked:
     kind: str = ""
     duration_ms: int | None = None
     error: str | None = None
+    policy: str = ""           # SEND, or CONVERT when the caller said it can convert it
 
 
 def _sniff(data: bytes) -> str | None:
@@ -275,15 +281,17 @@ def _check_text(fmt: MediaFormat, data: bytes, label: str) -> Checked:
     return Checked(canonical, "calendar")
 
 
-def check_attachment(name: str, content_type: str, data: bytes) -> Checked:
+def check_attachment(name: str, content_type: str, data: bytes, *,
+                     can_convert=None) -> Checked:
     """Decide whether an attachment can be sent, from what it contains.
 
     The declared type (or, when it is missing or generic, the file extension) says what the
     client thinks it is; the content has the last word. A file whose content is a different
     kind of media than declared -- a video labelled as a picture -- is refused as mislabelled;
     within one kind the content's own type is used (a PNG sent as image/jpeg goes out as
-    image/png). Returns a Checked with the canonical content type and, for audio and video,
-    the playing time when it can be read; or with `error` set."""
+    image/png). A "convert" format passes only when `can_convert(kind, content_type)` says the
+    caller will convert it (policy CONVERT). Returns a Checked with the canonical content type
+    and, for audio and video, the playing time when it can be read; or with `error` set."""
     label = str(name or "the attachment")
     declared = lookup(content_type)
     if declared is None and base_type(content_type) in _GENERIC_TYPES:
@@ -339,10 +347,14 @@ def check_attachment(name: str, content_type: str, data: bytes) -> Checked:
     if checked.error:
         return checked
     if fmt.policy == CONVERT:
-        return Checked(error=f"{label}: {fmt.content_type} pictures are not sent by MMS as they "
-                             "are; convert it to JPEG first")
+        if can_convert is not None and can_convert(fmt.kind, fmt.content_type):
+            checked.policy = CONVERT
+            return checked
+        return Checked(error=f"{label}: {fmt.content_type} is not sent by MMS as it is, and "
+                             "this gateway cannot convert it; convert it to JPEG first")
     if fmt.policy != SEND:
         return Checked(error=f"{label}: {fmt.content_type} cannot be sent by MMS")
+    checked.policy = SEND
     return checked
 
 

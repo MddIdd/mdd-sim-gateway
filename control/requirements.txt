@@ -11,3 +11,5 @@ python-multipart==0.0.32
 requests==2.34.2
 PySocks==1.7.1
 pyserial==3.5
+Pillow==12.3.0
+pillow-heif==1.7.0

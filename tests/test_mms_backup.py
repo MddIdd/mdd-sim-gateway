@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from control.app import config, operations, store
+from control.app import config, mms_staging, operations, store
 
 
 class _Store:
@@ -84,6 +84,7 @@ class LocalBackupTests(unittest.TestCase):
                 mid = add_mms()
                 stray = Path(store.mms_dir()) / str(mid) / "unreferenced.jpg"
                 stray.write_bytes(b"x")
+                draft = mms_staging.stage("1", "draft.jpg", "image/jpeg", b"draft")
                 result = operations.create_local_backup("Test Gateway")
                 archive_path = Path(store.backup_dir()) / result["name"]
                 self.assertFalse(list(Path(store.backup_dir()).glob(".staging-*")))
@@ -93,6 +94,7 @@ class LocalBackupTests(unittest.TestCase):
                 archive.extractall(restored, filter="data")
             self.assertIn("config.yaml", names)
             self.assertNotIn(f"mms/{mid}/unreferenced.jpg", names)
+            self.assertFalse([n for n in names if draft["id"] in n], "uploads being composed")
             self.assertEqual(read_back(restored, mid), [b"hi", b"\xff\xd8\xff-picture"])
 
     def test_a_live_attachment_omitted_from_the_snapshot_makes_the_backup_fail(self):

@@ -34,7 +34,7 @@ from . import config as cfg
 from . import (store, engine, status as status_mod, sim, card, notify_push, lpa, auth,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
                sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd, mms,
-               mms_media, mms_transport, softphone_ws)
+               mms_media, mms_staging, mms_transport, softphone_ws)
 from .version import VERSION
 from .ami import AmiClient
 from .runtime import RuntimeRegistry
@@ -1651,8 +1651,9 @@ def _mms_push_text(rec: dict) -> str:
     return summary
 
 
-# How often the MMS worker looks for attachment files an interrupted save or deletion left.
-MMS_SWEEP_SECONDS = 6 * 3600
+# How often the MMS worker looks for attachment files an interrupted save or deletion left,
+# and for uploads of a message that was never sent.
+MMS_SWEEP_SECONDS = 3600
 
 
 async def mms_worker():
@@ -1674,8 +1675,11 @@ async def mms_worker():
                 removed = await asyncio.to_thread(store.sweep_mms_orphans)
                 if removed:
                     log.info("removed %d unreferenced MMS file(s)", removed)
+                removed = await asyncio.to_thread(mms_staging.sweep)
+                if removed:
+                    log.info("removed %d abandoned MMS attachment upload(s)", removed)
             except Exception as exc:  # noqa
-                log.debug("MMS orphan sweep failed: %r", exc)
+                log.debug("MMS sweep failed: %r", exc)
         try:
             due = await asyncio.to_thread(store.due_mms_downloads)
         except Exception as exc:  # noqa
@@ -5390,7 +5394,7 @@ async def _mms_line(iid: str) -> tuple[dict, dict]:
 
 async def _mms_form(request: Request):
     try:
-        return await request.form(max_files=20, max_fields=40,
+        return await request.form(max_files=mms_staging.MAX_PER_LINE, max_fields=40,
                                   max_part_size=MMS_UPLOAD_LIMIT + 1024)
     except Exception as exc:  # noqa
         raise HTTPException(413 if "size" in str(exc).lower() else 422,
@@ -5410,11 +5414,75 @@ def _recipient_list(value) -> list[str]:
     return mms.parse_recipients(value or "")
 
 
+@app.post("/api/instances/{iid}/mms/attachments")
+async def api_mms_attachment_add(iid: str, request: Request):
+    """Upload one attachment while composing (multipart field "file"). It is checked at once
+    -- a format the gateway will not send is refused here, not at sending time -- and kept
+    as the original until the MMS is sent or the attachment removed."""
+    await _mms_line(iid)
+    form = await _mms_form(request)
+    upload = form.get("file")
+    if not hasattr(upload, "read"):
+        raise HTTPException(422, "no file")
+    item = await _read_upload(upload)
+    _checked, problem = await asyncio.to_thread(mms.check_attachments, [item], convert=True)
+    if problem:
+        raise HTTPException(422, problem)
+    try:
+        meta = await asyncio.to_thread(mms_staging.stage, iid, item["name"],
+                                       item["content_type"], item["data"])
+    except OverflowError as exc:
+        raise HTTPException(409, str(exc)) from None
+    return {"ok": True, "attachment": meta}
+
+
+@app.post("/api/instances/{iid}/mms/attachments/fit")
+async def api_mms_attachments_fit(iid: str, body: dict):
+    """What the message would carry: body {ids, text, subject, to}. Converts and shrinks the
+    staged attachments together to fit the line's limit and reports each one's size before
+    and after, and the packaged total. Sending fits again with what is sent."""
+    _inst, settings = await _mms_line(iid)
+    ids = [str(i) for i in (body or {}).get("ids") or []]
+    try:
+        items = await asyncio.to_thread(mms_staging.load, iid, ids)
+    except KeyError as exc:
+        raise HTTPException(404, f"no such attachment: {exc.args[0]}") from None
+    fitted, problem, summary = await asyncio.to_thread(
+        mms.fit_attachments, items, str(body.get("text") or ""),
+        str(body.get("subject") or "").strip()[:80], _recipient_list(body.get("to")), settings)
+    for attachment_id, part in zip(ids, fitted):
+        await asyncio.to_thread(mms_staging.save_fitted, iid, attachment_id,
+                                part["content_type"], part["data"])
+    for attachment_id, entry in zip(ids, summary.get("attachments") or []):
+        entry["id"] = attachment_id
+    return {"ok": problem is None, "problem": problem, **summary}
+
+
+@app.get("/api/instances/{iid}/mms/attachments/{aid}/preview")
+def api_mms_attachment_preview(iid: str, aid: str):
+    found = mms_staging.preview_file(iid, aid)
+    if not found:
+        raise HTTPException(404, "no such attachment")
+    path, content_type = found
+    if not mms_media.previewable(content_type) or not content_type.startswith("image/"):
+        raise HTTPException(415, "no preview for this attachment")
+    return FileResponse(path, media_type=content_type,
+                        headers={"X-Content-Type-Options": "nosniff",
+                                 "Content-Security-Policy": "sandbox; default-src 'none'",
+                                 "Cache-Control": "no-store"})
+
+
+@app.delete("/api/instances/{iid}/mms/attachments/{aid}")
+async def api_mms_attachment_remove(iid: str, aid: str):
+    await asyncio.to_thread(mms_staging.remove, iid, [aid])
+    return {"ok": True}
+
+
 @app.post("/api/instances/{iid}/mms/send")
 async def api_mms_send(iid: str, request: Request):
     """Compose and submit an MMS. multipart/form-data: to (comma-separated), text, subject,
-    and any number of `attachments` files. Every attachment is converted and shrunk to fit
-    the line's limit.
+    any number of `attachment_ids` (uploaded with POST .../mms/attachments) and/or
+    `attachments` files. Every attachment is converted and shrunk to fit the line's limit.
     Returns at once with the stored message; the upload to the MMSC can take minutes over
     the modem and is reported over the websocket."""
     _inst, settings = await _mms_line(iid)
@@ -5422,7 +5490,11 @@ async def api_mms_send(iid: str, request: Request):
     recipients = _recipient_list(form.get("to"))
     text = str(form.get("text") or "")
     subject = str(form.get("subject") or "").strip()[:80]
-    attachments = []
+    staged_ids = [str(i) for i in form.getlist("attachment_ids") if str(i)]
+    try:
+        attachments = await asyncio.to_thread(mms_staging.load, iid, staged_ids)
+    except KeyError as exc:
+        raise HTTPException(404, f"no such attachment: {exc.args[0]}") from None
     for upload in form.getlist("attachments"):
         if hasattr(upload, "read"):
             attachments.append(await _read_upload(upload))
@@ -5432,6 +5504,7 @@ async def api_mms_send(iid: str, request: Request):
         raise HTTPException(422, problem)
     rec = await asyncio.to_thread(mms.create_outgoing, iid, recipients, text, prepared,
                                   subject)
+    await asyncio.to_thread(mms_staging.remove, iid, staged_ids)
     await hub.broadcast({"type": "sms", "instance": str(iid), "message": rec})
     asyncio.create_task(_send_mms_task(str(iid), int(rec["id"])))
     return {"ok": True, "message": rec}

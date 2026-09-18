@@ -334,6 +334,8 @@ def create_local_backup(system_name: str = "gateway") -> dict:
     database_name = str(history.relative_to(root)) if snapshot else ""
     skipped = {database_name + suffix for suffix in ("", "-journal", "-wal", "-shm")}
     mms_root = Path(store.mms_dir()).resolve()
+    # Uploads of a message still being composed are working copies, not history.
+    staging_root = (root / "mms-staging").resolve()
     staging = target_dir / f".staging-{stamp}"
     for stale in target_dir.glob(".staging-*"):
         shutil.rmtree(stale, ignore_errors=True)
@@ -347,7 +349,8 @@ def create_local_backup(system_name: str = "gateway") -> dict:
             referenced = _referenced_parts(staging / database_name)
         with tarfile.open(target, "w:gz") as archive:
             for path in sorted(root.rglob("*")):
-                if not path.is_file() or target_dir in path.parents:
+                if not path.is_file() or target_dir in path.parents \
+                        or staging_root in path.parents:
                     continue
                 relative = str(path.relative_to(root))
                 if snapshot and (relative in skipped or mms_root in path.parents):

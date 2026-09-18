@@ -479,8 +479,12 @@ def support_bundle(status_documents: dict, log_lines: int = 500) -> bytes:
             continue
 
     # Explicit allow-list: voicemail recordings and every unknown future file stay excluded.
+    # Note this deliberately does NOT include the rest of /logs/asterisk: Asterisk's own `full`
+    # and `messages` carry the subscriber's IMS public identity on every registration. Only
+    # supervisor.jsonl is admitted, and it is a closed schema of exit codes and durations.
     paths = [*base.glob("*/run/*.log"), *base.glob("*/logs/diagnostics.jsonl"),
              *base.glob("*/logs/lifecycle.jsonl"),
+             *base.glob("*/logs/asterisk/supervisor.jsonl"),
              *base.glob("*/logs/ike/charon-*.log")]
     for path in sorted(paths):
         try:
@@ -492,8 +496,9 @@ def support_bundle(status_documents: dict, log_lines: int = 500) -> bytes:
                 selected = source[-log_lines:]
             joined = "\n".join(selected)
             text = redact_jsonl(joined) if path.suffix == ".jsonl" else redact_log(joined)
-            iid = path.parents[2].name if path.parent.name == "ike" else path.parent.parent.name
-            priority = 50 if path.name == "lifecycle.jsonl" else 40 \
+            iid = path.parents[2].name if path.parent.name in ("ike", "asterisk") \
+                else path.parent.parent.name
+            priority = 50 if path.name in ("lifecycle.jsonl", "supervisor.jsonl") else 40 \
                 if path.name == "diagnostics.jsonl" else 10
             add_candidate(path, f"logs/{iid}-{path.name}", source, source, selected,
                           text, priority)

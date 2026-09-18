@@ -443,6 +443,9 @@ class Hub:
         self.cards: dict[str, dict] = {}     # reader NAME -> detected card/reader info
         self.scanned = False                 # card_monitor completed its first scan
         self._learning: set[str] = set()     # instances currently learning MSISDN
+        # Last observed Docker RestartCount per instance, to tell a restart-policy bounce from
+        # a rebuild the manager performed itself.
+        self._restart_counts: dict[str, int] = {}
         self._msisdn_tries: dict[str, int] = {}
         self._msisdn_checked: dict[str, float] = {}   # last passive re-check
         # Serialise route selection and submission per line. In particular, two concurrent
@@ -546,7 +549,46 @@ class Hub:
         if (not runtime.get("running")
                 or self.ami_generation.get(str(iid)) not in (None, generation)):
             await self.drop_ami(iid)
+        if runtime.get("running"):
+            await self._note_unrequested_restart(str(iid), runtime)
         self.status_wakeup.set()
+
+    def seed_restart_baseline(self, iid: str, runtime: dict) -> None:
+        """Record the first RestartCount seen for a running line.
+
+        The baseline used to be set only from Docker start events, so after the manager itself
+        restarted, the first bounce of each line looked like a first sighting and was dropped —
+        exactly what happened to line 5's 09-17 crash. The status poll sees every line within
+        seconds of startup, so seed from there; only a missing baseline is filled in.
+        """
+        if runtime.get("running") and iid not in self._restart_counts:
+            self._restart_counts[iid] = int(runtime.get("restart_count") or 0)
+
+    async def _note_unrequested_restart(self, iid: str, runtime: dict) -> None:
+        """Record engine bounces that Docker's restart policy performed on its own.
+
+        A rebuild the manager asks for creates a fresh container, so its RestartCount is 0. A
+        restart-policy bounce increments the counter on the same container. Only the latter is
+        invisible today: it completes well inside the health policy's threshold, so no recovery
+        is scheduled and nothing reaches the timeline even though the line just spent ~40s
+        unable to take a call.
+        """
+        count = int(runtime.get("restart_count") or 0)
+        previous = self._restart_counts.get(iid)
+        self._restart_counts[iid] = count
+        if previous is None or count <= previous:
+            return
+        exit_record = await asyncio.to_thread(engine.last_engine_exit, iid)
+        disposition = str(exit_record.get("disposition") or "")
+        reason = {"signal": "engine_signal", "exit": "engine_exit"}.get(disposition, "unknown")
+        try:
+            await asyncio.to_thread(
+                engine.record_lifecycle, iid, "engine_restarted", reason_code=reason)
+        except Exception as exc:  # noqa
+            log.debug("could not record engine restart instance=%s: %r", iid, exc)
+        log.warning("engine %s was restarted by Docker's restart policy "
+                    "(restart_count %s -> %s, last exit: %s)", iid, previous, count,
+                    exit_record or "unrecorded")
 
     async def broadcast(self, msg: dict):
         dead = []
@@ -2099,6 +2141,7 @@ async def _poll_instance_status(inst: dict) -> None:
         # One inspect supplies both running state and bridge IP to the whole sample. Previously
         # ami_for(), compute() and the grace-path each queried Docker independently.
         runtime = await hub.runtime.get(iid)
+        hub.seed_restart_baseline(iid, runtime)
         # A disabled line is authoritative user intent. Automatic recovery must never
         # resurrect a stale container left behind by an earlier retry or process restart;
         # doing so can retain the SIM/PCSC channel and disrupt another active line.

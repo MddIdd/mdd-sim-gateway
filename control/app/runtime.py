@@ -99,8 +99,11 @@ class RuntimeRegistry:
         iid = name[len(prefix):]
         action = str(event.get("Action") or event.get("status") or "").lower()
         if action in _STOP_ACTIONS:
+            # Keep the same keys an inspect returns; callers read restart_count unconditionally.
             runtime = {"running": False, "ip": None,
                        "container_id": event.get("id") or actor.get("ID"),
+                       "restart_count": int((self._cache.get(iid) or {}).get("restart_count") or 0),
+                       "started_at": str((self._cache.get(iid) or {}).get("started_at") or ""),
                        "observed_at": time.monotonic()}
             self._cache[iid] = runtime
         elif action in _START_ACTIONS:

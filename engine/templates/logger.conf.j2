@@ -1,6 +1,13 @@
 [general]
+; Asterisk only rotates on an explicit `logger rotate` / `logger reload`; the entrypoint's
+; size watchdog drives that. This just picks the naming strategy it uses when it does.
+rotatestrategy = rotate
 
 [logfiles]
 console => notice,warning,error,verbose{{ ',debug' if debug_asterisk else '' }}
 full => notice,warning,error,verbose,dtmf{{ ',debug' if debug_asterisk else '' }}
 messages => notice,warning,error
+; A separate sink for the short, targeted debug window swu_ike opens around a P-CSCF reload
+; (see swu_apply_pcscf). Keeping it out of `full` means the reload trace is readable on its
+; own and the normal logs stay at their usual size. Empty unless debug is switched on.
+reload_debug => debug

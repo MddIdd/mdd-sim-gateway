@@ -1,3 +1,8 @@
+[directories]
+; Asterisk's own logs go to the bind-mounted /logs so they outlive both a container restart
+; and a manager rebuild. Everything else stays at the build-time default.
+astlogdir = /logs/asterisk
+
 [options]
-verbose = {{ 5 if debug_asterisk else 1 }}
+verbose = {{ 5 if debug_asterisk else 2 }}
 debug = {{ 5 if debug_asterisk else 0 }}

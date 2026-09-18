@@ -33,7 +33,7 @@ from . import config as cfg
 from . import (store, engine, status as status_mod, sim, card, notify_push, lpa, auth,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
                sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd, mms,
-               mms_transport, softphone_ws)
+               mms_transport, softphone_ws, turn)
 from .version import VERSION
 from .ami import AmiClient
 from .runtime import RuntimeRegistry
@@ -2576,6 +2576,13 @@ async def lifespan(app: FastAPI):
     # Re-publish after every manager restart so the host orchestrator can reconstruct routes and
     # modem services from persistent config without waiting for a settings edit/line restart.
     egress.publish()
+    # The browser softphone's media only flows through the relay. Bring it (and the networks the
+    # engines join) in line with this version before any line starts; a failure is logged and
+    # retried on the next engine start rather than blocking the rest of the control plane.
+    try:
+        await asyncio.to_thread(turn.ensure)
+    except Exception as exc:  # noqa: BLE001
+        log.error("media relay not ready: %s", exc)
     await hub.runtime.start(hub.runtime_changed)
     poller = asyncio.create_task(status_poller())
     monitor = asyncio.create_task(card_monitor())

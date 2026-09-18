@@ -202,6 +202,16 @@ export class Softphone {
     // fires the session's 'failed' BEFORE this event — so 'failed' on its own can never say
     // why a call died in milliseconds. Pass the DOMException name up so the UI can name it.
     session.on('getusermediafailed', (err) => this.emit('mediafail', (err && err.name) || 'MediaError'))
+    // Media may only use the relay (iceTransportPolicy 'relay'), so the first relay candidate is
+    // all the offer or answer needs. Otherwise JsSIP waits for gathering to finish, i.e. for the
+    // slowest TURN transport: a relay port forwarded for UDP only would hold every call until
+    // the TCP attempt times out.
+    let relayCandidate = false
+    session.on('icecandidate', (event) => {
+      if (relayCandidate || !event.candidate || event.candidate.type !== 'relay') return
+      relayCandidate = true
+      event.ready()
+    })
     const dir = session.direction  // 'incoming' | 'outgoing'
     if (dir === 'incoming') {
       const from = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'Unknown'

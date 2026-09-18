@@ -119,6 +119,12 @@ class BrowserTests(unittest.TestCase):
             self.assertIn("await this._pcConfig()", body)
             self.assertIn("pcConfig", body[body.index("_acquireLocal"):])
 
+    def test_the_first_relay_candidate_sends_the_offer_or_answer(self):
+        handler = SOFTPHONE_LIB[SOFTPHONE_LIB.index("session.on('icecandidate'"):]
+        handler = handler[:handler.index("\n    })")]
+        self.assertIn("event.candidate.type !== 'relay'", handler)
+        self.assertIn("event.ready()", handler)
+
     def test_both_softphones_can_refresh_provisioning_and_report_a_missing_relay(self):
         for source in (GLOBAL, VIEW):
             self.assertIn("() => api.softphone(id))", source)

@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react'
 import { api } from '../api.js'
-import { Softphone as Phone, audioInputPresence, microphoneMessage, MEDIA_FAIL_CAUSE } from '../softphone.js'
+import { Softphone as Phone, audioInputPresence, microphoneMessage, MEDIA_FAIL_CAUSE, RELAY_UNAVAILABLE } from '../softphone.js'
 import SimSelector from './SimSelector.jsx'
 import { useI18n } from '../i18n.jsx'
 
@@ -378,7 +378,8 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
       // the microphone itself and the call really did die. 'failed' has already reset the
       // screen by now; this is what tells the user why.
       else if (type === 'mediafail') toast(t(microphoneMessage(data)))
-    }, audioRef.current)
+      else if (type === 'relayunavailable') toast(t(RELAY_UNAVAILABLE))
+    }, audioRef.current, () => api.softphone(id))
     ph.start(prov, prov.host || location.hostname)
     phone.current = ph
     setReg('connecting')

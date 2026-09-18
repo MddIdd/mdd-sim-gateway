@@ -28,6 +28,10 @@ export async function audioInputPresence() {
   } catch { return 'unknown' }
 }
 
+// The i18n key shown when a call cannot carry audio because the gateway's media relay is down.
+export const RELAY_UNAVAILABLE =
+  'The media relay is not running, so calls would have no audio. Check the gateway, then try again.'
+
 // What to tell the user, keyed by the DOMException name the browser reported (or a presence
 // verdict). None of these stop a call: a call with no microphone still carries the carrier's
 // audio and is worth placing (a voicemail box, a service code, an announcement). They say
@@ -77,8 +81,11 @@ export class Softphone {
   // stable, DOM-attached element (instead of a per-call `new Audio()`) is what makes remote
   // audio reliable under Chrome/Edge autoplay policy: the element is primed once inside a user
   // gesture (unlockAudio) and then every later srcObject swap plays without a NotAllowedError.
-  constructor(onEvent, audioEl) {
+  // provision: () => Promise<prov>, re-read before every call for fresh TURN credentials.
+  constructor(onEvent, audioEl, provision) {
     this.onEvent = onEvent            // (type, data) => void
+    this._provision = provision || null
+    this.prov = null
     this.ua = null
     this.session = null
     this.remoteAudio = audioEl || null
@@ -147,9 +154,11 @@ export class Softphone {
     })
   }
 
-  // prov: { username, password, ws_path, host, realm }
+  // prov: { username, password, ws_path, host, realm, ice_servers, ice_transport_policy,
+  //         relay_ready }
   start(prov, host) {
     if (this.ua) this.stop()
+    this.prov = prov
     // Same origin as the page: the control surface relays the socket to this line's engine.
     const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${prov.ws_path}`
     const socket = new JsSIP.WebSocketInterface(wsUrl)
@@ -283,10 +292,34 @@ export class Softphone {
     try { local.ctx?.close() } catch {}
   }
 
+  // Media only flows through the gateway's TURN relay: nothing else of the engine is
+  // reachable from the browser. Its credentials expire, so every call asks for fresh ones
+  // rather than reusing what the page loaded with.
+  async _pcConfig() {
+    if (this._provision) {
+      try { this.prov = (await this._provision()) || this.prov } catch {}
+    }
+    const prov = this.prov || {}
+    return {
+      rtcpMuxPolicy: 'require',
+      iceServers: prov.ice_servers || [],
+      iceTransportPolicy: prov.ice_transport_policy || 'all',
+    }
+  }
+
   async call(number) {
     if (!this.ua) return
     const domain = this.ua.configuration.uri.host
     this.emit('calling', { to: number })
+    const pcConfig = await this._pcConfig()
+    if (this._dead || !this.ua) return
+    // A call placed without the relay connects and then carries no audio in either direction,
+    // which reads as a carrier fault. Refuse it up front and say why.
+    if (this.prov?.relay_ready === false) {
+      this.emit('relayunavailable')
+      this.emit('failed', { cause: 'Media relay unavailable' })
+      return
+    }
     const local = await this._acquireLocal()
     // stop() can land while getUserMedia is still deciding (the user switched lines, or the
     // page navigated away). Do not raise a call on a torn-down UA.
@@ -295,7 +328,7 @@ export class Softphone {
     const opts = {
       mediaConstraints: { audio: true, video: false },
       mediaStream: local.stream || undefined,
-      pcConfig: { rtcpMuxPolicy: 'require', iceServers: [] },
+      pcConfig,
     }
     // '#' is not a legal SIP URI user character (RFC 3261 25.1), and JsSIP rejects the whole
     // URI rather than escaping it, so service codes like #225# would never leave the browser.
@@ -318,12 +351,14 @@ export class Softphone {
   async answer() {
     const session = this.session
     if (!session) return
+    const pcConfig = await this._pcConfig()
+    if (this.prov?.relay_ready === false) this.emit('relayunavailable')
     const local = await this._acquireLocal()
     if (this._dead || this.session !== session) { this._releaseLocal(); return }
     if (local.silent) this.emit('mediafallback', local.reason)
     try {
       session.answer({ mediaConstraints: { audio: true, video: false },
-                       mediaStream: local.stream || undefined, pcConfig: { iceServers: [] } })
+                       mediaStream: local.stream || undefined, pcConfig })
     } catch (err) {
       // answer() throws synchronously on a session that is no longer answerable. Awaiting the
       // media above means that throw would otherwise surface as an unhandled rejection and

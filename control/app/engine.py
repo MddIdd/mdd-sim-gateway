@@ -23,7 +23,7 @@ import time
 
 import docker
 
-from . import config as cfg, egress, sysinfo
+from . import config as cfg, egress, sysinfo, turn
 
 log = logging.getLogger("mdd.engine")
 
@@ -381,32 +381,40 @@ def start(inst: dict, settings: dict, dev_mounts: bool = False, reason: str = "r
         volumes[os.path.join(eng, "entrypoint.sh")] = {"bind": "/entrypoint.sh", "mode": "ro"}
         volumes[os.path.join(eng, "templates")] = {"bind": "/opt/mdd-sim-gateway/templates", "mode": "ro"}
 
-    # No SIP signalling is published to the host. The browser softphone's WebSocket reaches
-    # Asterisk on the container's bridge address through the control surface relay
-    # (softphone_ws), and standalone SIP UDP/TCP/TLS listeners are not published either.
+    # Nothing is published to the host. The softphone's WebSocket reaches Asterisk on eth0
+    # (mdd-engine) through the control surface relay (softphone_ws), its media reaches eth1
+    # (mdd-media) through the TURN relay, and standalone SIP listeners are not reachable at all.
     port_bindings = {}
     # AMI grants system/command/originate. The manager dials the container bridge directly, so a
     # host mapping is unnecessary in normal operation and costs another docker-proxy. Keep the
     # loopback-only mapping as an explicit diagnostic option.
     if (settings.get("debug") or {}).get("ami", False):
         port_bindings[f"{5038}/tcp"] = ("127.0.0.1", ports.get("ami", 5038))
-    # RTP range
-    rtp_start = ports.get("rtp_start", 10000)
-    for p in range(rtp_start, rtp_start + cfg.rtp_span(ports)):
-        port_bindings[f"{p}/udp"] = p
 
-    c = client.containers.run(
+    _, media_network = turn.ensure_networks(client)
+    engine_addr, media_addr = turn.engine_address(inst), turn.media_address(inst)
+    try:
+        turn.ensure(client)
+    except Exception as exc:  # noqa: BLE001 - the line registers without it; calls say why
+        log.error("media relay not ready for line %s: %s", iid, exc)
+
+    # Created, joined to the media network, then started: eth1 must exist before the entrypoint
+    # renders Asterisk's config, which binds the browser leg's RTP to it.
+    c = client.containers.create(
         IMAGE,
         name=container_name(iid),
-        detach=True,
         cap_add=["NET_ADMIN"],
         devices=["/dev/net/tun:/dev/net/tun:rwm"],
         volumes=volumes,
         ports=port_bindings,
+        network=turn.ENGINE_NETWORK,
+        networking_config={turn.ENGINE_NETWORK:
+                           client.api.create_endpoint_config(ipv4_address=engine_addr)},
         restart_policy={"Name": "unless-stopped"},
         labels={MANAGED_LABEL: "true", "io.mdd-sim-gateway.component": "engine"},
         environment={
             "MDD_ID": iid,
+            "MDD_MEDIA_ADDR": media_addr,
             "SWU_LIVENESS_PERIOD": str(inst.get("liveness_period", 0)),
             "SWU_TUN_MTU": os.environ.get("SWU_TUN_MTU", "1400"),
         },
@@ -420,6 +428,8 @@ def start(inst: dict, settings: dict, dev_mounts: bool = False, reason: str = "r
         },
         extra_hosts={"host.docker.internal": "host-gateway"},  # so notify.py can reach the manager
     )
+    media_network.connect(c, ipv4_address=media_addr)
+    c.start()
     log.info("started engine container %s", c.name)
     return c.id
 
@@ -488,10 +498,12 @@ def container_runtime(iid: str) -> dict:
         running = c.status == "running"
         ip = None
         if running:
-            for network in c.attrs.get("NetworkSettings", {}).get("Networks", {}).values():
-                if network.get("IPAddress"):
-                    ip = network["IPAddress"]
-                    break
+            # The control surface talks to an engine on mdd-engine (AMI, softphone WebSocket),
+            # never on the media network.
+            networks = c.attrs.get("NetworkSettings", {}).get("Networks", {})
+            ip = (networks.get(turn.ENGINE_NETWORK) or {}).get("IPAddress") or next(
+                (n["IPAddress"] for name, n in networks.items()
+                 if name != turn.MEDIA_NETWORK and n.get("IPAddress")), None)
         return {"running": running, "ip": ip, "container_id": getattr(c, "id", None)}
     except docker.errors.NotFound:
         return {"running": False, "ip": None, "container_id": None}

@@ -270,25 +270,6 @@ def advertise_address(settings: dict) -> str:
             or settings.get("advertise_address", "") or _host_lan_ipv4())
 
 
-def ice_advertise_address(settings: dict) -> str:
-    """Return a literal host IP for Asterisk's ICE candidate rewrite.
-
-    PJSIP external signaling/media addresses may be DNS names, so ``advertise_address``
-    correctly prefers the configured TLS domain.  ``rtp.conf``'s ice_host_candidates parser,
-    however, accepts only an IP address; feeding the domain there discards the mapping and can
-    leave a browser with only the unroutable Docker address.  Prefer the installer's explicit
-    host address and ignore non-IP values before falling back to the detected LAN IPv4.
-    """
-    for value in (os.environ.get("MDD_ADVERTISE_ADDR", ""),
-                  settings.get("advertise_address", ""), _host_lan_ipv4()):
-        candidate = str(value or "").strip().strip("[]")
-        try:
-            return str(ipaddress.ip_address(candidate))
-        except ValueError:
-            continue
-    return ""
-
-
 def _ensure():
     _private_dir(DATA_DIR)
     if not os.path.exists(CONFIG_PATH):
@@ -1129,9 +1110,6 @@ def render_instance_json(inst: dict, settings: dict) -> dict:
         "sip": {
             "external": [],
             "advertise_address": advertise_address(settings),
-            # ICE host-candidate mappings require an IP literal even when PJSIP itself uses
-            # the public TLS domain for signaling and SDP rewriting.
-            "ice_advertise_address": ice_advertise_address(settings),
             # Outbound ring timeout: per-line override (sip.ring_timeout) wins, else the global
             # settings default, else 35s. Clamped to a sane 5..180 range.
             "ring_timeout": max(5, min(180, int(

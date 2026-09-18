@@ -239,27 +239,48 @@ def swu_notify(event, arg=None):
         pass
 
 
+def swu_tunnel_address(v6):
+    """The address the ePDG assigned on ipsec0 in the given family ("" if none). Must match
+    render.py tunnel_address(): the pair (P-CSCF, this) is what pcscf.applied records."""
+    try:
+        out = subprocess.check_output(
+            ["ip", "-o", "-6" if v6 else "-4", "addr", "show", "dev", "ipsec0", "scope", "global"],
+            universal_newlines=True, stderr=subprocess.DEVNULL)
+    except Exception:
+        return ""
+    family = "inet6" if v6 else "inet"
+    for line in out.splitlines():
+        fields = line.split()
+        if family in fields:
+            return fields[fields.index(family) + 1].split("/")[0]
+    return ""
+
+
 def swu_apply_pcscf(addr):
-    """Re-render pjsip.conf for a (possibly new) P-CSCF and reload Asterisk, but only when the
-    P-CSCF actually changed. The ePDG can hand out a DIFFERENT P-CSCF on every (re)connect /
-    reauth; pjsip's type=identify/type=resolve are pinned to the P-CSCF IP, so a stale value
-    means inbound INVITEs from the new P-CSCF don't match (calls/SMS fail) and outbound routing
-    is wrong. This keeps them in sync on every reconnect, not just the first bring-up."""
+    """Re-render pjsip.conf for a (possibly new) P-CSCF or tunnel address and reload Asterisk,
+    but only when one of them actually changed. The ePDG can hand out a DIFFERENT P-CSCF on every
+    (re)connect / reauth; pjsip's type=identify/type=resolve are pinned to the P-CSCF IP, so a
+    stale value means inbound INVITEs from the new P-CSCF don't match (calls/SMS fail) and
+    outbound routing is wrong. The IMS leg's RTP is bound to the tunnel address, so a new inner
+    address with the same P-CSCF needs the same re-render, or calls lose their IMS-side audio.
+    render.py writes pcscf.applied itself once it has rendered."""
     if not addr:
         return
+    current = "%s %s" % (addr, swu_tunnel_address(":" in addr))
     last = None
     try:
         with open(os.path.join(SWU_RUNDIR, "pcscf.applied")) as f:
             last = f.read().strip()
     except Exception:
         last = None
-    if last == addr:
+    if last == current:
         return
     render = os.environ.get("SWU_RENDER", "/usr/local/bin/render.py")
     if not os.path.exists(render):
         return
     try:
-        swu_log("P-CSCF changed (%s -> %s); re-rendering pjsip + reloading Asterisk" % (last, addr))
+        swu_log("P-CSCF/tunnel address changed (%s -> %s); re-rendering pjsip + reloading Asterisk"
+                % (last, current))
         subprocess.call(["python3", render], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         # Reload just the parts affected by the P-CSCF change. res_pjsip reload re-reads
         # pjsip.conf (identify/resolve/registration/endpoint) without dropping the tunnel.
@@ -267,8 +288,6 @@ def swu_apply_pcscf(addr):
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.call(["asterisk", "-rx", "pjsip send register volte_ims"],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        with open(os.path.join(SWU_RUNDIR, "pcscf.applied"), "w") as f:
-            f.write(addr)
     except Exception as e:
         swu_log("pcscf apply failed: %r" % e)
 
@@ -5146,8 +5165,8 @@ class swu():
         if pcscf:
             swu_notify("pcscf", pcscf)
             # Keep pjsip's P-CSCF (identify/resolve/register) in sync when the ePDG assigns a
-            # different P-CSCF on reconnect/reauth. No-op on first bring-up (entrypoint seeds
-            # pcscf.applied after its own initial render, before Asterisk starts).
+            # different P-CSCF on reconnect/reauth. No-op on first bring-up (the entrypoint's
+            # render writes pcscf.applied before Asterisk starts).
             swu_apply_pcscf(pcscf)
 
         # Headless control channel replaces interactive stdin. Open a FIFO O_RDWR so select()

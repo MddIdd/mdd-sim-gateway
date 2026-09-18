@@ -6400,6 +6400,10 @@ def api_softphone(iid: str, request: Request):
     sip = inst.get("sip", {}) or {}
     wr = sip.get("webrtc", {}) or {}
     host = (request.headers.get("host") or "").split(":")[0] or request.url.hostname
+    # Media: the TURN relay is the browser's only path to the engine, so ask for relay
+    # candidates only. The browser reached this API by the same host name the relay listens on
+    # (behind a proxy the Host header carries the public one); MDD_TURN_HOST overrides it.
+    turn_host = request.url.hostname or host
     return {
         "enabled": bool(wr.get("enable", True)),
         "username": wr.get("username", "webrtc"),
@@ -6408,6 +6412,9 @@ def api_softphone(iid: str, request: Request):
         "ws_path": softphone_ws.path(iid),
         "host": host,
         "realm": cfg.ims_realm(inst["mcc"], inst["mnc"]),
+        "ice_servers": turn.ice_servers(str(iid), turn_host),
+        "ice_transport_policy": "relay",
+        "relay_ready": turn.status()["running"],
     }
 
 

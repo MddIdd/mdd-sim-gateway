@@ -56,19 +56,6 @@ class ProductionDebugTests(unittest.TestCase):
         self.assertFalse(rendered["debug"]["asterisk"])
         self.assertTrue(rendered["debug"]["charon"])
 
-    def test_tls_domain_is_not_used_as_an_ice_host_candidate(self):
-        settings = {**config.DEFAULTS["settings"],
-                    "tls": {"domain": "gateway.example.test"}}
-        with patch.dict(os.environ, {"MDD_ADVERTISE_ADDR": "192.0.2.25"}, clear=False):
-            self.assertEqual(config.advertise_address(settings), "gateway.example.test")
-            self.assertEqual(config.ice_advertise_address(settings), "192.0.2.25")
-
-    def test_non_ip_ice_override_falls_back_to_detected_lan_ip(self):
-        settings = {**config.DEFAULTS["settings"], "advertise_address": "not-an-ip"}
-        with patch.dict(os.environ, {"MDD_ADVERTISE_ADDR": "also-not-an-ip"}, clear=False), \
-                patch.object(config, "_host_lan_ipv4", return_value="198.51.100.8"):
-            self.assertEqual(config.ice_advertise_address(settings), "198.51.100.8")
-
 
 class AsteriskModulePolicyTests(unittest.TestCase):
     def test_unused_error_generating_modules_are_excluded(self):

@@ -45,6 +45,8 @@ const zh = {
   '{count} SIM configured': '已配置 {count} 张 SIM', '{count} SIMs configured': '已配置 {count} 张 SIM',
   Unknown: '未知', Reader: '读卡器', Carrier: '运营商', Status: '状态', 'PIN tries': 'PIN 剩余次数', 'Unknown device': '未知设备', 'Unknown SIM': '未知 SIM',
   'Browser blocked call audio. Click the page once and try again.': '浏览器阻止了通话音频。请点击一次页面后重试。',
+  'The media relay is not running, so calls would have no audio. Check the gateway, then try again.': '媒体中继未运行，通话将没有声音。请检查网关后重试。',
+  'Media relay unavailable': '媒体中继不可用',
   'Detecting card readers…': '正在检测读卡器…', 'No PC/SC smart-card reader found': '未找到 PC/SC 智能卡读卡器',
   'Connect a USB smart-card reader with your SIM inserted — it is detected automatically and this page updates in real time. Softphone, Messages and SIM Config are disabled until a reader is present.': '请连接已插入 SIM 卡的 USB 智能卡读卡器。系统会自动检测并实时更新；在检测到读卡器前，软电话、短信和 SIM 配置不可用。',
   'No card readers detected. Plug in a PC/SC reader and insert a SIM.': '未检测到读卡器。请连接 PC/SC 读卡器并插入 SIM 卡。',

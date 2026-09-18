@@ -73,6 +73,12 @@ direct_media=no
 smsc_uri=sip:{{ smsc }}@{{ realm }}
 sdp_owner={{ sdp_owner }}
 sdp_session={{ sdp_session }}
+{% if ims_media_addr %}
+; Bind the IMS leg's RTP to the tunnel address. Left to the transport it inherits a wildcard
+; bind for an IPv4 PDN, which would also listen on the container's other interfaces.
+media_address={{ ims_media_addr }}
+bind_rtp_to_media_address=yes
+{% endif %}
 
 [volte_ims]
 type=auth
@@ -119,7 +125,6 @@ type=transport
 protocol=ws
 bind=0.0.0.0
 {% if local_ext %}
-external_media_address={{ local_ext }}
 external_signaling_address={{ local_ext }}
 {% endif %}
 {% endif %}
@@ -174,6 +179,11 @@ auth=auth-{{ webrtc_user }}
 aors={{ webrtc_user }}
 transport=transport-ws
 webrtc=yes
+{% if media_addr %}
+; Only the TURN relay reaches this address (internal media network); see rtp.conf.
+media_address={{ media_addr }}
+bind_rtp_to_media_address=yes
+{% endif %}
 dtls_auto_generate_cert=yes
 [auth-{{ webrtc_user }}](auth-local)
 username={{ webrtc_user }}

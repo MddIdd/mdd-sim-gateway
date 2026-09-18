@@ -104,6 +104,8 @@ def _backup_before_migration() -> str | None:
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     target = os.path.join(backup_dir(), f"{prefix}{stamp}.sqlite")
     partial = target + ".partial"
+    mms_target = target[:-len(".sqlite")] + ".mms"
+    mms_partial = mms_target + ".partial"
     try:
         os.makedirs(backup_dir(), mode=0o700, exist_ok=True)
         source = sqlite3.connect(DB_PATH)
@@ -115,17 +117,88 @@ def _backup_before_migration() -> str | None:
             copy.close()
             source.close()
         _verify_backup(partial, version, expected)
+        # The attachments the copy refers to go alongside it: the database alone cannot
+        # restore an MMS. Hard links cost no space, and part files are never rewritten.
+        shutil.rmtree(mms_partial, ignore_errors=True)
+        snapshot_mms_files(partial, mms_dir(), mms_partial)
         os.chmod(partial, 0o600)
+        os.replace(mms_partial, mms_target)
         os.replace(partial, target)
     except Exception as exc:
         try:
             os.remove(partial)
         except OSError:
             pass
+        shutil.rmtree(mms_partial, ignore_errors=True)
         raise MigrationBackupError(
             f"could not back up the history database before upgrading it from schema "
             f"version {version}; nothing was migrated: {exc}") from exc
     return target
+
+
+def _link_or_copy(source: str, target: str) -> None:
+    try:
+        os.link(source, target)
+    except OSError:
+        shutil.copy2(source, target)
+
+
+def snapshot_mms_files(database: str, source_root: str, target_root: str) -> dict:
+    """Hard-link (or, across file systems, copy) every attachment file the history database
+    at `database` refers to from `source_root` into `target_root`, laid out the same way.
+
+    Each copy is checked against the size its row records. A file the database refers to
+    but that is already gone is counted in "missing" rather than failing the snapshot, so an
+    existing inconsistency cannot block a backup. Returns {"parts", "missing"}."""
+    with sqlite3.connect(database) as check:
+        has_parts = check.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                                  "AND name='mms_parts'").fetchone() is not None
+        rows = check.execute("SELECT message_id, path, size FROM mms_parts WHERE path!=''"
+                             ).fetchall() if has_parts else []
+    os.makedirs(target_root, mode=0o700, exist_ok=True)
+    copied = missing = 0
+    for message_id, name, size in rows:
+        if os.path.basename(name) != name or name in ("", ".", ".."):
+            continue
+        source = os.path.join(source_root, str(int(message_id)), name)
+        if not os.path.isfile(source):
+            missing += 1
+            continue
+        directory = os.path.join(target_root, str(int(message_id)))
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        target = os.path.join(directory, name)
+        _link_or_copy(source, target)
+        if os.path.getsize(target) != int(size or 0):
+            raise OSError(f"the backup copy of MMS part {message_id}/{name} does not match "
+                          "its record")
+        copied += 1
+    return {"parts": copied, "missing": missing}
+
+
+def snapshot_history(database_target: str, mms_target: str, *, attempts: int = 3) -> dict:
+    """A consistent copy of the live history database (SQLite online backup) and of every
+    attachment file it refers to, for a full backup taken while the gateway runs.
+
+    A save that commits between the two steps removes files the database copy still points
+    at; when that leaves files missing, both are taken again. Returns snapshot_mms_files()'s
+    counts."""
+    result = {"parts": 0, "missing": 0}
+    for attempt in range(max(1, attempts)):
+        for leftover in (database_target,):
+            if os.path.exists(leftover):
+                os.remove(leftover)
+        shutil.rmtree(mms_target, ignore_errors=True)
+        os.makedirs(os.path.dirname(database_target) or ".", exist_ok=True)
+        source, copy = sqlite3.connect(DB_PATH), sqlite3.connect(database_target)
+        try:
+            source.backup(copy)
+        finally:
+            copy.close()
+            source.close()
+        result = snapshot_mms_files(database_target, mms_dir(), mms_target)
+        if not result["missing"]:
+            break
+    return result
 
 
 def _verify_backup(path: str, version: int, messages: int | None = None) -> None:

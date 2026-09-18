@@ -55,6 +55,24 @@ def _default_gateway_ipv4():
     return ""
 
 
+def tunnel_address(v6: bool) -> str:
+    """The IMS address the ePDG assigned on ipsec0, in the P-CSCF's family, or "" before the
+    tunnel is up. The IMS leg's RTP binds to it so that leg is reachable from inside the tunnel
+    only. swu_ike's P-CSCF watcher reads the same value to notice a changed address."""
+    try:
+        out = subprocess.check_output(
+            ["ip", "-o", "-6" if v6 else "-4", "addr", "show", "dev", "ipsec0", "scope", "global"],
+            text=True, stderr=subprocess.DEVNULL)
+    except Exception:
+        return ""
+    for line in out.splitlines():
+        fields = line.split()
+        family = "inet6" if v6 else "inet"
+        if family in fields:
+            return fields[fields.index(family) + 1].split("/")[0]
+    return ""
+
+
 def container_ipv4():
     """The container's own docker-bridge IPv4 (e.g. 172.17.0.3). MUST be the bridge address, never
     the VoWiFi tunnel inner IP: it is used as the IKE source (SWU_SOURCE) and as the local SIP
@@ -181,6 +199,11 @@ def build_context(cfg):
         # family or Asterisk cannot reach the P-CSCF over the tunnel: IPv6 P-CSCF (Telus, EE)
         # -> bind [::]:5060; IPv4 P-CSCF (Vodafone UK, cp_mode=v4) -> bind 0.0.0.0:5060.
         "pcscf_is_v6": (":" in pcscf),
+        # The browser leg's RTP binds to eth1 on the internal media network (MDD_MEDIA_ADDR, set
+        # by the manager), which only the TURN relay can reach. The IMS leg's binds to the tunnel
+        # address. Explicit on both, so neither leg listens on every interface.
+        "media_addr": os.environ.get("MDD_MEDIA_ADDR", ""),
+        "ims_media_addr": tunnel_address(":" in pcscf) if pcscf else "",
         "local_addr": cfg.get("local_addr") or container_ipv4(),
         "ike_proposals": ike.get("proposals", default_ike),
         "esp_proposals": ike.get("esp_proposals", default_esp),
@@ -198,20 +221,17 @@ def build_context(cfg):
         "ami_user": cfg.get("ami_user", "vowifi"),
         "ami_secret": ami_secret,
         "manager_url": cfg.get("manager_url", ""),
-        "sip_listen": sip.get("listen_addr", "0.0.0.0"),
         "webrtc_enable": bool(webrtc.get("enable", True)),
         "webrtc_user": webrtc.get("username", "webrtc"),
         "webrtc_password": webrtc_password,
-        "webrtc_port": webrtc.get("port", 8089),
+        # Container-internal plain WS listener; must match control/app/softphone_ws.py.
+        "webrtc_ws_port": 8088,
         "domain": cfg.get("domain", ""),
         # Host-reachable address to advertise to LOCAL SIP clients (Contact + SDP). The
         # container's own IP is not routable off the docker bridge, so in-dialog requests
         # (BYE) from a LAN client would be undeliverable without this. Supplied by the
         # manager (host LAN IP); empty falls back to no external address.
         "advertise_addr": sip.get("advertise_address", ""),
-        # Asterisk's [ice_host_candidates] parser requires an IP literal; unlike the PJSIP
-        # external address above, a TLS DNS name is invalid here.
-        "ice_advertise_addr": sip.get("ice_advertise_address", ""),
         # Outbound ring timeout (s) for Dial() — see extensions.conf.j2. Default 35.
         "ring_timeout": int(sip.get("ring_timeout", 35) or 35),
         # Voicemail. Off by default: recording a caller is a decision the operator makes, not
@@ -221,10 +241,6 @@ def build_context(cfg):
         "vm_enabled": bool(sip.get("vm_enabled", False)),
         "vm_ring_seconds": int(sip.get("vm_ring_seconds", 25) or 25),
         "vm_max_seconds": int(sip.get("vm_max_seconds", 120) or 120),
-        # The container's own RTP bind IP (docker-bridge private, e.g. 172.17.0.2). Used as the
-        # LHS of rtp.conf [ice_host_candidates] to rewrite that unreachable host candidate to
-        # the host LAN IP (advertise_addr) so a LAN WebRTC browser can reach our RTP.
-        "rtp_bind_addr": cfg.get("local_addr") or container_ipv4(),
         "rtp_start": cfg.get("rtp_start", 10000),
         "rtp_end": cfg.get("rtp_end", 11000),
         "debug_asterisk": cfg.get("debug", {}).get("asterisk", False),
@@ -268,6 +284,11 @@ def main():
         with open(dest, "w") as f:
             f.write(rendered)
         print(f"[render] {tpl} -> {dest}")
+    if ctx["pcscf"]:
+        # What this render applied, for swu_ike's watcher: it re-renders and reloads Asterisk
+        # when either the P-CSCF or the tunnel address differs from this on a reconnect.
+        with open("/run/mdd-sim-gateway/pcscf.applied", "w") as f:
+            f.write(f"{ctx['pcscf']} {ctx['ims_media_addr']}")
 
     # Bundled prompts. Shipped in templates/ so the overlay image carries them: the base
     # image's Asterisk sound packages are a side effect of its build, not something this

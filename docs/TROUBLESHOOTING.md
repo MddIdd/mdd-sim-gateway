@@ -10,7 +10,9 @@
 - 4G 不在线：检查“设备 → 详情”的 ModemManager 对象、注册、APN 和 bearer；运行设备诊断。
 - VoWiFi 停在部分连接：检查国家出口 UDP 验证、ePDG、SIM 是否开通 Wi‑Fi Calling、PIN 剩余次数及引擎日志。
 - 服务更新后 VoWiFi 突然停止：确认引擎容器仍存在，并检查控制面日志中是否把虚拟读卡器维护误判为 `card removed`。当前版本会在编排器退出信号到达时立即发布维护标记，并保留 45 秒重建窗口；旧版本应先恢复读卡桥再重新启动线路。
-- 能振铃但没声音：确认 `MDD_ADVERTISE_ADDR` 是软电话可达的主机地址，并检查 RTP 端口与浏览器麦克风权限。
+- 浏览器电话一直未注册：它与 WebUI 同源连接 `/api/instances/<线路>/softphone/ws`。经反向代理访问时确认代理转发了 WebSocket 升级头；直连时确认线路引擎在运行。控制面日志中的 `softphone relay: engine ... unreachable` 表示引擎的 Asterisk 未在网桥地址 8088 上监听，通常是引擎镜像未随本版本刷新。
+- 能振铃但没声音，或拨打时提示媒体中继未运行：运行 `sudo ./install.sh status` 确认 `mdd-sim-gateway-turn` 在运行，并确认浏览器能访问中继端口（默认 `8478`，UDP 优先，TCP 兜底；经反向代理或外网访问时需要单独转发）。在 Chrome 打开 `chrome://webrtc-internals`，选中的候选对应为 `relay` 类型；如果没有 relay 候选，就是中继端口不通或 `MDD_TURN_HOST` / `MDD_TURN_PUBLIC_PORT` 与实际对外地址不符。也要检查浏览器的麦克风权限。
+- 安装时提示网段冲突：`mdd-engine` / `mdd-media` 的默认网段与主机路由、其他 Docker 网络或国家出口隧道重叠。按提示用 `MDD_ENGINE_SUBNET` / `MDD_MEDIA_SUBNET` 换成空闲的 /27 或更大的网段后重新执行。
 - 读卡器未出现：先用 `lsusb` 确认 USB 层，再运行 `pcsc_scan` 检查 PC/SC 层。SCR Prime（`04d9:c001`）需执行一次 `sudo ./install.sh patchprime` 加入 libccid 设备表；之后支持热插拔。读卡器没有 4G 开关属于正常设计。
 - SIM 逻辑通道分配失败：查看“设备 → 硬件”中的已分配数量、通道用途和明确错误。系统会自动释放本轮部分分配；若持续失败，先重启对应线路，确认仍失败后再安排模块复位，不要只按底层 QMI 错误码猜测原因。
 - Telegram 失败：选择手动 HTTP/SOCKS 代理或已就绪的国家出口，并使用“测试”。

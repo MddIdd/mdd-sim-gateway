@@ -20,22 +20,6 @@ class EnginePathTests(unittest.TestCase):
             sys.modules.pop("control.app.engine", None)
             return importlib.import_module("control.app.engine")
 
-    def test_docker_tls_path_maps_to_native_data_directory(self):
-        engine = self.engine_module()
-        with tempfile.TemporaryDirectory() as temp:
-            expected = Path(temp) / "certs" / "gateway.pem"
-            expected.parent.mkdir()
-            expected.write_text("certificate")
-            with patch.object(engine, "DATA_DIR", temp):
-                self.assertEqual(engine._runtime_data_path("/data/certs/gateway.pem"),
-                                 str(expected))
-
-    def test_missing_tls_path_remains_unchanged(self):
-        engine = self.engine_module()
-        with tempfile.TemporaryDirectory() as temp, patch.object(engine, "DATA_DIR", temp):
-            self.assertEqual(engine._runtime_data_path("/data/certs/missing.pem"),
-                             "/data/certs/missing.pem")
-
     def test_normal_docker_calls_reuse_one_client(self):
         engine = self.engine_module()
         client = SimpleNamespace(close=lambda: None)
@@ -45,68 +29,89 @@ class EnginePathTests(unittest.TestCase):
             factory.assert_called_once_with(timeout=30)
             engine.close_client()
 
+    def start_engine(self, inst, settings):
+        """Run engine.start against a fake Docker; return what it created and how it wired it."""
+        engine = self.engine_module()
+        record = {"order": []}
+
+        class _Container:
+            id = "container-id"
+
+            def __init__(self, name):
+                self.name = name
+
+            def start(self):
+                record["order"].append("start")
+
+        class _Containers:
+            def get(self, name):
+                raise engine.docker.errors.NotFound(name)
+
+            def create(self, image, **kwargs):
+                record["create"] = kwargs
+                record["order"].append("create")
+                return _Container(kwargs["name"])
+
+        class _Media:
+            def connect(self, container, ipv4_address=None):
+                record["media"] = ipv4_address
+                record["order"].append("connect")
+
+        api = SimpleNamespace(create_endpoint_config=lambda **kw: {"IPAMConfig": kw})
+        client = SimpleNamespace(containers=_Containers(), api=api)
+        with tempfile.TemporaryDirectory() as temp, \
+                patch.object(engine, "_client", lambda: client), \
+                patch.object(engine, "_instance_paths", lambda iid: (temp, temp)), \
+                patch.object(engine, "_clear_runtime_state", lambda base: None), \
+                patch.object(engine.egress, "ensure_line", lambda i, s: None), \
+                patch.object(engine.cfg, "write_instance_json", lambda i, s: None), \
+                patch.object(engine.turn, "ensure_networks", lambda c: (None, _Media())), \
+                patch.object(engine.turn, "ensure", lambda c: None):
+            engine.start(inst, settings)
+        return engine, record
+
     def test_ami_debug_port_is_published_on_loopback_only(self):
         """The optional AMI diagnostic port must never reach the LAN."""
-        engine = self.engine_module()
-        captured = {}
-
-        class _Containers:
-            def get(self, name):
-                raise engine.docker.errors.NotFound(name)
-
-            def run(self, image, **kwargs):
-                captured.update(kwargs)
-                return SimpleNamespace(id="container-id", name=kwargs.get("name", ""))
-
-        client = SimpleNamespace(containers=_Containers())
-        inst = {"id": "sim1", "ports": {"sip_udp": 5060, "sip_tls": 5061, "webrtc": 8089,
-                                        "ami": 5038, "rtp_start": 10000}}
-        with tempfile.TemporaryDirectory() as temp, \
-                patch.object(engine, "_client", lambda: client), \
-                patch.object(engine, "_instance_paths", lambda iid: (temp, temp)), \
-                patch.object(engine, "_clear_runtime_state", lambda base: None), \
-                patch.object(engine.egress, "ensure_line", lambda i, s: None), \
-                patch.object(engine.cfg, "write_instance_json", lambda i, s: None):
-            engine.start(inst, {"debug": {"ami": True}})
-
-        bindings = captured["ports"]
-        self.assertEqual(bindings["5038/tcp"], ("127.0.0.1", 5038))
-        self.assertEqual(captured["volumes"]["/etc/localtime"],
+        inst = {"id": "sim1", "index": 0, "ports": {"sip_udp": 5060, "sip_tls": 5061,
+                                                    "ami": 5038, "rtp_start": 10000}}
+        _, record = self.start_engine(inst, {"debug": {"ami": True}})
+        created = record["create"]
+        self.assertEqual(created["ports"], {"5038/tcp": ("127.0.0.1", 5038)})
+        self.assertEqual(created["volumes"]["/etc/localtime"],
                          {"bind": "/etc/localtime", "mode": "ro"})
-        # Only authenticated WebRTC and RTP stay reachable; standalone SIP is not published.
-        for exposed in ("8089/tcp", "10000/udp"):
-            self.assertNotIsInstance(bindings[exposed], tuple)
-        self.assertNotIn("5060/udp", bindings)
-        self.assertNotIn("5061/tcp", bindings)
 
-    def test_default_engine_has_no_host_ami_mapping_and_uses_configured_rtp_span(self):
+    def test_engine_publishes_nothing_and_joins_both_networks_before_starting(self):
+        inst = {"id": "sim1", "index": 2, "ports": {"sip_udp": 5080, "sip_tls": 5081,
+                "ami": 5058, "rtp_start": 14000, "rtp_span": 12}}
+        engine, record = self.start_engine(inst, {})
+        created = record["create"]
+        # Signalling goes through the control surface relay and media through the TURN
+        # relay, so not even the RTP range is published any more.
+        self.assertEqual(created["ports"], {})
+        self.assertEqual(created["network"], engine.turn.ENGINE_NETWORK)
+        self.assertEqual(created["networking_config"][engine.turn.ENGINE_NETWORK],
+                         {"IPAMConfig": {"ipv4_address": "172.29.0.12"}})
+        self.assertEqual(record["media"], "172.29.1.12")
+        self.assertEqual(created["environment"]["MDD_MEDIA_ADDR"], "172.29.1.12")
+        # eth1 must exist before the entrypoint renders the config that binds to it.
+        self.assertEqual(record["order"], ["create", "connect", "start"])
+        self.assertFalse(any(v.get("bind", "").startswith("/etc/asterisk/certificate")
+                             for v in created["volumes"].values()))
+
+    def test_control_surface_uses_the_engine_network_address(self):
         engine = self.engine_module()
-        captured = {}
-
-        class _Containers:
-            def get(self, name):
-                raise engine.docker.errors.NotFound(name)
-
-            def run(self, image, **kwargs):
-                captured.update(kwargs)
-                return SimpleNamespace(id="container-id", name=kwargs.get("name", ""))
-
-        client = SimpleNamespace(containers=_Containers())
-        inst = {"id": "sim1", "ports": {"sip_udp": 5060, "sip_tls": 5061,
-                "webrtc": 8089, "ami": 5038, "rtp_start": 10000, "rtp_span": 12}}
-        with tempfile.TemporaryDirectory() as temp, \
-                patch.object(engine, "_client", lambda: client), \
-                patch.object(engine, "_instance_paths", lambda iid: (temp, temp)), \
-                patch.object(engine, "_clear_runtime_state", lambda base: None), \
-                patch.object(engine.egress, "ensure_line", lambda i, s: None), \
-                patch.object(engine.cfg, "write_instance_json", lambda i, s: None):
-            engine.start(inst, {})
-
-        bindings = captured["ports"]
-        self.assertNotIn("5038/tcp", bindings)
-        self.assertEqual(len([key for key in bindings if key.endswith("/udp")]), 12)
-        self.assertIn("10011/udp", bindings)
-        self.assertNotIn("10012/udp", bindings)
+        networks = {engine.turn.MEDIA_NETWORK: {"IPAddress": "172.29.1.10"},
+                    engine.turn.ENGINE_NETWORK: {"IPAddress": "172.29.0.10"}}
+        container = SimpleNamespace(status="running", id="c",
+                                    attrs={"NetworkSettings": {"Networks": networks}})
+        client = SimpleNamespace(containers=SimpleNamespace(get=lambda name: container))
+        with patch.object(engine, "_client", lambda: client):
+            self.assertEqual(engine.container_ip("sim1"), "172.29.0.10")
+            del networks[engine.turn.ENGINE_NETWORK]
+            # An engine not recreated yet (still on the default bridge) stays reachable, but
+            # never through the media network.
+            networks["bridge"] = {"IPAddress": "172.17.0.3"}
+            self.assertEqual(engine.container_ip("sim1"), "172.17.0.3")
 
     def test_engine_recreation_clears_stale_runtime_observations(self):
         engine = self.engine_module()

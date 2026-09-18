@@ -126,7 +126,7 @@ jobs:
           python -m pip install -r control/requirements.txt
           python -m py_compile control/app/*.py engine/*.py host/*.py
           python -m unittest discover -s tests -v
-          sh -n install.sh engine/entrypoint.sh tools/engine-fingerprint.sh
+          sh -n install.sh engine/entrypoint.sh turn/entrypoint.sh tools/engine-fingerprint.sh
           cd webui
           npm ci
           npm audit --audit-level=high
@@ -134,6 +134,7 @@ jobs:
       - name: Validate Engine definition
         run: |
           docker build --check -f engine/Dockerfile engine
+          docker build --check -f turn/Dockerfile turn
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: engine-image-*

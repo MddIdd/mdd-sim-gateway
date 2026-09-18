@@ -1,17 +1,12 @@
 [general]
 rtpstart={{ rtp_start }}
 rtpend={{ rtp_end }}
-{% if webrtc_enable and ice_advertise_addr %}
+{% if webrtc_enable %}
 ; WebRTC needs ICE (an RTP-level feature — lives here, not in pjsip.conf). webrtc=yes turns on
 ; ice_support at the endpoint, but the ICE agent only gathers candidates when icesupport=yes.
+; The browser leg's RTP is bound to the media network address (pjsip.conf media_address), so
+; that is the only host candidate. The browser reaches it through the TURN relay on the same
+; internal network; nothing is published, so there is no host address to rewrite it to and no
+; STUN server to ask.
 icesupport=yes
-; A docker bridge is a 1:1 NAT: the only host candidate Asterisk gathers is its container-
-; private RTP bind address ({{ rtp_bind_addr }}), which a LAN browser (e.g. 192.168.1.x) cannot
-; reach. Rewrite it to the host LAN IP whose RTP ports are published so the browser's SRTP
-; lands on us. include_local_address ALSO keeps the container address as a candidate, so ICE
-; picks whichever the peer can actually reach (robust if the container IP shifts).
-; No stunaddr: both peers are on the LAN and the reachable address is statically known (docs
-; warn against mixing stunaddr/turnaddr with an explicit [ice_host_candidates] mapping).
-[ice_host_candidates]
-{{ rtp_bind_addr }} => {{ ice_advertise_addr }},include_local_address
 {% endif %}

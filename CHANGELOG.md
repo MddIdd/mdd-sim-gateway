@@ -4,6 +4,40 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- **Browser calls now need port 8478 (UDP and TCP) instead of each line's RTP range.** Open it
+  in any host firewall, and forward it (UDP at least) wherever you forwarded the RTP ports for
+  remote use. `MDD_TURN_PORT` changes it; `MDD_TURN_HOST` / `MDD_TURN_PUBLIC_PORT` tell browsers
+  a different host name or port when a proxy or NAT sits in front. The upgrade recreates every
+  engine on the new networks, which a browser call needs: the relay cannot reach an engine
+  started by an earlier version.
+- **Two Docker networks are created: `mdd-engine` (172.29.0.0/24) and the internal `mdd-media`
+  (172.29.1.0/24).** The installer stops before creating them if either overlaps a host route,
+  another Docker network or the country tunnels, and says which; set `MDD_ENGINE_SUBNET` /
+  `MDD_MEDIA_SUBNET` and run it again.
+
+### Changed
+
+- Browser call audio goes through a TURN relay (coturn 4.17.2, pinned by digest) on one port for
+  every line, and engines publish no ports at all -- not the 12 (or 60) RTP ports per line.
+  Engines sit on `mdd-engine`, and on `mdd-media`, an internal network that holds only the
+  engines and the relay. The browser leg's RTP listens there only, and the IMS leg's only inside
+  the tunnel. The relay may send nothing but UDP to the engines' RTP ports: coturn allows those
+  addresses alone, refuses TCP relaying, and an nftables ruleset in its own namespace drops
+  everything else. It cannot reach the tunnel, AMI, the host or another network. Credentials are
+  short-lived and handed out only to a signed-in browser, which re-reads them before every call.
+  When the relay is down the softphone refuses a call and says why, instead of connecting it
+  without audio.
+
+- The browser softphone now connects to the same address as the WebUI, at
+  `/api/instances/<line>/softphone/ws`, and the control surface relays it to that line's engine
+  over the Docker bridge. Engines no longer publish a WSS port (8089, 8099, ...) to the host, no
+  longer need a TLS certificate mounted, and their SIP WebSocket no longer listens on the VoWiFi
+  tunnel's address. A second certificate exception for the softphone port is gone, and a reverse
+  proxy only has to forward WebSocket upgrades for the WebUI's own address -- a separate
+  `location` pointing at the engine port is no longer needed.
+
 ## [1.10.0] - 2026-09-18
 
 ### Upgrade notes

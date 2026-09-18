@@ -1,5 +1,6 @@
 fastapi==0.141.1
 uvicorn[standard]==0.52.0
+websockets==17.1
 pyscard==2.3.1
 panoramisk==1.4
 docker==7.2.0

@@ -99,10 +99,10 @@ done
 addr=$(cat "$MDD_RUNDIR/pcscf" 2>/dev/null)
 if [ -n "$addr" ]; then
   log "discovered P-CSCF: $addr"
-  python3 /usr/local/bin/render.py || true   # re-render pjsip.conf with pcscf
-  # Seed the applied-marker so swu_ike's in-process P-CSCF watcher only re-renders + reloads
-  # Asterisk on a LATER change (reconnect/reauth), not redundantly right after this render.
-  printf '%s' "$addr" > "$MDD_RUNDIR/pcscf.applied"
+  # Re-render pjsip.conf with the P-CSCF and the tunnel address. render.py also writes the
+  # applied-marker, so swu_ike's in-process watcher only re-renders + reloads Asterisk on a LATER
+  # change (reconnect/reauth), not redundantly right after this render.
+  python3 /usr/local/bin/render.py || true
 else
   log "no P-CSCF discovered yet - continuing (manager will surface tunnel state)"
 fi

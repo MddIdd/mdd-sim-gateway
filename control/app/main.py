@@ -33,7 +33,7 @@ from . import config as cfg
 from . import (store, engine, status as status_mod, sim, card, notify_push, lpa, auth,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
                sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd, mms,
-               mms_transport)
+               mms_transport, softphone_ws, turn)
 from .version import VERSION
 from .ami import AmiClient
 from .runtime import RuntimeRegistry
@@ -406,7 +406,7 @@ def _ensure_card_draft(info: dict) -> dict | None:
             "idr_mode": "apn",
             "cp_mode": "auto",
             "sip": {**cfg.carrier_sip_defaults(mcc, mnc, iccid),
-                    "listen_addr": "0.0.0.0", "transport": "udp", "external": [],
+                    "transport": "udp", "external": [],
                     "webrtc": {"enable": True}},
             "debug": {"asterisk": False, "charon": False},
         }, unique_name=True)
@@ -2576,6 +2576,13 @@ async def lifespan(app: FastAPI):
     # Re-publish after every manager restart so the host orchestrator can reconstruct routes and
     # modem services from persistent config without waiting for a settings edit/line restart.
     egress.publish()
+    # The browser softphone's media only flows through the relay. Bring it (and the networks the
+    # engines join) in line with this version before any line starts; a failure is logged and
+    # retried on the next engine start rather than blocking the rest of the control plane.
+    try:
+        await asyncio.to_thread(turn.ensure)
+    except Exception as exc:  # noqa: BLE001
+        log.error("media relay not ready: %s", exc)
     await hub.runtime.start(hub.runtime_changed)
     poller = asyncio.create_task(status_poller())
     monitor = asyncio.create_task(card_monitor())
@@ -3592,8 +3599,7 @@ async def api_provision(body: dict):
         raise HTTPException(400, "could not read IMSI (is the PIN correct?)")
     sip = cfg.merge_carrier_sip_defaults(
         c.mcc, c.mnc, c.iccid or c.imsi,
-        body.get("sip") or {"listen_addr": "0.0.0.0", "transport": "udp",
-                            "external": []})
+        body.get("sip") or {"transport": "udp", "external": []})
     sip.setdefault("webrtc", {"enable": bool(body.get("webrtc", True))})
     # SMSC: manual override wins; otherwise read from the SIM (EF_SMSP, authoritative).
     # If the SIM can't provide it we ask the user to type it (no carrier presets).
@@ -6387,22 +6393,52 @@ async def api_cellular_call_hangup(iid: str):
 
 @app.get("/api/instances/{iid}/softphone")
 def api_softphone(iid: str, request: Request):
-    """Provisioning for the browser softphone (JsSIP over WSS)."""
+    """Provisioning for the browser softphone (JsSIP over the same-origin WebSocket relay)."""
     inst = cfg.get_instance(iid)
     if not inst:
         raise HTTPException(404, "no such instance")
     sip = inst.get("sip", {}) or {}
     wr = sip.get("webrtc", {}) or {}
-    ports = inst.get("ports", {})
     host = (request.headers.get("host") or "").split(":")[0] or request.url.hostname
+    # Media: the TURN relay is the browser's only path to the engine, so ask for relay
+    # candidates only. The browser reached this API by the same host name the relay listens on
+    # (behind a proxy the Host header carries the public one); MDD_TURN_HOST overrides it.
+    turn_host = request.url.hostname or host
     return {
         "enabled": bool(wr.get("enable", True)),
         "username": wr.get("username", "webrtc"),
         "password": wr.get("password", ""),
-        "ws_port": ports.get("webrtc", 8089),
+        # Same origin as the WebUI, so it works unchanged behind a reverse proxy.
+        "ws_path": softphone_ws.path(iid),
         "host": host,
         "realm": cfg.ims_realm(inst["mcc"], inst["mnc"]),
+        "ice_servers": turn.ice_servers(str(iid), turn_host),
+        "ice_transport_policy": "relay",
+        "relay_ready": turn.status()["running"],
     }
+
+
+@app.websocket("/api/instances/{iid}/softphone/ws")
+async def ws_softphone(ws: WebSocket, iid: str):
+    """The browser softphone's SIP-over-WebSocket, relayed to the line's engine.
+
+    WebSocket handshakes bypass the HTTP middleware, so the session check is repeated here.
+    The session cookie is SameSite=Strict, so a cross-site page cannot open this socket as the
+    admin. Rejections close before accepting (the browser sees a failed handshake)."""
+    if not auth.session(ws.cookies.get(auth.SESSION_COOKIE)):
+        await ws.close(code=4401)
+        return
+    inst = cfg.get_instance(iid)
+    webrtc = ((inst or {}).get("sip") or {}).get("webrtc") or {}
+    if not inst or not webrtc.get("enable", True) or \
+            not softphone_ws.offers_sip(ws.headers.get("sec-websocket-protocol")):
+        await ws.close(code=1008)
+        return
+    runtime = await asyncio.to_thread(engine.container_runtime, str(iid))
+    if not runtime["running"] or not runtime["ip"]:
+        await ws.close(code=1013)
+        return
+    await softphone_ws.relay(ws, softphone_ws.engine_url(runtime["ip"]))
 
 
 # ----------------------------- engine event hook -----------------------------

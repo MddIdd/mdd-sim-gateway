@@ -1662,8 +1662,9 @@ def _mms_public(row, parts) -> dict:
         record["delivery"] = {}
     # The MMSC location is a bearer credential for the content; the browser never needs it.
     record.pop("content_location", None)
-    record["parts"] = [{k: p[k] for k in ("id", "seq", "content_type", "name", "content_id",
-                                          "charset", "size", "text")} for p in parts]
+    record["parts"] = [{**{k: p[k] for k in ("id", "seq", "content_type", "name", "content_id",
+                                             "charset", "size", "text")},
+                        "preview": mms_media.previewable(p["content_type"])} for p in parts]
     return record
 
 

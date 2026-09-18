@@ -16,7 +16,7 @@ import time
 import uuid
 from contextlib import contextmanager
 
-from . import cellular_sms, mms_pdu, mms_transport, store
+from . import cellular_sms, mms_media, mms_pdu, mms_transport, store
 
 log = logging.getLogger("vowifi.mms")
 
@@ -201,9 +201,6 @@ def download(inst: dict, message_id: int, *, client=None, now: int | None = None
         return {"ok": False, "error": str(exc), "final": True}
 
 
-# What a phone would attach: pictures, sound, video, contact and calendar cards, plain text.
-SENDABLE_TYPES = ("image/", "audio/", "video/", "text/plain", "text/x-vcard", "text/vcard",
-                  "text/x-vcalendar", "text/calendar")
 _RECIPIENT_RE = re.compile(r"^\+?\d{3,32}$|^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -243,32 +240,57 @@ def validate_outgoing(recipients: list[str], text: str, attachments: list[dict],
         return f"not a phone number or email address: {bad[0]}"
     if not (text or "").strip() and not attachments:
         return "an MMS needs text or an attachment"
-    for item in attachments:
-        content_type = str(item.get("content_type") or "").split(";")[0].strip().lower()
-        if not content_type.startswith(SENDABLE_TYPES):
-            return f"{item.get('name') or 'attachment'}: {content_type or 'unknown'} " \
-                   "cannot be sent by MMS"
-    # Cheap bound first, so an oversized upload is refused without being packaged.
+    # Cheap bound first, so an oversized upload is refused without being inspected.
     size = len((text or "").encode("utf-8")) + sum(len(a.get("data") or b"") for a in attachments)
     if size > _limit(settings):
         return _size_problem(size, settings)
-    request = build_request("0" * 20, recipients, subject, _compose_parts(text, attachments))
+    checked, problem = check_attachments(attachments)
+    if problem:
+        return problem
+    request = build_request("0" * 20, recipients, subject, _compose_parts(text, checked))
     return _size_problem(len(request), settings)
 
 
+def check_attachments(attachments: list[dict]) -> tuple[list[dict], str | None]:
+    """Attachments ({name, content_type, data}) as they will be sent -- the type their
+    content shows, a safe display name, the playing time of audio and video -- or the
+    reason the first unacceptable one cannot be sent (see mms_media.check_attachment)."""
+    checked = []
+    for index, item in enumerate(attachments):
+        declared = str(item.get("content_type") or "")
+        name = mms_media.display_name(item.get("name") or "", declared) \
+            if item.get("name") else ""
+        result = mms_media.check_attachment(name or f"attachment {index + 1}", declared,
+                                            item.get("data") or b"")
+        if result.error:
+            return [], result.error
+        checked.append({"name": name or f"attachment{index + 1}."
+                        f"{mms_media.file_extension(result.content_type)}",
+                        "content_type": result.content_type, "data": bytes(item["data"]),
+                        "duration_ms": result.duration_ms})
+    return checked, None
+
+
 def _compose_parts(text: str, attachments: list[dict]) -> list[dict]:
+    """Stored parts for a composed message; `attachments` come from check_attachments()."""
     parts = []
     if (text or "").strip():
         parts.append({"content_type": "text/plain", "data": text.encode("utf-8"),
                       "name": "text.txt", "content_id": "text", "charset": "utf-8",
                       "text": text})
     for index, item in enumerate(attachments):
-        content_type = str(item.get("content_type") or "").split(";")[0].strip().lower()
-        extension = content_type.split("/")[-1].split("+")[0][:8] or "bin"
-        name = str(item.get("name") or f"attachment{index + 1}.{extension}")
-        parts.append({"content_type": content_type, "data": bytes(item["data"]),
-                      "name": name, "content_id": f"part{index + 1}"})
+        parts.append({"content_type": item["content_type"], "data": item["data"],
+                      "name": item["name"], "content_id": f"part{index + 1}",
+                      "duration_ms": item.get("duration_ms")})
     return parts
+
+
+def _duration_ms(part: dict) -> int | None:
+    if part.get("duration_ms"):
+        return int(part["duration_ms"])
+    if not str(part.get("content_type") or "").lower().startswith(("audio/", "video/")):
+        return None
+    return mms_media.check_attachment("", part["content_type"], part["data"]).duration_ms
 
 
 def build_request(transaction_id: str, recipients: list[str], subject: str,
@@ -278,7 +300,8 @@ def build_request(transaction_id: str, recipients: list[str], subject: str,
     pdu_parts = mms_pdu.assign_references([
         mms_pdu.MmsPart(p["content_type"], p["data"], name=p.get("name") or "",
                         content_id=p.get("content_id") or "",
-                        content_location=p.get("name") or "", charset=p.get("charset") or "")
+                        content_location=p.get("name") or "", charset=p.get("charset") or "",
+                        duration_ms=_duration_ms(p))
         for p in parts])
     pdu_parts.insert(0, mms_pdu.build_smil(pdu_parts))
     return mms_pdu.encode_send_req(transaction_id=transaction_id, to=recipients,
@@ -288,7 +311,11 @@ def build_request(transaction_id: str, recipients: list[str], subject: str,
 
 def create_outgoing(instance: str, recipients: list[str], text: str, attachments: list[dict],
                     subject: str = "") -> dict:
-    """Store a composed MMS (state "sending") and return its message record."""
+    """Store a composed MMS (state "sending") and return its message record. Raises
+    ValueError for an attachment validate_outgoing() would have refused."""
+    attachments, problem = check_attachments(attachments)
+    if problem:
+        raise ValueError(problem)
     peer = store.canonical_peer(instance, recipients[0]) if len(recipients) == 1 \
         else ", ".join(recipients)
     rec = store.create_outgoing_mms(instance, peer, to_addrs=recipients, subject=subject,

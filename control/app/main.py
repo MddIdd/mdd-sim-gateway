@@ -33,7 +33,7 @@ from . import config as cfg
 from . import (store, engine, status as status_mod, sim, card, notify_push, lpa, auth,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
                sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd, mms,
-               mms_transport)
+               mms_media, mms_transport)
 from .version import VERSION
 from .ami import AmiClient
 from .runtime import RuntimeRegistry
@@ -5336,7 +5336,7 @@ async def api_mms_send(iid: str, request: Request):
         if not hasattr(upload, "read"):
             continue
         data = await upload.read(int(settings["max_size"]) + 1)
-        attachments.append({"name": os.path.basename(upload.filename or "")[:80],
+        attachments.append({"name": upload.filename or "",
                             "content_type": upload.content_type or "", "data": data})
     problem = await asyncio.to_thread(mms.validate_outgoing, recipients, text, attachments,
                                       settings, subject)
@@ -5412,7 +5412,7 @@ def _mms_settings_view(inst: dict) -> dict:
                                  if k != "password"}
     own = dict(inst.get("mms") or {})
     own["password_set"] = bool(own.pop("password", ""))
-    return {"effective": effective, "line": own}
+    return {"effective": effective, "line": own, "formats": mms_media.capabilities()}
 
 
 @app.get("/api/instances/{iid}/mms/settings")

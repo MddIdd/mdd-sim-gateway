@@ -2,6 +2,7 @@ import asyncio
 import base64
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
@@ -150,6 +151,81 @@ class PartStorageTests(TempStore):
         store.delete_messages("1", [rec["id"]])
         self.assertFalse(os.path.exists(os.path.dirname(found["file"])))
         self.assertIsNone(store.mms_for_download(rec["id"]))
+
+
+class PartReplacementTests(TempStore):
+    def setUp(self):
+        super().setUp()
+        self.rec = mms.handle_wap_push("1", "99", notification_push(),
+                                       transport="vowifi")["message"]
+        self.directory = self.root / "mms" / str(self.rec["id"])
+
+    def parts(self, tag=b"1", name="photo.jpg"):
+        return [{"content_type": "image/jpeg", "data": b"\xff\xd8\xff" + tag, "name": name},
+                {"content_type": "text/plain", "data": b"hi" + tag, "charset": "utf-8"}]
+
+    def stored(self):
+        return {p["seq"]: p for p in store.mms_parts_with_data(self.rec["id"])}
+
+    def test_files_get_internal_names_and_the_original_name_is_metadata(self):
+        long_name = "照片" * 60 + ".jpeg"
+        store.save_mms_content(self.rec["id"], self.parts(name=long_name))
+        first, text = self.stored()[0], self.stored()[1]
+        self.assertRegex(first["path"], r"^00-[0-9a-f]{16}\.jpg$")
+        self.assertRegex(text["path"], r"^01-[0-9a-f]{16}\.txt$")
+        self.assertTrue(first["name"].endswith(".jpeg"))
+        self.assertLessEqual(len(first["name"].encode()), 120)
+        self.assertEqual(text["name"], "")
+
+    def test_a_save_that_fails_leaves_the_previous_content_intact(self):
+        store.save_mms_content(self.rec["id"], self.parts(b"1"))
+        before = sorted(os.listdir(self.directory))
+        real_replace, calls = os.replace, []
+
+        def fail_second(src, dst):
+            calls.append(dst)
+            if len(calls) == 2:
+                raise OSError(28, "No space left on device")
+            return real_replace(src, dst)
+
+        with patch.object(os, "replace", side_effect=fail_second):
+            with self.assertRaises(OSError):
+                store.save_mms_content(self.rec["id"], self.parts(b"2"))
+        self.assertEqual(sorted(os.listdir(self.directory)), before)
+        self.assertEqual(self.stored()[0]["data"], b"\xff\xd8\xff1")
+
+        with patch.object(store, "_conn", side_effect=RuntimeError("database is locked")):
+            with self.assertRaises(RuntimeError):
+                store.save_mms_content(self.rec["id"], self.parts(b"3"))
+        self.assertEqual(sorted(os.listdir(self.directory)), before)
+
+    def test_a_successful_save_replaces_the_old_files(self):
+        store.save_mms_content(self.rec["id"], self.parts(b"1"))
+        old = set(os.listdir(self.directory))
+        store.save_mms_content(self.rec["id"], self.parts(b"2"))
+        new = set(os.listdir(self.directory))
+        self.assertFalse(old & new)
+        self.assertEqual(self.stored()[0]["data"], b"\xff\xd8\xff2")
+
+    def test_a_save_for_a_deleted_message_keeps_nothing(self):
+        store.delete_messages("1", [self.rec["id"]])
+        with self.assertRaises(LookupError):
+            store.save_mms_content(self.rec["id"], self.parts())
+        self.assertFalse(self.directory.exists())
+
+    def test_the_sweep_removes_only_old_unreferenced_files(self):
+        store.save_mms_content(self.rec["id"], self.parts())
+        (self.directory / "stray.jpg").write_bytes(b"x")
+        (self.directory / ".00-abc.jpg.tmp").write_bytes(b"x")
+        orphan = self.root / "mms" / "999"
+        orphan.mkdir()
+        (orphan / "00-x.jpg").write_bytes(b"x")
+        self.assertEqual(store.sweep_mms_orphans(), 0, "recent files are left alone")
+        later = time.time() + store.MMS_ORPHAN_GRACE_SECONDS + 1
+        self.assertEqual(store.sweep_mms_orphans(now=later), 3)
+        self.assertFalse(orphan.exists())
+        self.assertEqual(sorted(os.listdir(self.directory)),
+                         sorted(p["path"] for p in self.stored().values()))
 
 
 class InboundEventTests(unittest.IsolatedAsyncioTestCase, TempStore):

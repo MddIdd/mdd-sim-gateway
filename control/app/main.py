@@ -1608,18 +1608,31 @@ def _mms_push_text(rec: dict) -> str:
     return summary
 
 
+# How often the MMS worker looks for attachment files an interrupted save or deletion left.
+MMS_SWEEP_SECONDS = 6 * 3600
+
+
 async def mms_worker():
     """Retrieve notified MMS from the MMSC, retrying on the schedule mms.download() sets."""
     try:
         await asyncio.to_thread(store.reset_interrupted_mms)
     except Exception as exc:  # noqa
         log.debug("MMS state recovery failed: %r", exc)
+    swept = time.monotonic()
     while True:
         try:
             await asyncio.wait_for(hub.mms_wakeup.wait(), timeout=20)
         except asyncio.TimeoutError:
             pass
         hub.mms_wakeup.clear()
+        if time.monotonic() - swept > MMS_SWEEP_SECONDS:
+            swept = time.monotonic()
+            try:
+                removed = await asyncio.to_thread(store.sweep_mms_orphans)
+                if removed:
+                    log.info("removed %d unreferenced MMS file(s)", removed)
+            except Exception as exc:  # noqa
+                log.debug("MMS orphan sweep failed: %r", exc)
         try:
             due = await asyncio.to_thread(store.due_mms_downloads)
         except Exception as exc:  # noqa
@@ -5392,7 +5405,8 @@ def api_mms_part(iid: str, mid: int, pid: int, download: bool = False):
     media_type = content_type if inline else "application/octet-stream"
     if inline and content_type == "text/plain":
         media_type = f"text/plain; charset={part['charset'] or 'utf-8'}"
-    name = part["name"] or os.path.basename(part["file"])
+    # The same rule as when the name was stored; rows written before it existed get it here.
+    name = mms_media.display_name(part["name"] or "", content_type)
     return FileResponse(part["file"], media_type=media_type, filename=name,
                         content_disposition_type="inline" if inline else "attachment",
                         headers={"X-Content-Type-Options": "nosniff",

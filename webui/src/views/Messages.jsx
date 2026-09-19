@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react'
+import React, { useEffect, useLayoutEffect, useState, useCallback, useRef } from 'react'
 import { api } from '../api.js'
 import SimSelector from './SimSelector.jsx'
 import MmsSettings from './MmsSettings.jsx'
@@ -39,6 +39,15 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
   const sendingRef = useRef(false)
   const fileInputRef = useRef(null)
   const attachmentsRef = useRef(attachments)
+  const listRef = useRef(null)
+  const listContentRef = useRef(null)
+  // Whether the message list should follow its bottom edge: true when a conversation is
+  // opened and while the reader stays at (or near) the newest message, false once they
+  // scroll up to read older history so an incoming message does not yank them back down.
+  const stickToBottom = useRef(true)
+  // The list's scrollTop at the last scroll event, to tell the reader scrolling up from
+  // everything else that fires a scroll event.
+  const lastScrollTop = useRef(0)
   activeId.current = id
   activePeer.current = peer
   attachmentsRef.current = attachments
@@ -196,6 +205,37 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
     setMessagesLoading(Boolean(peer))
     if (peer) loadMsgs(peer, true)
   }, [peer, loadMsgs])
+  // Open every conversation at its newest message, and keep following it as messages
+  // arrive or MMS thumbnails finish loading (which grows the list after the first paint).
+  useLayoutEffect(() => { stickToBottom.current = true; lastScrollTop.current = 0 }, [peer])
+  const scrollToBottomIfStuck = useCallback(() => {
+    const el = listRef.current
+    if (el && stickToBottom.current) el.scrollTop = el.scrollHeight
+  }, [])
+  useLayoutEffect(scrollToBottomIfStuck, [msgs, messagesLoading, scrollToBottomIfStuck])
+  // Messages are not the only thing that moves the bottom edge: a picture or video finishing
+  // loading grows the list, and the composer growing (attachments, a wrapped line) shrinks the
+  // visible area without any scroll or load event. Follow every size change of the list and of
+  // its content while the reader is at the bottom.
+  useLayoutEffect(() => {
+    const list = listRef.current
+    const content = listContentRef.current
+    if (!list || !content || typeof ResizeObserver === 'undefined') return undefined
+    const observer = new ResizeObserver(scrollToBottomIfStuck)
+    observer.observe(list)
+    observer.observe(content)
+    return () => observer.disconnect()
+  }, [id, scrollToBottomIfStuck])
+  // Only the reader scrolling up stops the following, and reaching the bottom resumes it. A
+  // scroll event is dispatched a frame after it happens, by when a picture may have grown the
+  // list: judged by the distance to the bottom alone, the list's own jump to the bottom would
+  // then read as the reader leaving it, and the conversation would stop half way.
+  const onListScroll = (e) => {
+    const el = e.currentTarget
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 48) stickToBottom.current = true
+    else if (el.scrollTop < lastScrollTop.current - 1) stickToBottom.current = false
+    lastScrollTop.current = el.scrollTop
+  }
   // leaving/refreshing a thread resets the selection UI
   useEffect(() => { setSelMode(false); setSelIds(new Set()) }, [peer])
   // if the open conversation empties (delete/clear), leave select mode so its toolbar
@@ -232,6 +272,7 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
       const peerKey = res?.message?.peer || to
       if (activeId.current === forId) {
         setText(''); setSubject(''); clearAttachments(); setPeer(peerKey); setNewTo('')
+        stickToBottom.current = true
         await loadThreads(); await loadMsgs(peerKey)
       }
       if (res && res.ok === false) {
@@ -263,6 +304,7 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
       // that line's draft or replace its open conversation with the old line's recipient.
       if (activeId.current === forId) {
         setText(''); setPeer(to); setNewTo('')
+        stickToBottom.current = true
         await loadThreads(); await loadMsgs(to)
       }
       if (res && res.ok === false) {
@@ -403,7 +445,11 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
             )
           )}
         </div>
-        <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {/* overflowAnchor none: the browser's scroll anchoring would otherwise move the view
+            when content above grows, and that scroll would read as the reader leaving the bottom. */}
+        <div ref={listRef} onScroll={onListScroll}
+          style={{ flex: 1, minHeight: 0, overflow: 'auto', overflowAnchor: 'none', padding: 16 }}>
+          <div ref={listContentRef} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {messagesLoading && <div aria-live="polite" style={{ color: 'var(--text-mute)', fontSize: 13 }}>{tr('Loading messages…')}</div>}
           {!messagesLoading && peer && msgs.length === 0 && <div style={{ color: 'var(--text-mute)', fontSize: 13 }}>{tr('No messages in this conversation.')}</div>}
           {msgs.map((m) => {
@@ -463,6 +509,7 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
               </div>
             )
           })}
+          </div>
         </div>
         <div onPaste={onComposerPaste} onDrop={onComposerDrop}
           onDragOver={(e) => { if (Array.from(e.dataTransfer?.types || []).includes('Files')) e.preventDefault() }}

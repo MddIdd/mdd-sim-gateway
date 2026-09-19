@@ -534,7 +534,7 @@ WELL_KNOWN_CONTENT_TYPES: dict[int, str] = {
 }
 _CONTENT_TYPE_TO_CODE: dict[str, int] = {}
 for _code, _name in WELL_KNOWN_CONTENT_TYPES.items():
-    _CONTENT_TYPE_TO_CODE.setdefault(_name, _code)
+    _CONTENT_TYPE_TO_CODE.setdefault(_name.lower(), _code)
 
 
 def _media_placeholder(code: int) -> str:
@@ -627,6 +627,8 @@ class MmsPart:
     content_id: str = ""
     content_location: str = ""
     charset: str = ""
+    # Playing time of an audio or video part, when known; used for the SMIL, never encoded.
+    duration_ms: int | None = None
 
     def text(self) -> str:
         try:
@@ -1057,7 +1059,7 @@ def encode_acknowledge_ind(transaction_id: str, *,
 
 
 def _encode_part_content_type(part: MmsPart) -> bytes:
-    code = _CONTENT_TYPE_TO_CODE.get(part.content_type)
+    code = _CONTENT_TYPE_TO_CODE.get(part.content_type.lower())
     media = bytes([0x80 | code]) if code is not None else write_text_string(part.content_type)
     params = bytearray()
     if part.name:
@@ -1131,39 +1133,158 @@ def encode_send_req(*, transaction_id: str, to: list, parts: list, subject: str 
     return bytes(out)
 
 
+# SMIL (OMA MMS Conformance Document, "SMIL for MMS"): one <par> per slide, the regions
+# named "Image" and "Text" that handsets expect, and every part referenced by its
+# Content-Location. The conformance document allows that or a "cid:" URL; handsets observed on
+# a live line (iPhone through the carrier's MMSC) reference by location, so this does too --
+# with locations assign_references() made unique and ASCII, never the raw file name.
+SMIL_CONTENT_ID = "smil"
+# How long a slide with no timed media (a picture, some text) stays up; what phones use.
+SLIDE_MS = 5000
+_SMIL_ELEMENTS = (("image/", "img"), ("video/", "video"), ("audio/", "audio"),
+                  ("text/plain", "text"))
+_SMIL_REGIONS = {"img": "Image", "video": "Image", "text": "Text"}
+_REFERENCE_SAFE = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                            "0123456789._-")
+
+
+def _smil_element(part: MmsPart) -> str:
+    content_type = part.content_type.lower()
+    for prefix, element in _SMIL_ELEMENTS:
+        if content_type.startswith(prefix):
+            return element
+    return "ref"  # a contact or calendar card: presented as an attachment
+
+
+def _bare_content_id(value: str) -> str:
+    return str(value or "").strip().strip("<>").strip()
+
+
+def assign_references(parts: list, *, reserved: tuple = (SMIL_CONTENT_ID,)) -> list:
+    """Give every part a Content-ID and a Content-Location unique within the message.
+
+    Both are plain ASCII tokens: a part keeps its own when it is already safe and unused, and
+    otherwise gets "partN" (with the file's extension for the location). Parts are updated in
+    place and returned, so a SMIL built afterwards can reference each one unambiguously -- two
+    attachments that were both called photo.jpg included."""
+    ids, locations = {r.lower() for r in reserved}, {f"{r}.xml".lower() for r in reserved}
+    for index, part in enumerate(parts, 1):
+        cid = _bare_content_id(part.content_id)
+        if not cid or cid.lower() in ids or not set(cid) <= _REFERENCE_SAFE:
+            cid = f"part{index}"
+            while cid.lower() in ids:
+                cid = f"part{index}-{len(ids)}"
+        ids.add(cid.lower())
+        part.content_id = cid
+        location = str(part.content_location or part.name or "").replace("\\", "/")
+        location = location.rsplit("/", 1)[-1].strip()
+        if not location or location.lower() in locations or len(location) > 64 \
+                or not set(location) <= _REFERENCE_SAFE or location.startswith("."):
+            stem, dot, extension = location.rpartition(".")
+            extension = extension if dot and stem and set(extension) <= _REFERENCE_SAFE \
+                and 0 < len(extension) <= 8 else ""
+            base = cid if set(cid) <= _REFERENCE_SAFE else f"part{index}"
+            location = f"{base}.{extension}" if extension else base
+            while location.lower() in locations:
+                location = f"part{index}-{len(locations)}" + (f".{extension}" if extension else "")
+        locations.add(location.lower())
+        part.content_location = location
+    return parts
+
+
 def build_smil(parts: list) -> MmsPart:
-    """A minimal SMIL presentation with one <par> per media part, referencing each by its
-    Content-Location. Good enough to make a slideshow-capable handset render something
-    sensible; this gateway doesn't need SMIL timing/transition sophistication."""
-    has_image = any(p.content_type.startswith("image/") for p in parts)
-    has_text = any(p.content_type == "text/plain" for p in parts)
-    regions = []
-    if has_image:
-        regions.append('<region id="Image" top="0" left="0" width="100%" height="80%" fit="meet"/>')
-    if has_text:
-        regions.append('<region id="Text" top="80%" left="0" width="100%" height="20%"/>')
+    """The SMIL presentation for `parts`, which must already carry unique Content-IDs and
+    Content-Locations (see assign_references).
 
-    pars = []
+    Each picture, video, sound or card is its own slide; a message's text joins the first
+    slide so a photo and its caption show together, as phones compose them. A slide with a
+    video or sound lasts as long as that media when its duration is known (MmsPart.duration_ms)
+    and otherwise carries no dur at all, so the player lets it run to its end instead of
+    cutting it off; a slide with only a picture or text lasts SLIDE_MS. Regions exist only
+    for what is shown: an "Image" region when a picture or video is, a "Text" region when
+    text is. The document is built with an XML library, so any name or ID is escaped."""
+    import xml.etree.ElementTree as ET
+
+    slides: list[list[MmsPart]] = []
+    texts = []
     for part in parts:
-        src = part.content_location or part.name or "part"
-        if part.content_type.startswith("image/"):
-            pars.append(f'<par dur="5000ms"><img region="Image" src="{src}"/></par>')
-        elif part.content_type == "text/plain":
-            pars.append(f'<par dur="5000ms"><text region="Text" src="{src}"/></par>')
-        elif part.content_type.startswith("audio/"):
-            pars.append(f'<par dur="5000ms"><audio src="{src}"/></par>')
-        elif part.content_type.startswith("video/"):
-            pars.append(f'<par dur="5000ms"><video region="Image" src="{src}"/></par>')
+        if part.content_type.lower() == "application/smil":
+            continue
+        if _smil_element(part) == "text":
+            texts.append(part)
+        else:
+            slides.append([part])
+    if texts:
+        if slides:
+            slides[0].append(texts[0])
+        else:
+            slides.append([texts[0]])
+        slides.extend([t] for t in texts[1:])
 
-    xml = (
-        '<smil><head><layout>' + "".join(regions) + "</layout></head>"
-        "<body>" + "".join(pars) + "</body></smil>"
-    )
-    return MmsPart(
+    elements = {_smil_element(p) for slide in slides for p in slide}
+    visual, textual = bool(elements & {"img", "video"}), "text" in elements
+    smil = ET.Element("smil")
+    layout = ET.SubElement(ET.SubElement(smil, "head"), "layout")
+    ET.SubElement(layout, "root-layout")
+    if visual:
+        ET.SubElement(layout, "region", id="Image", top="0%", left="0%", width="100%",
+                      height="80%" if textual else "100%", fit="meet")
+    if textual:
+        ET.SubElement(layout, "region", id="Text", top="80%" if visual else "0%", left="0%",
+                      width="100%", height="20%" if visual else "100%")
+    body = ET.SubElement(smil, "body")
+    for slide in slides:
+        par = ET.SubElement(body, "par")
+        timed = [p for p in slide if _smil_element(p) in ("audio", "video")]
+        durations = [p.duration_ms for p in timed]
+        if not timed:
+            par.set("dur", f"{SLIDE_MS}ms")
+        elif all(d and d > 0 for d in durations):
+            par.set("dur", f"{max(int(d) for d in durations)}ms")
+        for part in slide:
+            element = _smil_element(part)
+            node = ET.SubElement(par, element, src=part.content_location)
+            if element in _SMIL_REGIONS:
+                node.set("region", _SMIL_REGIONS[element])
+    smil_part = MmsPart(
         content_type="application/smil",
-        data=xml.encode("utf-8"),
+        data=ET.tostring(smil, encoding="unicode").encode("utf-8"),
         name="smil.xml",
-        content_id="smil",
+        content_id=SMIL_CONTENT_ID,
         content_location="smil.xml",
         charset="utf-8",
     )
+    check_smil(smil_part, parts)
+    return smil_part
+
+
+def check_smil(smil_part: MmsPart, parts: list) -> None:
+    """Raise ValueError unless the SMIL parses and every region and src it uses exists:
+    each region named by a media element is declared, and each src resolves to exactly one
+    of `parts` by Content-ID ("cid:") or, failing that, by Content-Location."""
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(smil_part.data)
+    except ET.ParseError as exc:
+        raise ValueError(f"the SMIL presentation is not valid XML: {exc}") from None
+    regions = {r.get("id") for r in root.iter("region")}
+    by_id: dict[str, int] = {}
+    by_location: dict[str, int] = {}
+    for part in parts:
+        if part is smil_part:
+            continue
+        cid = _bare_content_id(part.content_id)
+        by_id[cid] = by_id.get(cid, 0) + 1
+        by_location[part.content_location] = by_location.get(part.content_location, 0) + 1
+    for node in root.iter():
+        region = node.get("region")
+        if region is not None and region not in regions:
+            raise ValueError(f"the SMIL presentation uses the undeclared region {region!r}")
+        src = node.get("src")
+        if src is None:
+            continue
+        matches = by_id.get(src[4:], 0) if src.startswith("cid:") else by_location.get(src, 0)
+        if matches != 1:
+            raise ValueError(f"the SMIL presentation references {src!r}, which "
+                             f"{'no part' if not matches else 'more than one part'} has")

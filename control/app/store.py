@@ -16,7 +16,7 @@ import sqlite3
 import threading
 import time
 
-from . import sms_pdu
+from . import mms_media, sms_pdu
 
 DATA_DIR = os.environ.get("MDD_DATA", os.path.join(os.getcwd(), "data"))
 DB_PATH = os.path.join(DATA_DIR, "mdd-sim-gateway.sqlite")
@@ -104,6 +104,8 @@ def _backup_before_migration() -> str | None:
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     target = os.path.join(backup_dir(), f"{prefix}{stamp}.sqlite")
     partial = target + ".partial"
+    mms_target = target[:-len(".sqlite")] + ".mms"
+    mms_partial = mms_target + ".partial"
     try:
         os.makedirs(backup_dir(), mode=0o700, exist_ok=True)
         source = sqlite3.connect(DB_PATH)
@@ -115,17 +117,88 @@ def _backup_before_migration() -> str | None:
             copy.close()
             source.close()
         _verify_backup(partial, version, expected)
+        # The attachments the copy refers to go alongside it: the database alone cannot
+        # restore an MMS. Hard links cost no space, and part files are never rewritten.
+        shutil.rmtree(mms_partial, ignore_errors=True)
+        snapshot_mms_files(partial, mms_dir(), mms_partial)
         os.chmod(partial, 0o600)
+        os.replace(mms_partial, mms_target)
         os.replace(partial, target)
     except Exception as exc:
         try:
             os.remove(partial)
         except OSError:
             pass
+        shutil.rmtree(mms_partial, ignore_errors=True)
         raise MigrationBackupError(
             f"could not back up the history database before upgrading it from schema "
             f"version {version}; nothing was migrated: {exc}") from exc
     return target
+
+
+def _link_or_copy(source: str, target: str) -> None:
+    try:
+        os.link(source, target)
+    except OSError:
+        shutil.copy2(source, target)
+
+
+def snapshot_mms_files(database: str, source_root: str, target_root: str) -> dict:
+    """Hard-link (or, across file systems, copy) every attachment file the history database
+    at `database` refers to from `source_root` into `target_root`, laid out the same way.
+
+    Each copy is checked against the size its row records. A file the database refers to
+    but that is already gone is counted in "missing" rather than failing the snapshot, so an
+    existing inconsistency cannot block a backup. Returns {"parts", "missing"}."""
+    with sqlite3.connect(database) as check:
+        has_parts = check.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                                  "AND name='mms_parts'").fetchone() is not None
+        rows = check.execute("SELECT message_id, path, size FROM mms_parts WHERE path!=''"
+                             ).fetchall() if has_parts else []
+    os.makedirs(target_root, mode=0o700, exist_ok=True)
+    copied = missing = 0
+    for message_id, name, size in rows:
+        if os.path.basename(name) != name or name in ("", ".", ".."):
+            continue
+        source = os.path.join(source_root, str(int(message_id)), name)
+        if not os.path.isfile(source):
+            missing += 1
+            continue
+        directory = os.path.join(target_root, str(int(message_id)))
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        target = os.path.join(directory, name)
+        _link_or_copy(source, target)
+        if os.path.getsize(target) != int(size or 0):
+            raise OSError(f"the backup copy of MMS part {message_id}/{name} does not match "
+                          "its record")
+        copied += 1
+    return {"parts": copied, "missing": missing}
+
+
+def snapshot_history(database_target: str, mms_target: str, *, attempts: int = 3) -> dict:
+    """A consistent copy of the live history database (SQLite online backup) and of every
+    attachment file it refers to, for a full backup taken while the gateway runs.
+
+    A save that commits between the two steps removes files the database copy still points
+    at; when that leaves files missing, both are taken again. Returns snapshot_mms_files()'s
+    counts."""
+    result = {"parts": 0, "missing": 0}
+    for attempt in range(max(1, attempts)):
+        for leftover in (database_target,):
+            if os.path.exists(leftover):
+                os.remove(leftover)
+        shutil.rmtree(mms_target, ignore_errors=True)
+        os.makedirs(os.path.dirname(database_target) or ".", exist_ok=True)
+        source, copy = sqlite3.connect(DB_PATH), sqlite3.connect(database_target)
+        try:
+            source.backup(copy)
+        finally:
+            copy.close()
+            source.close()
+        result = snapshot_mms_files(database_target, mms_dir(), mms_target)
+        if not result["missing"]:
+            break
+    return result
 
 
 def _verify_backup(path: str, version: int, messages: int | None = None) -> None:
@@ -403,6 +476,10 @@ def init():
             orphans = _reconcile(c)
         for mid in orphans:
             shutil.rmtree(_mms_message_dir(mid), ignore_errors=True)
+    try:
+        sweep_mms_orphans()
+    except (OSError, sqlite3.Error):
+        pass    # housekeeping; the worker sweeps again later
 
 
 # Schema steps that must run exactly once, in order. `PRAGMA user_version` records the last
@@ -1582,8 +1659,9 @@ def _mms_public(row, parts) -> dict:
         record["delivery"] = {}
     # The MMSC location is a bearer credential for the content; the browser never needs it.
     record.pop("content_location", None)
-    record["parts"] = [{k: p[k] for k in ("id", "seq", "content_type", "name", "content_id",
-                                          "charset", "size", "text")} for p in parts]
+    record["parts"] = [{**{k: p[k] for k in ("id", "seq", "content_type", "name", "content_id",
+                                             "charset", "size", "text")},
+                        "preview": mms_media.previewable(p["content_type"])} for p in parts]
     return record
 
 
@@ -1845,13 +1923,27 @@ def set_mms_state(message_id: int, state: str, *, error: str | None = None,
                        int(message_id)))
 
 
-def _safe_part_name(seq: int, name: str, content_type: str) -> str:
-    base = os.path.basename(str(name or "")).strip()
-    base = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in base)[:80].strip("._")
-    if not base:
-        base = content_type.split("/")[-1].split(";")[0] or "part"
-        base = "".join(ch if ch.isalnum() else "_" for ch in base)[:20]
-    return f"{int(seq):02d}-{base}"
+# Part files are written once under a fresh name and never rewritten, so a reader, a backup
+# hard link or an interrupted save never sees a file change under it. One lock per message
+# keeps its saves, its deletion and the orphan sweep from interleaving on its directory.
+_mms_dir_locks: dict[int, threading.Lock] = {}
+_mms_dir_locks_guard = threading.Lock()
+# A file nothing refers to is only removed once it is this old: a save writes its files
+# before it commits the rows that point at them.
+MMS_ORPHAN_GRACE_SECONDS = 3600
+
+
+def _mms_dir_lock(message_id: int) -> threading.Lock:
+    with _mms_dir_locks_guard:
+        return _mms_dir_locks.setdefault(int(message_id), threading.Lock())
+
+
+def _remove_files(directory: str, names) -> None:
+    for name in names:
+        try:
+            os.remove(os.path.join(directory, name))
+        except OSError:
+            pass
 
 
 def save_mms_content(message_id: int, parts: list[dict], *, subject: str | None = None,
@@ -1859,47 +1951,107 @@ def save_mms_content(message_id: int, parts: list[dict], *, subject: str | None 
                      to_addrs: list[str] | None = None, cc_addrs: list[str] | None = None,
                      size: int | None = None) -> None:
     """Replace an MMS's parts with `parts` ({content_type, data, name, content_id, charset,
-    text}) and update its summary. Files are written before the rows that point at them."""
+    text}) and update its summary.
+
+    New content goes to new files (mms_media.storage_name: sequence, random ID, an extension
+    chosen by type -- never the sender's file name, which is kept as metadata). The rows are
+    switched to them in one transaction, and only then are the files they replace removed; if
+    anything fails first, the new files are removed and the previous content is untouched. A
+    message deleted meanwhile keeps nothing of the save."""
+    message_id = int(message_id)
     directory = _mms_message_dir(message_id)
-    os.makedirs(directory, exist_ok=True)
-    rows = []
-    for seq, part in enumerate(parts):
-        data = bytes(part.get("data") or b"")
-        filename = _safe_part_name(seq, part.get("name", ""), part.get("content_type", ""))
-        temporary = os.path.join(directory, f".{filename}.tmp")
-        with open(temporary, "wb") as handle:
-            handle.write(data)
-        os.replace(temporary, os.path.join(directory, filename))
-        rows.append((int(message_id), seq, str(part.get("content_type") or
-                                              "application/octet-stream"),
-                     str(part.get("name") or ""), str(part.get("content_id") or ""),
-                     str(part.get("charset") or ""), len(data), filename, part.get("text")))
-    with _lock, _conn() as c:
-        old = [r[0] for r in c.execute("SELECT path FROM mms_parts WHERE message_id=?",
-                                       (int(message_id),))]
-        c.execute("DELETE FROM mms_parts WHERE message_id=?", (int(message_id),))
-        c.executemany("INSERT INTO mms_parts(message_id,seq,content_type,name,content_id,"
-                      "charset,size,path,text) VALUES(?,?,?,?,?,?,?,?,?)", rows)
-        updates, args = ["updated_ts=?"], [int(time.time())]
-        for column, value in (("subject", subject), ("from_addr", from_addr), ("size", size)):
-            if value is not None:
-                updates.append(f"{column}=?")
-                args.append(value)
-        for column, value in (("to_addrs", to_addrs), ("cc_addrs", cc_addrs)):
-            if value is not None:
-                updates.append(f"{column}=?")
-                args.append(json.dumps(list(value)))
-        c.execute(f"UPDATE mms SET {','.join(updates)} WHERE message_id=?",
-                  (*args, int(message_id)))
-        if body is not None:
-            c.execute("UPDATE messages SET body=? WHERE id=?", (str(body), int(message_id)))
-    keep = {row[7] for row in rows}
-    for name in old:
-        if name and name not in keep:
+    with _mms_dir_lock(message_id):
+        written: list[str] = []
+        try:
+            os.makedirs(directory, exist_ok=True)
+            rows = []
+            for seq, part in enumerate(parts):
+                data = bytes(part.get("data") or b"")
+                content_type = str(part.get("content_type") or "application/octet-stream")
+                filename = mms_media.storage_name(seq, content_type)
+                temporary = os.path.join(directory, f".{filename}.tmp")
+                written.append(f".{filename}.tmp")
+                with open(temporary, "wb") as handle:
+                    handle.write(data)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, os.path.join(directory, filename))
+                written[-1] = filename
+                name = str(part.get("name") or "")
+                rows.append((message_id, seq, content_type,
+                             mms_media.display_name(name, content_type) if name else "",
+                             str(part.get("content_id") or ""), str(part.get("charset") or ""),
+                             len(data), filename, part.get("text")))
+            with _lock, _conn() as c:
+                if c.execute("SELECT 1 FROM mms WHERE message_id=?",
+                             (message_id,)).fetchone() is None:
+                    raise LookupError(f"MMS {message_id} no longer exists")
+                old = [r[0] for r in c.execute("SELECT path FROM mms_parts WHERE message_id=?",
+                                               (message_id,))]
+                c.execute("DELETE FROM mms_parts WHERE message_id=?", (message_id,))
+                c.executemany("INSERT INTO mms_parts(message_id,seq,content_type,name,"
+                              "content_id,charset,size,path,text) VALUES(?,?,?,?,?,?,?,?,?)",
+                              rows)
+                updates, args = ["updated_ts=?"], [int(time.time())]
+                for column, value in (("subject", subject), ("from_addr", from_addr),
+                                      ("size", size)):
+                    if value is not None:
+                        updates.append(f"{column}=?")
+                        args.append(value)
+                for column, value in (("to_addrs", to_addrs), ("cc_addrs", cc_addrs)):
+                    if value is not None:
+                        updates.append(f"{column}=?")
+                        args.append(json.dumps(list(value)))
+                c.execute(f"UPDATE mms SET {','.join(updates)} WHERE message_id=?",
+                          (*args, message_id))
+                if body is not None:
+                    c.execute("UPDATE messages SET body=? WHERE id=?", (str(body), message_id))
+        except BaseException:
+            _remove_files(directory, written)
             try:
-                os.remove(os.path.join(directory, name))
+                os.rmdir(directory)   # only when the failed save left it empty
             except OSError:
                 pass
+            raise
+        keep = set(written)
+        _remove_files(directory, [n for n in old if n and n not in keep])
+
+
+def sweep_mms_orphans(now: float | None = None,
+                      grace: int = MMS_ORPHAN_GRACE_SECONDS) -> int:
+    """Remove MMS files and directories nothing refers to -- left by a save or a deletion
+    that was interrupted (a crash, a full disk) -- once they are older than `grace`. Returns
+    how many files and directories were removed."""
+    root = mms_dir()
+    if not os.path.isdir(root):
+        return 0
+    now = time.time() if now is None else now
+    with _lock, _conn() as c:
+        live = {int(r[0]) for r in c.execute("SELECT message_id FROM mms")}
+        referenced = {(int(r[0]), r[1]) for r in c.execute(
+            "SELECT message_id, path FROM mms_parts")}
+    removed = 0
+    for entry in os.scandir(root):
+        if not entry.name.isdigit() or not entry.is_dir(follow_symlinks=False):
+            continue
+        message_id = int(entry.name)
+        with _mms_dir_lock(message_id):
+            try:
+                if message_id not in live:
+                    if now - entry.stat(follow_symlinks=False).st_mtime > grace:
+                        shutil.rmtree(entry.path, ignore_errors=True)
+                        removed += 1
+                    continue
+                for item in os.scandir(entry.path):
+                    if (message_id, item.name) in referenced:
+                        continue
+                    if item.is_file(follow_symlinks=False) and \
+                            now - item.stat(follow_symlinks=False).st_mtime > grace:
+                        os.remove(item.path)
+                        removed += 1
+            except OSError:
+                continue
+    return removed
 
 
 def mms_part_file(instance: str, message_id: int, part_id: int) -> dict | None:
@@ -2072,7 +2224,8 @@ def _delete_where(where: str, args: tuple) -> int:
         c.execute(f"DELETE FROM mms WHERE message_id IN ({marks})", ids)
         removed = c.execute(f"DELETE FROM messages WHERE id IN ({marks})", ids).rowcount
     for mid in ids:
-        shutil.rmtree(_mms_message_dir(mid), ignore_errors=True)
+        with _mms_dir_lock(mid):
+            shutil.rmtree(_mms_message_dir(mid), ignore_errors=True)
     return removed
 
 

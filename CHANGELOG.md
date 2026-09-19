@@ -4,6 +4,55 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- **The control plane gains two Python packages**, Pillow and pillow-heif, for converting MMS
+  pictures on the gateway. `install.sh reload` installs them from prebuilt wheels (amd64 and
+  arm64); a host that reloads offline needs them available first.
+
+### Changed
+
+- **MMS pictures are converted and shrunk on the gateway, not in the browser.** An attachment is
+  uploaded as soon as it is added; the gateway checks it, converts HEIC/HEIF, WebP, BMP and AVIF
+  to JPEG, and shares the line's size limit between the pictures, each re-encoded from its
+  original at the largest size (up to 1600 px) and then the highest quality that fits. The
+  composer shows each attachment's size before and after and the packaged total against the
+  limit. A picture phones show that already fits and is no larger than 1600 px keeps its
+  pixels; every picture sent loses its EXIF, XMP, IPTC or PNG text, so a photo no longer tells
+  the recipient where it was taken. The original is kept only while the
+  message is being written; the sent message stores what was sent. Clients using the API get
+  the same conversion when they send files directly, or can stage them with the new
+  `/mms/attachments` endpoints. Sound, video and animated GIFs are sent as they are (video
+  conversion can be added later as another converter).
+- With several attachments the sender chooses between one MMS, whose attachments share the
+  line's per-MMS limit, and one MMS per attachment, each fitted to the whole limit (text and
+  subject go with the first; they are submitted in order).
+- MMS attachments are checked by content against one capability table (send / convert /
+  receive-only) that the MMS settings API returns as `formats`, with an `attachable` flag the
+  WebUI follows for its picker, paste and drag-drop. Unsupported codecs (such as HEVC video),
+  vCard 4.0 and files whose content does not match their declared kind are refused with the
+  reason when they are added.
+- A received part the browser cannot show is offered as a download marked "Preview not
+  available".
+
+### Fixed
+
+- MMS presentation (SMIL) is built with an XML library: a file name such as `a&b.jpg` no
+  longer produces an unreadable SMIL, two attachments with the same name are no longer
+  referenced by the same `src`, a video-only message declares the region it is shown in, and a
+  sound or video slide lasts as long as the media instead of a fixed 5 seconds. Every part is
+  given a Content-ID and an ASCII Content-Location unique within the message (the SMIL
+  references the location, as handsets do), and the SMIL is checked before sending.
+- A line's MMS size limit applies to the packaged m-send-req -- SMIL, recipients, subject and
+  headers included -- both when composing and again right before submitting to the MMSC.
+- MMS parts are stored under names the gateway generates; the sender's file name is kept as
+  metadata, limited in bytes with its extension kept. Saving a message again writes new files
+  and removes the old ones only after the database has switched to them, and unreferenced files
+  left by an interrupted save or deletion are swept after an hour.
+- Backups keep MMS attachments: the pre-upgrade database copy has its attachments beside it
+  (`backups/<name>.mms`), and the full local backup archives a consistent database snapshot
+  with every attachment it refers to, checked before the archive is kept.
+
 ## [1.10.0] - 2026-09-18
 
 ### Upgrade notes

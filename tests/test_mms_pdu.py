@@ -7,6 +7,7 @@ values throughout. Test 5 is an MMSC error response in the same form, also ficti
 from __future__ import annotations
 
 import unittest
+import xml.etree.ElementTree as ET
 
 from control.app import mms_pdu as m
 
@@ -208,8 +209,8 @@ class TestSendReqRoundTrip(unittest.TestCase):
         self.assertEqual(smil_out.content_type, "application/smil")
         self.assertEqual(smil_out.name, "smil.xml")
         self.assertEqual(smil_out.charset, "utf-8")
-        self.assertIn("photo.jpg", smil_out.text())
-        self.assertIn("text.txt", smil_out.text())
+        self.assertIn('src="photo.jpg"', smil_out.text())
+        self.assertIn('src="text.txt"', smil_out.text())
 
         jpeg_out = by_cid["img1"]
         self.assertEqual(jpeg_out.content_type, "image/jpeg")
@@ -435,6 +436,81 @@ class AddressEncodingTests(unittest.TestCase):
                                 parts=[m.MmsPart("text/plain", b"x", charset="utf-8")])
         self.assertIn(b"+447700900123/TYPE=PLMN\x00", raw)
         self.assertEqual(m.decode_pdu(raw).to, ["+447700900123"])
+
+
+class SmilTests(unittest.TestCase):
+    @staticmethod
+    def smil(parts):
+        parts = m.assign_references(parts)
+        return ET.fromstring(m.build_smil(parts).data), parts
+
+    def test_names_that_need_escaping_still_make_valid_xml(self):
+        root, parts = self.smil([m.MmsPart("image/jpeg", b"x", name='a&b <"1">.jpg')])
+        self.assertEqual([i.get("src") for i in root.iter("img")], ["part1.jpg"])
+        self.assertEqual(parts[0].content_location, "part1.jpg")
+        self.assertEqual(parts[0].name, 'a&b <"1">.jpg', "the display name is kept")
+
+    def test_a_video_alone_gets_the_region_it_is_shown_in(self):
+        root, _ = self.smil([m.MmsPart("video/mp4", b"x", name="v.mp4")])
+        self.assertEqual([r.get("id") for r in root.iter("region")], ["Image"])
+        self.assertEqual(root.find("body/par/video").get("region"), "Image")
+
+    def test_attachments_with_the_same_name_are_referenced_apart(self):
+        root, parts = self.smil([m.MmsPart("image/jpeg", b"a", name="photo.jpg"),
+                                 m.MmsPart("image/jpeg", b"b", name="photo.jpg")])
+        srcs = [i.get("src") for i in root.iter("img")]
+        self.assertEqual(len(set(srcs)), 2)
+        self.assertEqual(len({p.content_location for p in parts}), 2)
+        self.assertEqual(len({p.content_id for p in parts}), 2)
+        encoded = m.encode_send_req(transaction_id="t", to=["+447700900123"],
+                                    parts=[m.build_smil(parts), *parts])
+        decoded = {p.content_location: p.data for p in m.decode_pdu(encoded).parts}
+        self.assertEqual(sorted(decoded[src] for src in srcs), [b"a", b"b"])
+
+    def test_timed_media_lasts_as_long_as_it_plays(self):
+        root, _ = self.smil([m.MmsPart("audio/amr", b"x", duration_ms=42_300),
+                             m.MmsPart("video/3gpp", b"y"),
+                             m.MmsPart("image/png", b"z")])
+        durations = [p.get("dur") for p in root.iter("par")]
+        self.assertEqual(durations, ["42300ms", None, "5000ms"],
+                         "an unknown length leaves the slide to end with its media")
+
+    def test_text_joins_the_first_slide_and_cards_are_referenced(self):
+        root, _ = self.smil([m.MmsPart("image/gif", b"g"),
+                             m.MmsPart("text/x-vCard", b"BEGIN:VCARD", name="Ann.vcf"),
+                             m.MmsPart("text/plain", b"hi", charset="utf-8")])
+        pars = root.findall("body/par")
+        self.assertEqual([[c.tag for c in p] for p in pars], [["img", "text"], ["ref"]])
+        self.assertEqual({r.get("id") for r in root.iter("region")}, {"Image", "Text"})
+        text_only, _ = self.smil([m.MmsPart("text/plain", b"hi")])
+        self.assertEqual(text_only.find("head/layout/region").get("height"), "100%")
+
+    def test_a_part_keeps_a_safe_unique_content_id(self):
+        _, parts = self.smil([m.MmsPart("image/png", b"a", content_id="<img1>"),
+                              m.MmsPart("image/png", b"b", content_id="img1"),
+                              m.MmsPart("image/png", b"c", content_id="smil"),
+                              m.MmsPart("image/png", b"d", content_id="a b")])
+        self.assertEqual(parts[0].content_id, "img1")
+        self.assertEqual(len({p.content_id.lower() for p in parts} | {"smil"}), 5)
+
+    def test_check_smil_also_resolves_cid_references(self):
+        parts = m.assign_references([m.MmsPart("image/png", b"a")])
+        smil = m.MmsPart("application/smil", b'<smil><head><layout><region id="Image"/></layout>'
+                         b'</head><body><par><img region="Image" src="cid:part1"/></par></body>'
+                         b'</smil>')
+        m.check_smil(smil, parts)
+
+    def test_check_smil_rejects_dangling_references(self):
+        parts = m.assign_references([m.MmsPart("image/png", b"a")])
+        smil = m.build_smil(parts)
+        with self.assertRaisesRegex(ValueError, "no part"):
+            m.check_smil(smil, [])
+        broken = m.MmsPart("application/smil", b'<smil><body><par><img region="Image" '
+                           b'src="cid:part1"/></par></body></smil>')
+        with self.assertRaisesRegex(ValueError, "undeclared region"):
+            m.check_smil(broken, parts)
+        with self.assertRaisesRegex(ValueError, "not valid XML"):
+            m.check_smil(m.MmsPart("application/smil", b"<smil><a&b/></smil>"), parts)
 
 
 if __name__ == "__main__":

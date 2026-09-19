@@ -238,18 +238,62 @@ def _recipient_problem(recipients: list[str]) -> str | None:
 
 
 def prepare_outgoing(recipients: list[str], text: str, attachments: list[dict],
-                     settings: dict, subject: str = "") -> tuple[list[dict], str | None, dict]:
-    """Attachments ready to store and send, or why the MMS cannot be sent as composed.
+                     settings: dict, subject: str = "", *, split: bool = False
+                     ) -> tuple[list[dict], str | None, dict]:
+    """The messages to store and send, or why the MMS cannot be sent as composed.
 
     `attachments` are the files as the user picked them ({name, content_type, data}); they are
-    checked, converted and fitted by fit_attachments(). Returns (attachments, problem,
-    summary)."""
+    checked, converted and fitted by plan_messages(). Returns (messages, problem, summary), each
+    message {text, subject, attachments} ready for create_outgoing()."""
     problem = _recipient_problem(recipients)
     if problem:
         return [], problem, {}
     if not (text or "").strip() and not attachments:
         return [], "an MMS needs text or an attachment", {}
-    return fit_attachments(attachments, text, subject, recipients, settings)
+    return plan_messages(attachments, text, subject, recipients, settings, split=split)
+
+
+def plan_messages(attachments: list[dict], text: str, subject: str, recipients: list[str],
+                  settings: dict, *, split: bool = False
+                  ) -> tuple[list[dict], str | None, dict]:
+    """How a composed MMS goes out: one message whose attachments share the line's limit
+    (fit_attachments), or with `split` one message per attachment, each fitted to the whole
+    limit on its own, the text and subject travelling with the first. The same attachment
+    therefore fits differently in the two modes; each mode is always fitted from the
+    originals, so switching back and forth never compounds the compression.
+
+    Returns (messages [{text, subject, attachments}], problem, summary). The summary has the
+    per-attachment entries of fit_attachments() in the order given, "split", "messages" (each
+    one's packaged size, whether it fits and the indexes of its attachments), "size" (all
+    messages together), "limit" (per message) and "fits"."""
+    if not split or len(attachments) < 2:
+        fitted, problem, summary = fit_attachments(attachments, text, subject, recipients,
+                                                   settings)
+        if not summary:
+            return [], problem, {}
+        summary.update(split=False, messages=[{
+            "size": summary["size"], "fits": summary["fits"],
+            "attachments": list(range(len(fitted)))}])
+        return [{"text": text, "subject": subject, "attachments": fitted}], problem, summary
+    messages, entries, planned = [], [], []
+    first_problem = None
+    for index, item in enumerate(attachments):
+        own_text, own_subject = (text, subject) if index == 0 else ("", "")
+        fitted, problem, summary = fit_attachments([item], own_text, own_subject, recipients,
+                                                   settings)
+        if not summary:
+            return [], problem, {}
+        if problem and first_problem is None:
+            name = summary["attachments"][0]["original_name"]
+            first_problem = problem if name in problem else f"{name}: {problem}"
+        messages.append({"text": own_text, "subject": own_subject, "attachments": fitted})
+        entries.extend(summary["attachments"])
+        planned.append({"size": summary["size"], "fits": summary["fits"],
+                        "attachments": [index]})
+    summary = {"limit": _limit(settings), "split": True, "messages": planned,
+               "size": sum(m["size"] for m in planned),
+               "fits": all(m["fits"] for m in planned), "attachments": entries}
+    return messages, first_problem, summary
 
 
 def validate_outgoing(recipients: list[str], text: str, attachments: list[dict],

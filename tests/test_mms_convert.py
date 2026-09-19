@@ -192,6 +192,53 @@ class ImageFitTests(unittest.TestCase):
             self.assertIn("cannot convert", problem)
 
 
+class SplitTests(unittest.TestCase):
+    def attachments(self, count=3):
+        return [{"name": f"p{i}.jpg", "content_type": "image/jpeg",
+                 "data": photo(3000 + 8 * i, 2000)} for i in range(count)]
+
+    def test_one_message_shares_the_limit_and_split_gives_each_the_whole_limit(self):
+        limit = 200 * 1024
+        together, problem, shared = mms.plan_messages(self.attachments(), "hello", "Hi", TO,
+                                                      {"max_size": limit})
+        self.assertIsNone(problem)
+        self.assertEqual((len(together), shared["split"]), (1, False))
+        self.assertLessEqual(shared["size"], limit)
+        apart, problem, own = mms.plan_messages(self.attachments(), "hello", "Hi", TO,
+                                                {"max_size": limit}, split=True)
+        self.assertIsNone(problem)
+        self.assertEqual((len(apart), own["split"], len(own["messages"])), (3, True, 3))
+        self.assertTrue(all(m["size"] <= limit for m in own["messages"]))
+        self.assertEqual([m["text"] for m in apart], ["hello", "", ""])
+        self.assertEqual([m["subject"] for m in apart], ["Hi", "", ""])
+        for alone, sharing in zip(own["attachments"], shared["attachments"]):
+            self.assertGreater(alone["size"], sharing["size"] * 2,
+                               "on its own a picture keeps far more of its quality")
+        self.assertEqual(own["size"], sum(m["size"] for m in own["messages"]))
+
+    def test_switching_modes_always_starts_from_the_originals(self):
+        items = self.attachments(2)
+        first, _p, _s = mms.plan_messages(items, "", "", TO, {"max_size": 200 * 1024})
+        mms.plan_messages(items, "", "", TO, {"max_size": 200 * 1024}, split=True)
+        again, _p, _s = mms.plan_messages(items, "", "", TO, {"max_size": 200 * 1024})
+        self.assertEqual([a["data"] for a in first[0]["attachments"]],
+                         [a["data"] for a in again[0]["attachments"]])
+
+    def test_a_problem_in_one_split_message_names_its_attachment(self):
+        amr = b"#!AMR\n" + (bytes([7 << 3 | 0x04]) + b"\x00" * 31) * 2000
+        _messages, problem, summary = mms.plan_messages(
+            [{"name": "p.jpg", "content_type": "image/jpeg", "data": photo()},
+             {"name": "memo.amr", "content_type": "audio/amr", "data": amr}],
+            "", "", TO, {"max_size": 32 * 1024}, split=True)
+        self.assertTrue(problem.startswith("memo.amr"))
+        self.assertEqual([m["fits"] for m in summary["messages"]], [True, False])
+
+    def test_a_single_attachment_is_one_message_either_way(self):
+        messages, _problem, summary = mms.plan_messages(self.attachments(1), "x", "", TO,
+                                                        {"max_size": 300 * 1024}, split=True)
+        self.assertEqual((len(messages), summary["split"]), (1, False))
+
+
 class StagingTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -211,9 +258,20 @@ class StagingTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             mms_staging.load("1", ["../../etc"])
         self.assertEqual(mms_staging.preview_file("1", meta["id"])[1], "image/heic")
-        mms_staging.save_fitted("1", meta["id"], "image/jpeg", b"small")
+        shared = mms_staging.save_fitted("1", meta["id"], "image/jpeg", b"small")
+        alone = mms_staging.save_fitted("1", meta["id"], "image/jpeg", b"larger")
         path, content_type = mms_staging.preview_file("1", meta["id"])
-        self.assertEqual((Path(path).read_bytes(), content_type), (b"small", "image/jpeg"))
+        self.assertEqual((Path(path).read_bytes(), content_type), (b"larger", "image/jpeg"))
+        path, _type = mms_staging.preview_file("1", meta["id"], shared)
+        self.assertEqual(Path(path).read_bytes(), b"small", "each version stays addressable")
+        self.assertEqual(Path(mms_staging.preview_file("1", meta["id"], alone)[0]).read_bytes(),
+                         b"larger")
+        self.assertIsNone(mms_staging.preview_file("1", meta["id"], "0" * 16))
+        for i in range(mms_staging.FITTED_VERSIONS):
+            mms_staging.save_fitted("1", meta["id"], "image/jpeg", b"v%d" % i)
+        self.assertIsNone(mms_staging.preview_file("1", meta["id"], shared), "old ones go")
+        directory = Path(self.temp.name, "mms-staging", "1", meta["id"])
+        self.assertEqual(len(list(directory.glob("fitted-*"))), mms_staging.FITTED_VERSIONS)
         mms_staging.remove("1", [meta["id"]])
         with self.assertRaises(KeyError):
             mms_staging.load("1", [meta["id"]])
@@ -242,9 +300,20 @@ class FitEndpointTests(StagingTests):
         self.assertLessEqual(result["size"], result["limit"])
         entry = result["attachments"][0]
         self.assertEqual((entry["id"], entry["original_size"]), (meta["id"], len(original)))
-        path, content_type = mms_staging.preview_file("1", meta["id"])
+        path, content_type = mms_staging.preview_file("1", meta["id"], entry["preview"])
         self.assertEqual(content_type, "image/jpeg")
         self.assertEqual(os.path.getsize(path), entry["size"])
+
+    def test_split_sends_are_submitted_in_order(self):
+        order = []
+
+        async def fake_send(iid, mid):
+            await asyncio.sleep(0.01 * (3 - mid))
+            order.append(mid)
+
+        with patch.object(main, "_send_mms_task", side_effect=fake_send):
+            asyncio.run(main._send_mms_sequence("1", [1, 2, 3]))
+        self.assertEqual(order, [1, 2, 3])
 
 
 if __name__ == "__main__":

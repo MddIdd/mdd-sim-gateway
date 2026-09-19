@@ -40,6 +40,9 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
   // What the gateway reports the composed MMS would carry, from the last successful fit:
   // {size, limit, fits, problem}. null until attachments exist and a first fit has returned.
   const [fit, setFit] = useState(null)
+  // Send each attachment as its own MMS instead of all in one: a line's limit is per MMS, so
+  // pictures sharing one message each come out smaller. Chosen per send; one MMS by default.
+  const [splitMms, setSplitMms] = useState(false)
   const [fitPending, setFitPending] = useState(false) // a fit request is in flight
   const [mmsBusy, setMmsBusy] = useState(() => new Set())  // message ids mid-download
   const [showMmsSettings, setShowMmsSettings] = useState(false)
@@ -58,6 +61,7 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
   const textRef = useRef(text)
   const subjectRef = useRef(subject)
   const recipientRef = useRef(peer || newTo)
+  const splitRef = useRef(splitMms)
   const listRef = useRef(null)
   const listContentRef = useRef(null)
   // Whether the message list should follow its bottom edge: true when a conversation is
@@ -73,6 +77,7 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
   textRef.current = text
   subjectRef.current = subject
   recipientRef.current = peer || newTo
+  splitRef.current = splitMms
 
   // Cellular SMS is available only when this line is currently attached to a live modem.
   // Older backends do not expose a dedicated SMS capability, so use the unified device type
@@ -131,6 +136,7 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
   const clearAttachments = useCallback(() => {
     setAttachments((prev) => { prev.forEach((a) => a.localUrl && URL.revokeObjectURL(a.localUrl)); return [] })
     setFit(null)
+    setSplitMms(false)
   }, [])
 
   // A browser can display these types straight from an object URL without asking the
@@ -364,9 +370,11 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
     try {
       const r = await api.fitMmsAttachments(forId, {
         ids, text: textRef.current, subject: subjectRef.current, to: recipientRef.current,
+        split: splitRef.current,
       })
       if (request !== fitRequest.current || activeId.current !== forId) return
-      setFit({ size: r.size, limit: r.limit, fits: r.fits, problem: r.problem })
+      setFit({ size: r.size, limit: r.limit, fits: r.fits, problem: r.problem,
+        split: Boolean(r.split), count: (r.messages || []).length || 1 })
       const byId = new Map((r.attachments || []).map((a) => [a.id, a]))
       setAttachments((prev) => prev.map((a) => {
         const info = a.id && byId.get(a.id)
@@ -410,6 +418,14 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
     scheduleFit(800)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [text, subject, peer, newTo, scheduleFit])
+  // Switching between one MMS and one each re-plans every attachment from its original; the
+  // sizes and thumbnails shown until that answer arrives are the other mode's, so sending
+  // waits for it (fitPending).
+  useEffect(() => {
+    if (!readyIdsKey) return
+    scheduleFit(0)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [splitMms, scheduleFit])
 
   const sendMms = async (to) => {
     const forId = id
@@ -417,7 +433,8 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
     setSending(true)
     try {
       const attachment_ids = attachmentsRef.current.filter((a) => a.status === 'ready' && a.id).map((a) => a.id)
-      const res = await api.sendMms(forId, { to, text, subject, attachment_ids })
+      const split = splitRef.current && attachment_ids.length > 1
+      const res = await api.sendMms(forId, { to, text, subject, attachment_ids, split })
       // The backend may canonicalize the peer differently from what was typed: a single
       // recipient is normalized (canonical_peer), and several recipients are joined with
       // ", " — read the stored message's own peer back rather than assuming it matches `to`.
@@ -676,7 +693,8 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
               {attachments.map((a) => {
                 const isImage = String(a.content_type || '').startsWith('image/')
-                const thumb = a.fitted && a.id && isImage ? api.mmsAttachmentPreviewUrl(id, a.id, a.size)
+                const thumb = a.fitted && a.id && isImage && a.preview
+                  ? api.mmsAttachmentPreviewUrl(id, a.id, a.preview)
                   : a.localUrl
                 const shrunk = a.status === 'ready' && (a.converted || a.size !== a.original_size)
                 const sizeText = a.status === 'uploading' ? tr('Uploading…')
@@ -699,9 +717,22 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
               })}
             </div>
           )}
+          {attachments.length > 1 && (
+            <div role="radiogroup" aria-label={tr('How to send the attachments')}
+              style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 11 }}>
+              {[[false, tr('One MMS')], [true, tr('One MMS per attachment')]].map(([value, label]) => (
+                <button key={String(value)} type="button" role="radio" aria-checked={splitMms === value}
+                  className={splitMms === value ? 'btn btn-primary' : 'btn btn-ghost'}
+                  disabled={sending} style={{ padding: '2px 8px', fontSize: 11 }}
+                  onClick={() => setSplitMms(value)}>{label}</button>
+              ))}
+            </div>
+          )}
           {attachments.length > 0 && fit && (
             <div style={{ fontSize: 11, color: 'var(--text-mute)' }}>
-              {tr('Total {size} of {limit}', { size: formatBytes(fit.size), limit: formatBytes(fit.limit) })}
+              {fit.split
+                ? tr('{count} MMS, each up to {limit}', { count: fit.count, limit: formatBytes(fit.limit) })
+                : tr('Total {size} of {limit}', { size: formatBytes(fit.size), limit: formatBytes(fit.limit) })}
               {fit.problem && <div style={{ color: '#ef4444', marginTop: 2 }}>{fit.problem}</div>}
             </div>
           )}

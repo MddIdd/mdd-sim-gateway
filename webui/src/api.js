@@ -184,16 +184,19 @@ export const api = {
   // attachments together: { ids, text, subject, to }. A 404 means one of the ids is gone (e.g.
   // swept) -- the caller should drop it and retry with what remains.
   fitMmsAttachments: (id, body) => j('POST', `/api/instances/${id}/mms/attachments/fit`, body),
-  // The fitted picture for a staged attachment's thumbnail (415 for a non-image). `version`
-  // busts the cache once a re-fit changes the same id's bytes.
+  // The fitted picture for a staged attachment's thumbnail (415 for a non-image). `version` is
+  // the "preview" token the fit returned: the same attachment fits differently when it shares
+  // a message and when it is sent alone, and the token names the version that fit produced.
   mmsAttachmentPreviewUrl: (id, aid, version) =>
     `/api/instances/${id}/mms/attachments/${encodeURIComponent(aid)}/preview?v=${encodeURIComponent(version ?? '')}`,
   removeMmsAttachment: (id, aid) => j('DELETE', `/api/instances/${id}/mms/attachments/${encodeURIComponent(aid)}`),
-  sendMms: (id, { to, text, subject, attachment_ids }) => {
+  // `split` sends each attachment as its own MMS (the text and subject with the first).
+  sendMms: (id, { to, text, subject, attachment_ids, split }) => {
     const fd = new FormData()
     fd.append('to', to || '')
     fd.append('text', text || '')
     if (subject) fd.append('subject', subject)
+    if (split) fd.append('split', '1')
     for (const aid of (attachment_ids || [])) fd.append('attachment_ids', aid)
     return form('POST', `/api/instances/${id}/mms/send`, fd)
   },

@@ -556,6 +556,7 @@ const zh = {
   'Subject (optional)': '主题（可选）', 'Remove attachment': '删除附件', 'Attach files': '添加附件',
   'Attach files, or paste or drop them here': '添加附件，也可直接粘贴或拖入图片',
   'Uploading…': '上传中…', 'Total {size} of {limit}': '合计 {size}，上限 {limit}',
+  'How to send the attachments': '附件发送方式', 'One MMS': '合并为一条', 'One MMS per attachment': '每张单独发送', '{count} MMS, each up to {limit}': '分 {count} 条彩信发送，每条上限 {limit}',
   'Could not attach this file': '无法添加此附件', 'Preview not available': '不支持预览',
   'Waiting to download': '等待下载', Expired: '已过期',
   'Auto-download': '自动下载', Transport: '传输方式',

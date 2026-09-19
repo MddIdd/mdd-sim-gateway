@@ -5438,29 +5438,34 @@ async def api_mms_attachment_add(iid: str, request: Request):
 
 @app.post("/api/instances/{iid}/mms/attachments/fit")
 async def api_mms_attachments_fit(iid: str, body: dict):
-    """What the message would carry: body {ids, text, subject, to}. Converts and shrinks the
-    staged attachments together to fit the line's limit and reports each one's size before
-    and after, and the packaged total. Sending fits again with what is sent."""
+    """What sending would carry: body {ids, text, subject, to, split}. Converts and shrinks the
+    staged attachments to fit the line's limit -- together in one message, or with `split`
+    each in its own -- and reports each one's size before and after, a preview version token,
+    and each message's packaged size (see mms.plan_messages). Sending fits again."""
     _inst, settings = await _mms_line(iid)
-    ids = [str(i) for i in (body or {}).get("ids") or []]
+    body = body or {}
+    ids = [str(i) for i in body.get("ids") or []]
     try:
         items = await asyncio.to_thread(mms_staging.load, iid, ids)
     except KeyError as exc:
         raise HTTPException(404, f"no such attachment: {exc.args[0]}") from None
-    fitted, problem, summary = await asyncio.to_thread(
-        mms.fit_attachments, items, str(body.get("text") or ""),
-        str(body.get("subject") or "").strip()[:80], _recipient_list(body.get("to")), settings)
-    for attachment_id, part in zip(ids, fitted):
-        await asyncio.to_thread(mms_staging.save_fitted, iid, attachment_id,
-                                part["content_type"], part["data"])
-    for attachment_id, entry in zip(ids, summary.get("attachments") or []):
+    messages, problem, summary = await asyncio.to_thread(
+        mms.plan_messages, items, str(body.get("text") or ""),
+        str(body.get("subject") or "").strip()[:80], _recipient_list(body.get("to")), settings,
+        split=bool(body.get("split")))
+    fitted = [part for message in messages for part in message["attachments"]]
+    for attachment_id, part, entry in zip(ids, fitted, summary.get("attachments") or []):
         entry["id"] = attachment_id
+        entry["preview"] = await asyncio.to_thread(
+            mms_staging.save_fitted, iid, attachment_id, part["content_type"], part["data"])
     return {"ok": problem is None, "problem": problem, **summary}
 
 
 @app.get("/api/instances/{iid}/mms/attachments/{aid}/preview")
-def api_mms_attachment_preview(iid: str, aid: str):
-    found = mms_staging.preview_file(iid, aid)
+def api_mms_attachment_preview(iid: str, aid: str, v: str | None = None):
+    """A staged attachment as the composer shows it; `v` names a fitted version (the
+    "preview" token a fit returned), so a thumbnail never shows another mode's version."""
+    found = mms_staging.preview_file(iid, aid, v or None)
     if not found:
         raise HTTPException(404, "no such attachment")
     path, content_type = found
@@ -5469,7 +5474,9 @@ def api_mms_attachment_preview(iid: str, aid: str):
     return FileResponse(path, media_type=content_type,
                         headers={"X-Content-Type-Options": "nosniff",
                                  "Content-Security-Policy": "sandbox; default-src 'none'",
-                                 "Cache-Control": "no-store"})
+                                 # A version token names fixed content; without one the
+                                 # latest version is served, which a later fit replaces.
+                                 "Cache-Control": "private, max-age=3600" if v else "no-store"})
 
 
 @app.delete("/api/instances/{iid}/mms/attachments/{aid}")
@@ -5480,16 +5487,18 @@ async def api_mms_attachment_remove(iid: str, aid: str):
 
 @app.post("/api/instances/{iid}/mms/send")
 async def api_mms_send(iid: str, request: Request):
-    """Compose and submit an MMS. multipart/form-data: to (comma-separated), text, subject,
-    any number of `attachment_ids` (uploaded with POST .../mms/attachments) and/or
-    `attachments` files. Every attachment is converted and shrunk to fit the line's limit.
-    Returns at once with the stored message; the upload to the MMSC can take minutes over
-    the modem and is reported over the websocket."""
+    """Compose and submit MMS. multipart/form-data: to (comma-separated), text, subject, any
+    number of `attachment_ids` (uploaded with POST .../mms/attachments) and/or `attachments`
+    files, and `split` ("1" to send each attachment as its own MMS, the text and subject with
+    the first). Every attachment is converted and shrunk to fit the line's limit. Returns at
+    once with the stored messages ("message" is the first); the upload to the MMSC can take
+    minutes over the modem and is reported over the websocket."""
     _inst, settings = await _mms_line(iid)
     form = await _mms_form(request)
     recipients = _recipient_list(form.get("to"))
     text = str(form.get("text") or "")
     subject = str(form.get("subject") or "").strip()[:80]
+    split = str(form.get("split") or "").lower() in ("1", "true", "yes")
     staged_ids = [str(i) for i in form.getlist("attachment_ids") if str(i)]
     try:
         attachments = await asyncio.to_thread(mms_staging.load, iid, staged_ids)
@@ -5498,16 +5507,26 @@ async def api_mms_send(iid: str, request: Request):
     for upload in form.getlist("attachments"):
         if hasattr(upload, "read"):
             attachments.append(await _read_upload(upload))
-    prepared, problem, _summary = await asyncio.to_thread(
-        mms.prepare_outgoing, recipients, text, attachments, settings, subject)
+    messages, problem, _summary = await asyncio.to_thread(
+        mms.prepare_outgoing, recipients, text, attachments, settings, subject, split=split)
     if problem:
         raise HTTPException(422, problem)
-    rec = await asyncio.to_thread(mms.create_outgoing, iid, recipients, text, prepared,
-                                  subject)
+    records = []
+    for message in messages:
+        records.append(await asyncio.to_thread(
+            mms.create_outgoing, iid, recipients, message["text"], message["attachments"],
+            message["subject"]))
     await asyncio.to_thread(mms_staging.remove, iid, staged_ids)
-    await hub.broadcast({"type": "sms", "instance": str(iid), "message": rec})
-    asyncio.create_task(_send_mms_task(str(iid), int(rec["id"])))
-    return {"ok": True, "message": rec}
+    for rec in records:
+        await hub.broadcast({"type": "sms", "instance": str(iid), "message": rec})
+    asyncio.create_task(_send_mms_sequence(str(iid), [int(r["id"]) for r in records]))
+    return {"ok": True, "message": records[0], "messages": records}
+
+
+async def _send_mms_sequence(iid: str, mids: list[int]) -> None:
+    """Submit several MMS one after another, so they reach the recipient in order."""
+    for mid in mids:
+        await _send_mms_task(iid, mid)
 
 
 async def _send_mms_task(iid: str, mid: int) -> None:

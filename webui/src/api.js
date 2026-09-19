@@ -165,19 +165,36 @@ export const api = {
   // delete messages: { ids:[...] } | { peer } (whole conversation) | { all:true }
   deleteMessages: (id, sel) => j('POST', `/api/instances/${id}/messages/delete`, sel),
 
-  // MMS. Sending is multipart/form-data (attachments), so it goes through form() rather
-  // than j(); everything else is plain JSON like the rest of the API.
+  // MMS. Uploads and sending are multipart/form-data, so they go through form() rather than
+  // j(); everything else is plain JSON like the rest of the API.
   mmsDownload: (id, mid) => j('POST', `/api/instances/${id}/messages/${mid}/mms/download`, {}),
   // Same-origin, cookie-authenticated URL for a part's content — used directly as an <img
   // src>, <audio>/<video> src, or download <a href>. download=1 forces attachment disposition.
   mmsPartUrl: (id, mid, pid, download = false) =>
     `/api/instances/${id}/messages/${mid}/mms/parts/${pid}${download ? '?download=1' : ''}`,
-  sendMms: (id, { to, text, subject, files }) => {
+  // Upload one attachment while composing. The gateway checks it at once (422 with a human
+  // -readable `detail` for a format it will refuse, 409 when too many uploads are already
+  // waiting, 413 when it is too large) and keeps it staged until sent or removed.
+  stageMmsAttachment: (id, file) => {
+    const fd = new FormData()
+    fd.append('file', file, file.name)
+    return form('POST', `/api/instances/${id}/mms/attachments`, fd)
+  },
+  // What the message would actually carry once the gateway converts and shrinks these staged
+  // attachments together: { ids, text, subject, to }. A 404 means one of the ids is gone (e.g.
+  // swept) -- the caller should drop it and retry with what remains.
+  fitMmsAttachments: (id, body) => j('POST', `/api/instances/${id}/mms/attachments/fit`, body),
+  // The fitted picture for a staged attachment's thumbnail (415 for a non-image). `version`
+  // busts the cache once a re-fit changes the same id's bytes.
+  mmsAttachmentPreviewUrl: (id, aid, version) =>
+    `/api/instances/${id}/mms/attachments/${encodeURIComponent(aid)}/preview?v=${encodeURIComponent(version ?? '')}`,
+  removeMmsAttachment: (id, aid) => j('DELETE', `/api/instances/${id}/mms/attachments/${encodeURIComponent(aid)}`),
+  sendMms: (id, { to, text, subject, attachment_ids }) => {
     const fd = new FormData()
     fd.append('to', to || '')
     fd.append('text', text || '')
     if (subject) fd.append('subject', subject)
-    for (const file of (files || [])) fd.append('attachments', file, file.name)
+    for (const aid of (attachment_ids || [])) fd.append('attachment_ids', aid)
     return form('POST', `/api/instances/${id}/mms/send`, fd)
   },
   mmsSettings: (id) => j('GET', `/api/instances/${id}/mms/settings`),

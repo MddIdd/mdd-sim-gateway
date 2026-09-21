@@ -15,9 +15,69 @@
 set -u
 
 export MDD_RUNDIR="${MDD_RUNDIR:-/run/mdd-sim-gateway}"
-mkdir -p "$MDD_RUNDIR" /logs /etc/asterisk
+# /logs is bind-mounted from the host and survives both a container restart and a rebuild, so
+# Asterisk's own logs live there (astlogdir in asterisk.conf). Until this existed, every
+# investigation into "the engine restarted on its own" had to work from `docker logs` alone,
+# which loses everything the moment the manager recreates the container.
+export MDD_AST_LOGDIR="${MDD_AST_LOGDIR:-/logs/asterisk}"
+mkdir -p "$MDD_RUNDIR" /logs "$MDD_AST_LOGDIR" /etc/asterisk
 
 log() { echo "[entrypoint] $*"; }
+
+# One machine-readable line per supervised lifecycle transition (Asterisk exit, swu_ike exit,
+# backoff reset). The manager reads this to tell a docker-restart-policy bounce apart from a
+# rebuild it performed itself; `docker logs` cannot express that difference.
+supervisor_record() {
+    python3 - "$@" <<'PY' 2>/dev/null || true
+import json, os, sys, time
+rec = {"ts": int(time.time()), "event": sys.argv[1]}
+for pair in sys.argv[2:]:
+    key, _, value = pair.partition("=")
+    if not key:
+        continue
+    try:
+        rec[key] = int(value)
+    except ValueError:
+        rec[key] = value
+path = os.path.join(os.environ.get("MDD_AST_LOGDIR", "/logs/asterisk"), "supervisor.jsonl")
+try:
+    # Bounded: this file must never be the reason a 15G SD card fills up.
+    lines = []
+    if os.path.exists(path):
+        with open(path) as handle:
+            lines = handle.read().splitlines()[-499:]
+    lines.append(json.dumps(rec, sort_keys=True))
+    tmp = path + ".tmp"
+    with open(tmp, "w") as handle:
+        handle.write("\n".join(lines) + "\n")
+    os.replace(tmp, path)
+except OSError:
+    pass
+PY
+}
+
+# Keep the persisted Asterisk logs bounded. At the shipped verbosity these grow ~12 KB/day, so
+# the cap is never reached in practice; it exists so a debug session left switched on cannot
+# fill the card.
+AST_LOG_MAX_BYTES="${MDD_AST_LOG_MAX_BYTES:-8388608}"
+AST_LOG_KEEP="${MDD_AST_LOG_KEEP:-3}"
+
+rotate_asterisk_logs() {
+    for name in full messages; do
+        path="$MDD_AST_LOGDIR/$name"
+        [ -f "$path" ] || continue
+        size=$(stat -c %s "$path" 2>/dev/null || echo 0)
+        [ "$size" -lt "$AST_LOG_MAX_BYTES" ] && continue
+        mv -f "$path" "$path.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || continue
+        # Ask the running Asterisk to reopen its files; harmless if it is not up yet.
+        asterisk -rx "logger reload" >/dev/null 2>&1 || true
+    done
+    # shellcheck disable=SC2012
+    ls -1t "$MDD_AST_LOGDIR"/full.* "$MDD_AST_LOGDIR"/messages.* 2>/dev/null \
+        | tail -n +$((AST_LOG_KEEP * 2 + 1)) | while read -r old; do rm -f "$old"; done
+}
+
+rotate_asterisk_logs
 
 # --- 1. Render configs from /config/instance.json --------------------------------
 log "rendering configs..."
@@ -59,10 +119,18 @@ rm -f "$MDD_RUNDIR/swu.ctl" "$MDD_RUNDIR/swu_status.json"
 # complete segments into persistent /logs/ike storage. This keeps it separate from Asterisk's
 # console (docker logs); the manager surfaces IKE and Asterisk as two separate views.
 # The supervisor's own status lines still go to the container stdout via log().
+# A run that carried traffic for this long counts as a successful connection, so the next
+# teardown starts from the short delay again. Without the reset the delay only ever doubled
+# (4 -> 8 -> ... -> 60) for the life of the process; that stayed invisible only because the
+# container itself was being restarted after nearly every teardown, which re-seeded it to 4.
+# Once Asterisk stops taking the container down with it, an unreset backoff would leave a
+# healthy line waiting a full minute to re-establish.
+SWU_STABLE_SECONDS="${SWU_STABLE_SECONDS:-120}"
 (
   backoff=4
   while true; do
     log "swu_ike starting"
+    started=$(date +%s)
     python3 -u /usr/local/bin/swu_ike.py \
         -m "${USIM_READER_INDEX:-0}" \
         -s "$SWU_SOURCE" \
@@ -77,7 +145,16 @@ rm -f "$MDD_RUNDIR/swu.ctl" "$MDD_RUNDIR/swu_status.json"
         --current "$MDD_RUNDIR/charon.log" \
         --archive-dir /logs/ike
     rc=${PIPESTATUS[0]}
+    ran=$(( $(date +%s) - started ))
+    if [ "$ran" -ge "$SWU_STABLE_SECONDS" ]; then
+      if [ "$backoff" -ne 4 ]; then
+        log "swu_ike had been up ${ran}s; resetting reconnect delay ${backoff}s -> 4s"
+        supervisor_record swu_backoff_reset "ran_seconds=$ran" "previous_backoff=$backoff"
+      fi
+      backoff=4
+    fi
     log "swu_ike exited (rc=$rc); reconnecting in ${backoff}s"
+    supervisor_record swu_ike_exited "rc=$rc" "ran_seconds=$ran" "backoff_seconds=$backoff"
     sleep "$backoff"; backoff=$((backoff*2)); [ "$backoff" -gt 60 ] && backoff=60
   done
 ) &
@@ -99,10 +176,10 @@ done
 addr=$(cat "$MDD_RUNDIR/pcscf" 2>/dev/null)
 if [ -n "$addr" ]; then
   log "discovered P-CSCF: $addr"
-  # Re-render pjsip.conf with the P-CSCF and the tunnel address. render.py also writes the
-  # applied-marker, so swu_ike's in-process watcher only re-renders + reloads Asterisk on a LATER
-  # change (reconnect/reauth), not redundantly right after this render.
-  python3 /usr/local/bin/render.py || true
+  python3 /usr/local/bin/render.py || true   # re-render pjsip.conf with pcscf
+  # Seed the applied-marker so swu_ike's in-process P-CSCF watcher only re-renders + reloads
+  # Asterisk on a LATER change (reconnect/reauth), not redundantly right after this render.
+  printf '%s' "$addr" > "$MDD_RUNDIR/pcscf.applied"
 else
   log "no P-CSCF discovered yet - continuing (manager will surface tunnel state)"
 fi
@@ -111,5 +188,53 @@ fi
 log "starting ami_usim bridge..."
 python3 -u /usr/local/bin/ami_usim.py /usr/local/etc/ami_usim.ini &
 
-log "starting Asterisk..."
-exec asterisk -f
+# Asterisk used to be exec'd as PID 1, which meant that when it went away the container simply
+# vanished and the only surviving evidence was "ExitCode=0" from `docker inspect` — not enough
+# to tell a clean shutdown from a crash, and `exit 0` with no kernel segfault record fits
+# neither. Supervise it instead so the exact disposition (exit status vs terminating signal) is
+# recorded before the container goes down. Signals are forwarded so `docker stop` still stops
+# Asterisk the way it did before.
+#
+# -g makes Asterisk dump core if it is ever actually killed by a signal; the container needs a
+# core ulimit for that to produce a file (the manager sets it). It costs nothing when, as the
+# evidence so far suggests, the process is leaving through a normal exit path.
+ASTERISK_ARGS="-f"
+[ "${MDD_ASTERISK_CORE_DUMP:-1}" = "1" ] && ASTERISK_ARGS="$ASTERISK_ARGS -g"
+
+log "starting Asterisk... (args: $ASTERISK_ARGS)"
+# shellcheck disable=SC2086
+asterisk $ASTERISK_ARGS &
+AST_PID=$!
+AST_RC=0
+# Asterisk's own logs are now persistent, so nothing prunes them when the container stays up
+# for weeks. Check hourly; rotate_asterisk_logs is a no-op below the size cap.
+(
+  while true; do
+    sleep 3600
+    rotate_asterisk_logs
+  done
+) &
+forward_signal() {
+    kill -"$1" "$AST_PID" 2>/dev/null || true
+}
+trap 'forward_signal TERM' TERM
+trap 'forward_signal INT' INT
+trap 'forward_signal HUP' HUP
+
+# `wait` returns immediately with 128+signo when a trap fires, so keep waiting until the child
+# is genuinely gone; otherwise a forwarded SIGTERM would look like Asterisk had exited.
+while kill -0 "$AST_PID" 2>/dev/null; do
+    wait "$AST_PID"
+    AST_RC=$?
+done
+
+if [ "$AST_RC" -gt 128 ]; then
+    AST_SIGNAL=$((AST_RC - 128))
+    log "asterisk terminated by signal $AST_SIGNAL (rc=$AST_RC)"
+    supervisor_record asterisk_exited "rc=$AST_RC" "signal=$AST_SIGNAL" "disposition=signal"
+else
+    log "asterisk exited normally with status $AST_RC"
+    supervisor_record asterisk_exited "rc=$AST_RC" "disposition=exit"
+fi
+python3 /usr/local/bin/notify.py engine_stopped "$AST_RC" >/dev/null 2>&1 || true
+exit "$AST_RC"

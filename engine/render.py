@@ -58,7 +58,8 @@ def _default_gateway_ipv4():
 def tunnel_address(v6: bool) -> str:
     """The IMS address the ePDG assigned on ipsec0, in the P-CSCF's family, or "" before the
     tunnel is up. The IMS leg's RTP binds to it so that leg is reachable from inside the tunnel
-    only. swu_ike's P-CSCF watcher reads the same value to notice a changed address."""
+    only. A re-attach gives the tunnel a new address, and swu_ike re-renders and restarts
+    Asterisk for exactly that case (swu_apply_pcscf, tunnel_rebuilt)."""
     try:
         out = subprocess.check_output(
             ["ip", "-o", "-6" if v6 else "-4", "addr", "show", "dev", "ipsec0", "scope", "global"],
@@ -284,11 +285,6 @@ def main():
         with open(dest, "w") as f:
             f.write(rendered)
         print(f"[render] {tpl} -> {dest}")
-    if ctx["pcscf"]:
-        # What this render applied, for swu_ike's watcher: it re-renders and reloads Asterisk
-        # when either the P-CSCF or the tunnel address differs from this on a reconnect.
-        with open("/run/mdd-sim-gateway/pcscf.applied", "w") as f:
-            f.write(f"{ctx['pcscf']} {ctx['ims_media_addr']}")
 
     # Bundled prompts. Shipped in templates/ so the overlay image carries them: the base
     # image's Asterisk sound packages are a side effect of its build, not something this

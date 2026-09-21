@@ -78,15 +78,12 @@ class RenderContextTests(unittest.TestCase):
         with patch.object(render.subprocess, "check_output", side_effect=OSError):
             self.assertEqual(render.tunnel_address(False), "")
 
-    def test_watcher_and_render_agree_on_how_the_tunnel_address_is_read(self):
-        # swu_ike cannot import render.py, so the two copies must stay the same command.
-        render_src = (ROOT / "engine/render.py").read_text()
-        swu_src = (ROOT / "engine/swu_ike.py").read_text()
-        command = '["ip", "-o", "-6" if v6 else "-4", "addr", "show", "dev", "ipsec0", "scope", "global"]'
-        self.assertIn(command, render_src)
-        self.assertIn(command, swu_src)
-        self.assertIn('f.write(f"{ctx[\'pcscf\']} {ctx[\'ims_media_addr\']}")', render_src)
-        self.assertIn('current = "%s %s" % (addr, swu_tunnel_address(":" in addr))', swu_src)
+    def test_a_rebuilt_tunnel_re_renders_so_the_ims_leg_follows_its_new_address(self):
+        # The IMS leg binds to the tunnel address, which changes on every re-attach. swu_ike
+        # applies a rebuilt tunnel unconditionally, which re-runs render.py.
+        swu = (ROOT / "engine/swu_ike.py").read_text()
+        self.assertIn("swu_apply_pcscf(pcscf, tunnel_rebuilt=True)", swu)
+        self.assertIn("if last == addr and not tunnel_rebuilt:", swu)
 
 
 class ProvisioningTests(unittest.TestCase):

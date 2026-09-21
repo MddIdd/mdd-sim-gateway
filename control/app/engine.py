@@ -34,6 +34,10 @@ LIFECYCLE_RECORDS = 500
 LIFECYCLE_EVENTS = {
     "recovery_scheduled", "recovery_blocked", "recovery_started", "recovery_failed",
     "recovery_succeeded", "recovery_cancelled", "vowifi_disabled",
+    # Docker's restart policy restarted the engine without the manager asking it to, i.e. the
+    # engine process died on its own. reason_code carries how it left (engine_exit /
+    # engine_signal / unknown) as reported by the entrypoint supervisor.
+    "engine_restarted",
     # A start/reprovision refused by the PIN/identity preflight before the engine ran.
     # reason_code carries the closed code (no_card / pin_required / pin_invalid /
     # card_mismatch / card_unreadable); the ICCID itself never enters this public record.
@@ -412,11 +416,24 @@ def start(inst: dict, settings: dict, dev_mounts: bool = False, reason: str = "r
                            client.api.create_endpoint_config(ipv4_address=engine_addr)},
         restart_policy={"Name": "unless-stopped"},
         labels={MANAGED_LABEL: "true", "io.mdd-sim-gateway.component": "engine"},
+        # Asterisk is started with -g, so if it is ever killed by a signal a core lands in the
+        # container's working directory. The engine bounces observed so far report ExitCode=0
+        # with no kernel crash record, which is not what a signal death looks like — this exists
+        # so the other possibility is not silently unrecorded.
+        ulimits=[{"name": "core", "soft": -1, "hard": -1}],
         environment={
             "MDD_ID": iid,
             "MDD_MEDIA_ADDR": media_addr,
             "SWU_LIVENESS_PERIOD": str(inst.get("liveness_period", 0)),
             "SWU_TUN_MTU": os.environ.get("SWU_TUN_MTU", "1400"),
+            # How a new P-CSCF is pushed into Asterisk on reconnect: "restart" (default,
+            # Asterisk-internal cold restart) or "reload" (the old path, which crashes — see
+            # swu_apply_pcscf). Settable per line, then globally, so a line can be moved back
+            # for comparison without touching the others.
+            "SWU_PCSCF_APPLY_MODE": str(
+                inst.get("pcscf_apply_mode")
+                or (settings.get("engine") or {}).get("pcscf_apply_mode")
+                or "restart"),
         },
         sysctls={
             "net.ipv6.conf.all.accept_ra": "0",
@@ -504,9 +521,40 @@ def container_runtime(iid: str) -> dict:
             ip = (networks.get(turn.ENGINE_NETWORK) or {}).get("IPAddress") or next(
                 (n["IPAddress"] for name, n in networks.items()
                  if name != turn.MEDIA_NETWORK and n.get("IPAddress")), None)
-        return {"running": running, "ip": ip, "container_id": getattr(c, "id", None)}
+        # Docker's restart policy bounces the container on its own when the engine process
+        # exits. Those bounces never reached the timeline: they resolve faster than the health
+        # policy's threshold, so no recovery is scheduled and lifecycle.jsonl stays silent while
+        # the line is in fact dropping calls for ~40s. Carry the counter so the caller can spot
+        # a bounce it did not perform itself.
+        return {"running": running, "ip": ip, "container_id": getattr(c, "id", None),
+                "restart_count": int(c.attrs.get("RestartCount") or 0),
+                "started_at": str((c.attrs.get("State") or {}).get("StartedAt") or "")}
     except docker.errors.NotFound:
-        return {"running": False, "ip": None, "container_id": None}
+        return {"running": False, "ip": None, "container_id": None,
+                "restart_count": 0, "started_at": ""}
+
+
+def last_engine_exit(iid: str) -> dict:
+    """The entrypoint supervisor's last record of how Asterisk left, if any.
+
+    ``docker inspect`` reports ExitCode=0 for the engine bounces seen in the field, and the
+    kernel logged no crash — so the exit code alone cannot say whether Asterisk shut down
+    cleanly or died some other way. The supervisor writes the disposition it observed directly;
+    this reads it back.
+    """
+    base, _ = _instance_paths(iid)
+    path = os.path.join(base, "logs", "asterisk", "supervisor.jsonl")
+    try:
+        for line in reversed(_tail_lines(path, 40)):
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if record.get("event") == "asterisk_exited":
+                return record
+    except OSError:
+        pass
+    return {}
 
 
 def container_ip(iid: str) -> str | None:

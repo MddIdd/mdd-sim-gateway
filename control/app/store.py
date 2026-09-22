@@ -440,6 +440,26 @@ def init():
                     updated_ts INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_contacts_owner ON contacts(owner, name);
+                -- How far a reader has got through each conversation. "Read" is something a
+                -- person did, not a property of the message, and the messages table has no
+                -- column that could hold it and still be true for whoever looks next -- so it
+                -- is recorded against an owner, like the address book above. See ADMIN_OWNER.
+                --
+                -- `peer` empty is a line-wide baseline ("everything up to here is read"), which
+                -- is what "mark all read" writes and what a client uses on its first run so an
+                -- upgrade does not present years of history as unread.
+                --
+                -- The position is a message id, not a timestamp. An inbound SMS carries the
+                -- network's own timestamp, so a delayed message can arrive with a time older
+                -- than one already read -- and a timestamp marker would file it as read before
+                -- anybody saw it. Ids follow arrival, which is what "new" actually means here.
+                CREATE TABLE IF NOT EXISTS message_reads (
+                    owner INTEGER NOT NULL,
+                    instance TEXT NOT NULL,
+                    peer TEXT NOT NULL,
+                    last_read_id INTEGER NOT NULL,
+                    PRIMARY KEY (owner, instance, peer)
+                );
                 -- `number` is what the person typed, and what is shown back to them.
                 -- `match_key` is what an arriving number is compared against on any line:
                 -- contacts.number_key without a country, which is E.164 when the number is
@@ -746,8 +766,22 @@ def _identity_indexes(c) -> None:
 
 
 # The last step is defined further down with the MMS store it relies on, hence the lambda.
+def _migration_read_baseline(c) -> None:
+    """Everything already stored when read state arrives counts as read.
+
+    Without this an upgrade would present every conversation in the history as unread, since
+    nobody has read anything by a record that did not exist until now. The baseline is the
+    line-wide marker (peer empty) at the newest message each line has, so what arrives after
+    the upgrade is new, and nothing before it is.
+    """
+    c.execute("INSERT OR IGNORE INTO message_reads(owner,instance,peer,last_read_id) "
+              "SELECT ?, instance, '', MAX(id) FROM messages GROUP BY instance",
+              (ADMIN_OWNER,))
+
+
 _MIGRATIONS = (_migration_message_identity, _migration_modem_object_on_message, _migration_mms,
-               _migration_identity_scope, lambda c: _migration_filed_mms_pushes(c))
+               _migration_identity_scope, lambda c: _migration_filed_mms_pushes(c),
+               _migration_read_baseline)
 
 
 def _sweep_binary_messages(c) -> int:
@@ -2887,3 +2921,64 @@ def contacts_import(owner: int, incoming, regions=()) -> dict:
             count += 1
             added += 1
     return {"added": added, "skipped": skipped}
+
+
+# ----------------------------- read state -----------------------------
+def _newest_message_id(c, instance: str, peer: str | None) -> int:
+    if peer:
+        row = c.execute("SELECT MAX(id) AS newest FROM messages WHERE instance=? AND peer=?",
+                        (str(instance), str(peer))).fetchone()
+    else:
+        row = c.execute("SELECT MAX(id) AS newest FROM messages WHERE instance=?",
+                        (str(instance),)).fetchone()
+    return int((row["newest"] if row else 0) or 0)
+
+
+def mark_thread_read(owner: int, instance: str, peer: str, message_id: int | None = None) -> int:
+    """Record how far the owner has read a conversation, or the line when peer is empty.
+
+    Without an id, everything currently stored counts as read. The marker only moves forward:
+    opening an older message after a newer one arrived must not make the newer one unread again.
+    Nor does it move past what is stored: an id from the future would file a message as read
+    before it arrived.
+    """
+    with _lock, _conn() as c:
+        newest = _newest_message_id(c, instance, peer or None)
+        position = newest if message_id is None else max(0, min(int(message_id), newest))
+        c.execute(
+            "INSERT INTO message_reads(owner,instance,peer,last_read_id) VALUES(?,?,?,?) "
+            "ON CONFLICT(owner,instance,peer) DO UPDATE SET last_read_id=MAX(last_read_id,?)",
+            (int(owner), str(instance), str(peer), position, position))
+        row = c.execute("SELECT last_read_id FROM message_reads WHERE owner=? AND instance=? "
+                        "AND peer=?", (int(owner), str(instance), str(peer))).fetchone()
+    return int(row["last_read_id"]) if row else position
+
+
+def mark_line_read(owner: int, instance: str, message_id: int | None = None) -> int:
+    """Everything on this line is read, whatever the individual conversations say."""
+    return mark_thread_read(owner, instance, "", message_id)
+
+
+def unread_counts(owner: int, instance: str) -> dict[str, int]:
+    """Inbound messages the owner has not read, by conversation.
+
+    An outbound message is never unread -- it was sent from here. A conversation with nothing
+    unread is absent rather than zero, so the caller can treat the map as the set of unread ones.
+    """
+    with _lock, _conn() as c:
+        rows = c.execute(
+            """SELECT m.peer AS peer, COUNT(*) AS n FROM messages m
+               WHERE m.instance=? AND m.direction='in'
+                 AND m.id > COALESCE((SELECT last_read_id FROM message_reads r
+                                      WHERE r.owner=? AND r.instance=m.instance
+                                        AND r.peer=m.peer), 0)
+                 AND m.id > COALESCE((SELECT last_read_id FROM message_reads r
+                                      WHERE r.owner=? AND r.instance=m.instance AND r.peer=''), 0)
+               GROUP BY m.peer""",
+            (str(instance), int(owner), int(owner))).fetchall()
+    return {str(r["peer"]): int(r["n"]) for r in rows}
+
+
+def unread_total(owner: int, instances) -> int:
+    """One number for a badge: everything unread across the given lines."""
+    return sum(sum(unread_counts(owner, str(iid)).values()) for iid in instances)

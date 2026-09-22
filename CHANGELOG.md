@@ -22,6 +22,12 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Added
 
+- **Messages are marked read.** A conversation with something new shows how many, and opening
+  it clears that. The position is recorded as a message id rather than a time, because an
+  inbound SMS carries the network's own timestamp and a delayed one can be older than a message
+  already read; ids follow arrival, which is what "new" means here. Messages shows the total on
+  its menu entry and can mark a whole line read. Everything already stored when this version is
+  installed counts as read, so an upgrade does not present years of history as unread.
 - **An address book.** Contacts can be added by hand or imported from a vCard (.vcf) or CSV
   export, and exported in either format. Two spellings of one number are recognised as one by
   reducing both to E.164 -- `+44 7700 900123`, `07700 900123` and `00447700900123` are the

@@ -5392,10 +5392,59 @@ async def _mms_line(iid: str) -> tuple[dict, dict]:
     return inst, settings
 
 
-async def _mms_form(request: Request):
+# Largest of the fields that travel with an attachment -- the text, subject and recipients.
+# This is all starlette's ``max_part_size`` bounds: a file part is streamed straight to a
+# spooled temporary file with no limit of its own, so passing the upload limit here raised the
+# ceiling on the fields and did nothing whatever for the files.
+MMS_FIELD_LIMIT = 256 * 1024
+
+
+class _BodyTooLarge(Exception):
+    pass
+
+
+def _limited_request(request: Request, limit: int) -> Request:
+    """The request with its body held to `limit` bytes as it is read.
+
+    A file part is measured only once it has been spooled to disk, which is too late to be a
+    limit, and a declared Content-Length is not one either: a chunked or HTTP/2 upload through
+    a reverse proxy may carry none, and nothing obliges the body to match it. So the bytes are
+    counted as the parser pulls them off the connection, and reading stops at the first chunk
+    that goes past the limit; starlette then closes the temporary files it had begun. A
+    declared length that is already too large is refused before anything is read."""
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            length = int(declared)
+        except ValueError:
+            raise HTTPException(400, "unreadable Content-Length") from None
+        if length > limit:
+            raise _too_large(limit)
+    received = 0
+
+    async def receive():
+        nonlocal received
+        message = await request.receive()
+        if message["type"] == "http.request":
+            received += len(message.get("body", b""))
+            if received > limit:
+                raise _BodyTooLarge
+        return message
+
+    return Request(request.scope, receive)
+
+
+def _too_large(limit: int) -> HTTPException:
+    return HTTPException(413, f"the request is larger than {limit // (1024 * 1024)} MB")
+
+
+async def _mms_form(request: Request, *, files: int, limit: int):
+    limited = _limited_request(request, limit)
     try:
-        return await request.form(max_files=mms_staging.MAX_PER_LINE, max_fields=40,
-                                  max_part_size=MMS_UPLOAD_LIMIT + 1024)
+        return await limited.form(max_files=files, max_fields=40,
+                                  max_part_size=MMS_FIELD_LIMIT)
+    except _BodyTooLarge:
+        raise _too_large(limit) from None
     except Exception as exc:  # noqa
         raise HTTPException(413 if "size" in str(exc).lower() else 422,
                             f"unreadable MMS form: {exc}") from None
@@ -5431,7 +5480,7 @@ async def api_mms_attachment_add(iid: str, request: Request):
     -- a format the gateway will not send is refused here, not at sending time -- and kept
     as the original until the MMS is sent or the attachment removed."""
     await _mms_line(iid)
-    form = await _mms_form(request)
+    form = await _mms_form(request, files=1, limit=MMS_UPLOAD_LIMIT + MMS_FIELD_LIMIT)
     upload = form.get("file")
     if not hasattr(upload, "read"):
         raise HTTPException(422, "no file")
@@ -5505,7 +5554,10 @@ async def api_mms_send(iid: str, request: Request):
     once with the stored messages ("message" is the first); the upload to the MMSC can take
     minutes over the modem and is reported over the websocket."""
     _inst, settings = await _mms_line(iid)
-    form = await _mms_form(request)
+    # Attachments sent directly, rather than staged first, are held to the same budget the
+    # staging area gives a line: one request can never carry more than the line may hold.
+    form = await _mms_form(request, files=mms_staging.MAX_PER_LINE,
+                           limit=mms_staging.MAX_BYTES_PER_LINE + MMS_FIELD_LIMIT)
     recipients = _recipient_list(form.get("to"))
     text = str(form.get("text") or "")
     subject = str(form.get("subject") or "").strip()[:80]

@@ -372,5 +372,81 @@ class FitEndpointTests(StagingTests):
         self.assertEqual(order, [1, 2, 3])
 
 
+class UploadLimitTests(unittest.TestCase):
+    BOUNDARY = "limit-test"
+
+    def body(self, *parts):
+        """A multipart body from (name, filename or None, payload) triples."""
+        out = b""
+        for name, filename, payload in parts:
+            disposition = f'form-data; name="{name}"'
+            if filename:
+                disposition += f'; filename="{filename}"'
+            out += (f"--{self.BOUNDARY}\r\nContent-Disposition: {disposition}\r\n"
+                    + ("Content-Type: application/octet-stream\r\n" if filename else "")
+                    + "\r\n").encode() + payload + b"\r\n"
+        return out + f"--{self.BOUNDARY}--\r\n".encode()
+
+    def request(self, body, *, declared=None, chunk=4096):
+        """A request as the ASGI server hands it over, delivered `chunk` bytes at a time --
+        with no Content-Length unless one is `declared`, as a chunked or HTTP/2 upload arrives
+        through a reverse proxy."""
+        headers = [(b"content-type", f"multipart/form-data; boundary={self.BOUNDARY}".encode())]
+        if declared is not None:
+            headers.append((b"content-length", str(declared).encode()))
+        chunks = [body[i:i + chunk] for i in range(0, len(body), chunk)] or [b""]
+        sent = []
+
+        async def receive():
+            sent.append(chunks[len(sent)])
+            return {"type": "http.request", "body": sent[-1],
+                    "more_body": len(sent) < len(chunks)}
+
+        return main.Request({"type": "http", "method": "POST", "headers": headers}, receive), sent
+
+    def form(self, request, *, files=1, limit=64 * 1024):
+        return asyncio.run(main._mms_form(request, files=files, limit=limit))
+
+    def refused(self, request, **kwargs):
+        with self.assertRaises(main.HTTPException) as refused:
+            self.form(request, **kwargs)
+        return refused.exception
+
+    def test_an_upload_without_a_content_length_is_parsed(self):
+        request, _ = self.request(self.body(("text", None, b"hello"),
+                                            ("file", "a.bin", b"x" * 20000)))
+        form = self.form(request)
+        self.assertEqual(form["text"], "hello")
+        self.assertEqual(asyncio.run(form["file"].read()), b"x" * 20000)
+        asyncio.run(form.close())
+
+    def test_a_body_is_cut_off_once_it_passes_the_limit_whatever_it_declared(self):
+        body = self.body(("file", "a.bin", b"x" * 200_000))
+        for declared in (None, 1000):          # none at all, or one that understates it
+            request, sent = self.request(body, declared=declared)
+            self.assertEqual(self.refused(request).status_code, 413, declared)
+            # Reading stopped at the first chunk past the limit, not at the end of the body.
+            self.assertLess(sum(map(len, sent)), 64 * 1024 + 4096 + 1, declared)
+
+    def test_a_declared_length_that_is_already_too_large_is_refused_before_reading(self):
+        request, sent = self.request(self.body(("text", None, b"hi")), declared=64 * 1024 + 1)
+        self.assertEqual(self.refused(request).status_code, 413)
+        self.assertEqual(sent, [])
+        request, _ = self.request(self.body(("text", None, b"hi")), declared="x")
+        self.assertEqual(self.refused(request).status_code, 400)
+
+    def test_the_field_and_file_limits_still_hold(self):
+        # max_part_size bounds only the fields starlette keeps in memory; handing it the
+        # upload limit raised the ceiling on those and left the files unbounded.
+        self.assertLess(main.MMS_FIELD_LIMIT, main.MMS_UPLOAD_LIMIT)
+        big = main.MMS_FIELD_LIMIT + 1
+        request, _ = self.request(self.body(("text", None, b"x" * big)))
+        self.assertEqual(self.refused(request, limit=2 * big).status_code, 413)
+        request, _ = self.request(self.body(("file", "a.bin", b"a"), ("file", "b.bin", b"b")))
+        self.assertEqual(self.refused(request, files=1).status_code, 422)
+        request, _ = self.request(self.body(*[(f"f{i}", None, b"v") for i in range(41)]))
+        self.assertEqual(self.refused(request).status_code, 422)
+
+
 if __name__ == "__main__":
     unittest.main()

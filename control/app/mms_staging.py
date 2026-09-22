@@ -22,6 +22,12 @@ import time
 from . import mms_media, store
 
 MAX_PER_LINE = 20
+# A count is not a disk budget: MAX_PER_LINE uploads of the largest file the API accepts are
+# half a gigabyte, on a line, on an appliance whose disk is often an SD card. These are the
+# bytes the staging area may hold -- about twenty phone photos for one line, and a ceiling for
+# the gateway, which has as many lines as it has modems and only the one disk.
+MAX_BYTES_PER_LINE = 64 * 1024 * 1024
+MAX_BYTES_TOTAL = 256 * 1024 * 1024
 TTL_SECONDS = 24 * 3600
 _ID = re.compile(r"^[0-9a-f]{16}$")
 _LINE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -50,6 +56,23 @@ def _meta(directory: str) -> dict:
         return json.load(handle)
 
 
+def _bytes_under(path: str) -> int:
+    total = 0
+    for root, _directories, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.stat(os.path.join(root, name)).st_size
+            except OSError:      # swept between the walk and the stat
+                continue
+    return total
+
+
+def usage(instance: str | None = None) -> int:
+    """Bytes held for one line, or for the whole staging area."""
+    base = _root() if instance is None else os.path.join(_root(), str(instance))
+    return _bytes_under(base) if os.path.isdir(base) else 0
+
+
 def list_ids(instance: str) -> list[str]:
     base = os.path.join(_root(), str(instance))
     if not _LINE.match(str(instance)) or not os.path.isdir(base):
@@ -57,20 +80,44 @@ def list_ids(instance: str) -> list[str]:
     return [name for name in os.listdir(base) if _ID.match(name)]
 
 
+def _room_for(instance: str, size: int) -> None:
+    """Raise OverflowError unless this line, and the gateway, can still hold `size` bytes."""
+    if len(list_ids(instance)) >= MAX_PER_LINE:
+        raise OverflowError(f"at most {MAX_PER_LINE} attachments can be waiting to be sent")
+    if usage(instance) + size > MAX_BYTES_PER_LINE:
+        raise OverflowError(f"this line is already holding close to "
+                            f"{MAX_BYTES_PER_LINE // (1024 * 1024)} MB of attachments waiting "
+                            f"to be sent; send or remove some first")
+    if usage() + size > MAX_BYTES_TOTAL:
+        raise OverflowError(f"the gateway is already holding close to "
+                            f"{MAX_BYTES_TOTAL // (1024 * 1024)} MB of attachments waiting to "
+                            f"be sent; send or remove some first")
+
+
 def stage(instance: str, name: str, content_type: str, data: bytes) -> dict:
     """Keep one uploaded original; returns its public record. Raises OverflowError when the
-    line already holds MAX_PER_LINE uploads."""
-    with _lock:
-        if len(list_ids(instance)) >= MAX_PER_LINE:
-            raise OverflowError(f"at most {MAX_PER_LINE} attachments can be waiting to be sent")
-        attachment_id = os.urandom(8).hex()
-        directory = _directory(instance, attachment_id)
-        os.makedirs(directory, mode=0o700)
-    meta = {"id": attachment_id, "name": mms_media.display_name(name, content_type),
+    line already holds MAX_PER_LINE uploads, or when the line or the gateway has no room for
+    it."""
+    data = bytes(data)
+    meta = {"name": mms_media.display_name(name, content_type),
             "content_type": mms_media.base_type(content_type), "size": len(data),
             "created": int(time.time())}
-    _write(os.path.join(directory, "original"), bytes(data))
-    _write(os.path.join(directory, "meta.json"), json.dumps(meta).encode("utf-8"))
+    # The whole upload is written under the lock, so what the next one measures is what is
+    # really there: a budget checked before the previous write finished is not a budget. A
+    # draft abandoned in a closed tab is swept before the room is declared full, so a gateway
+    # left at the ceiling yesterday still takes an attachment today.
+    with _lock:
+        try:
+            _room_for(instance, len(data))
+        except OverflowError:
+            if not sweep():
+                raise
+            _room_for(instance, len(data))
+        meta["id"] = attachment_id = os.urandom(8).hex()
+        directory = _directory(instance, attachment_id)
+        os.makedirs(directory, mode=0o700)
+        _write(os.path.join(directory, "original"), data)
+        _write(os.path.join(directory, "meta.json"), json.dumps(meta).encode("utf-8"))
     return meta
 
 

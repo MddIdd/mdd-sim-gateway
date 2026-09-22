@@ -313,6 +313,23 @@ class StagingTests(unittest.TestCase):
         self.assertEqual(mms_staging.list_ids("1"), [])
 
 
+    def test_the_staging_area_has_a_budget_per_line_and_one_for_the_gateway(self):
+        with patch.object(mms_staging, "MAX_BYTES_PER_LINE", 4096), \
+                patch.object(mms_staging, "MAX_BYTES_TOTAL", 6000):
+            first = mms_staging.stage("1", "a.jpg", "image/jpeg", b"x" * 3000)
+            with self.assertRaises(OverflowError) as refused:
+                mms_staging.stage("1", "b.jpg", "image/jpeg", b"x" * 3000)
+            self.assertIn("this line", str(refused.exception))
+            mms_staging.stage("2", "c.jpg", "image/jpeg", b"y" * 2000)
+            with self.assertRaises(OverflowError) as refused:
+                mms_staging.stage("3", "d.jpg", "image/jpeg", b"z" * 2000)
+            self.assertIn("gateway", str(refused.exception))
+            # An abandoned draft is swept before the room is declared full.
+            old = time.time() - mms_staging.TTL_SECONDS - 1
+            os.utime(Path(self.temp.name, "mms-staging", "1", first["id"]), (old, old))
+            self.assertTrue(mms_staging.stage("1", "e.jpg", "image/jpeg", b"x" * 3000)["id"])
+
+
 class FitEndpointTests(StagingTests):
     def test_the_composer_learns_each_size_and_the_total(self):
         original = photo()

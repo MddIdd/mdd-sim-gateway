@@ -5414,6 +5414,17 @@ def _recipient_list(value) -> list[str]:
     return mms.parse_recipients(value or "")
 
 
+def _staged_ids(values) -> list[str]:
+    """The staged attachments a request names, refused when there are more than a line can
+    hold. Every id is loaded into memory to be fitted, so an unbounded list is a way to ask
+    the gateway to read the same 25 MB upload a thousand times over."""
+    ids = [str(i) for i in values or [] if str(i)]
+    if len(ids) > mms_staging.MAX_PER_LINE:
+        raise HTTPException(400, f"at most {mms_staging.MAX_PER_LINE} attachments can be sent "
+                                 f"in one request")
+    return ids
+
+
 @app.post("/api/instances/{iid}/mms/attachments")
 async def api_mms_attachment_add(iid: str, request: Request):
     """Upload one attachment while composing (multipart field "file"). It is checked at once
@@ -5444,7 +5455,7 @@ async def api_mms_attachments_fit(iid: str, body: dict):
     and each message's packaged size (see mms.plan_messages). Sending fits again."""
     _inst, settings = await _mms_line(iid)
     body = body or {}
-    ids = [str(i) for i in body.get("ids") or []]
+    ids = _staged_ids(body.get("ids"))
     try:
         items = await asyncio.to_thread(mms_staging.load, iid, ids)
     except KeyError as exc:
@@ -5499,7 +5510,7 @@ async def api_mms_send(iid: str, request: Request):
     text = str(form.get("text") or "")
     subject = str(form.get("subject") or "").strip()[:80]
     split = str(form.get("split") or "").lower() in ("1", "true", "yes")
-    staged_ids = [str(i) for i in form.getlist("attachment_ids") if str(i)]
+    staged_ids = _staged_ids(form.getlist("attachment_ids"))
     try:
         attachments = await asyncio.to_thread(mms_staging.load, iid, staged_ids)
     except KeyError as exc:

@@ -330,6 +330,19 @@ class FitEndpointTests(StagingTests):
         self.assertEqual(content_type, "image/jpeg")
         self.assertEqual(os.path.getsize(path), entry["size"])
 
+    def test_more_attachments_than_a_line_can_hold_are_refused(self):
+        # Each id is loaded into memory to be fitted, so a long list -- the same upload named
+        # over and over will do -- is a way to ask for gigabytes.
+        meta = mms_staging.stage("1", "IMG_1.jpg", "image/jpeg", b"x")
+        settings = {"enabled": True, "configured": True, "max_size": 150 * 1024}
+        ids = [meta["id"]] * (mms_staging.MAX_PER_LINE + 1)
+        with patch.object(main.cfg, "get_instance", return_value={"id": "1"}), \
+                patch.object(main.mms_transport, "resolve_settings", return_value=settings):
+            with self.assertRaises(main.HTTPException) as refused:
+                asyncio.run(main.api_mms_attachments_fit("1", {"ids": ids}))
+        self.assertEqual(refused.exception.status_code, 400)
+        self.assertIn("at most", refused.exception.detail)
+
     def test_split_sends_are_submitted_in_order(self):
         order = []
 

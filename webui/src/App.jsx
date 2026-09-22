@@ -6,11 +6,13 @@ import Messages from './views/Messages.jsx'
 import Esim from './views/Esim.jsx'
 import Keepalive from './views/Keepalive.jsx'
 import { UnifiedOverview, DevicesPage, EgressPage, NotificationsPage, SystemPage, DiagnosticsPage } from './views/UnifiedPages.jsx'
+import ContactsPage from './views/Contacts.jsx'
 import { useI18n } from './i18n.jsx'
 
 const NAV = [
   ['overview', 'Overview', '⌂'], ['devices', 'Devices', '▣'], ['calls', 'Calls', '☎'],
-  ['messages', 'Messages', '✉'], ['esim', 'eSIM', '◎'], ['keepalive', 'Balance & keeping', '◷'],
+  ['messages', 'Messages', '✉'], ['contacts', 'Contacts', '☏'],
+  ['esim', 'eSIM', '◎'], ['keepalive', 'Balance & keeping', '◷'],
   ['egress', 'Network exits', '⇄'],
   ['notifications', 'Notifications', '◉'], ['settings', 'System settings', '⚙'], ['diagnostics', 'Diagnostics', '≣'],
 ]
@@ -249,7 +251,9 @@ export default function App() {
     overview:<UnifiedOverview {...common}/>, devices:<DevicesPage {...common}/>, calls:<Softphone {...common}/>,
     messages:<Messages {...common}/>, esim:<Esim {...common}/>, keepalive:<Keepalive {...common}/>,
     egress:<EgressPage {...common}/>,
-    notifications:<NotificationsPage {...common}/>, settings:<SystemPage {...common}/>, diagnostics:<DiagnosticsPage {...common}/>,
+    notifications:<NotificationsPage {...common}/>,
+    contacts:<ContactsPage showToast={showToast}/>,
+    settings:<SystemPage {...common}/>, diagnostics:<DiagnosticsPage {...common}/>,
   }[view]
   const issueUrl = `${(systemMeta.repository_url || 'https://github.com/MddIdd/mdd-sim-gateway').replace(/\/$/, '')}/issues/new/choose`
   return <div className="u-shell">

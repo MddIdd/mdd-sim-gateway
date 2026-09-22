@@ -23,6 +23,8 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   `10000` is not one destination everywhere, and a SIM carries a country but never an area
   code. Re-importing an export folds into what is already there instead of doubling it, and a
   contact that cannot be read is reported by name rather than dropped in silence.
+  Conversations, the call log and the incoming-call overlay show the name instead of the
+  number once it is known.
 
 ## [1.12.0] - 2026-09-26
 

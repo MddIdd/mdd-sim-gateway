@@ -3,6 +3,7 @@ import { api } from '../api.js'
 import { Softphone as Phone, audioInputPresence, microphoneMessage, MEDIA_FAIL_CAUSE } from '../softphone.js'
 import SimSelector from './SimSelector.jsx'
 import { useI18n } from '../i18n.jsx'
+import { useContactNames } from '../contactNames.js'
 
 const GREEN = '#22c55e', RED = '#ef4444'
 const KEYS = [['1', ''], ['2', 'ABC'], ['3', 'DEF'], ['4', 'GHI'], ['5', 'JKL'],
@@ -155,6 +156,9 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
   // one placed after it must keep saying so until it ends.
   const [listenOnly, setListenOnly] = useState(null)
   const [calls, setCalls] = useState([])
+  // The whole visible log in one request; see contactNames.js for why the browser cannot match
+  // a number against the address book itself.
+  const callerNames = useContactNames(calls.map((entry) => entry.peer), id)
   const [callSelMode, setCallSelMode] = useState(false)
   const [callSel, setCallSel] = useState(() => new Set())
   // Keyed by voicemail id. The <audio> is only created once the user asks to play, so a log
@@ -890,7 +894,7 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
                   background: checked ? 'var(--active)' : 'var(--input-bg)' }}>
                 {callSelMode && <input type="checkbox" readOnly checked={checked} style={{ width: 'auto', flexShrink: 0 }} />}
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div className="mono" style={{ fontWeight: 600 }}>{c.peer}</div>
+                  <div className={callerNames[c.peer] ? '' : 'mono'} style={{ fontWeight: 600 }}>{callerNames[c.peer] || c.peer}</div>
                   <div style={{ fontSize: 11, color: 'var(--text-mute)' }}>{dlabel} · {new Date(c.start_ts * 1000).toLocaleString()}{c.transport === 'cellular' ? ` · ${t('Cellular modem')}` : ''}</div>
                   {c.ussd_text && (
                     <div title={c.ussd_text} style={{ fontSize: 11.5, marginTop: 3, color: 'var(--text-soft)',

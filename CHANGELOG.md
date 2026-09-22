@@ -8,7 +8,9 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 - **The control plane gains two Python packages**, Pillow and pillow-heif, for converting MMS
   pictures on the gateway. `install.sh reload` installs them from prebuilt wheels (amd64 and
-  arm64); a host that reloads offline needs them available first.
+  arm64); a host that reloads offline needs them available first. A reload that cannot install
+  them, or that installs them but cannot import them, stops before anything is restarted
+  rather than coming up with picture conversion silently off.
 
 ### Changed
 

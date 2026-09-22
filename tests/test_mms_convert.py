@@ -5,9 +5,12 @@ import asyncio
 import io
 import os
 import random
+import struct
 import tempfile
 import time
 import unittest
+import warnings
+import zlib
 from pathlib import Path
 from unittest.mock import patch
 
@@ -28,6 +31,18 @@ def photo(width=3000, height=2000, fmt="JPEG", mode="RGB", **options) -> bytes:
     out = io.BytesIO()
     image.save(out, fmt, **options)
     return out.getvalue()
+
+
+def png_header(width: int, height: int) -> bytes:
+    """A PNG that says how big it is and carries almost nothing: what a decoder allocates for
+    is the header's claim, not the number of bytes that arrived."""
+    def chunk(kind: bytes, payload: bytes) -> bytes:
+        return (struct.pack(">I", len(payload)) + kind + payload
+                + struct.pack(">I", zlib.crc32(kind + payload)))
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(b"\x00"))
+            + chunk(b"IEND", b""))
 
 
 def fit(attachments, limit, text="hi"):
@@ -165,6 +180,17 @@ class ImageFitTests(unittest.TestCase):
                                            "data": b"\xff\xd8\xff\xe0" + b"x" * 64}], 600 * 1024)
         self.assertIn("bad.jpg", problem)
         self.assertIn("could not be read", problem)
+
+    def test_a_picture_larger_than_the_pixel_limit_is_refused_before_it_is_decoded(self):
+        # Between MAX_PIXELS and twice it, Pillow's own guard does no more than warn, so a
+        # file claiming this many pixels used to be decoded in full.
+        edge = int((mms_convert.MAX_PIXELS * 1.5) ** 0.5)
+        with warnings.catch_warnings():     # Pillow's warning is the point being made here
+            warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+            _fitted, problem, _summary = fit([{"name": "huge.png", "content_type": "image/png",
+                                               "data": png_header(edge, edge)}], 600 * 1024)
+        self.assertIn("huge.png", problem)
+        self.assertIn("megapixels", problem)
 
     def test_a_limit_too_small_for_any_picture_says_so(self):
         _fitted, problem, _summary = fit([{"name": "p.jpg", "content_type": "image/jpeg",

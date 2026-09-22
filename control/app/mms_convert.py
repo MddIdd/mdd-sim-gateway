@@ -30,10 +30,16 @@ except ImportError:  # pragma: no cover - HEIC/HEIF is then simply not convertib
 else:
     pillow_heif.register_heif_opener()
 
+# A picture this large is not a photo anyone means to send by MMS; refusing it also keeps a
+# crafted file from making the decoder allocate gigabytes.
+MAX_PIXELS = 64_000_000
+
 if Image is not None:
-    # A picture this large is not a photo anyone means to send by MMS; refusing it also keeps a
-    # crafted file from making the decoder allocate gigabytes.
-    Image.MAX_IMAGE_PIXELS = 64_000_000
+    # Pillow's own guard is a backstop, not the limit: it raises only above twice
+    # MAX_IMAGE_PIXELS and does no more than warn in between, so a 100-megapixel file set
+    # against this would be decoded anyway. _open() enforces MAX_PIXELS itself, from the
+    # header, before a single row is decoded.
+    Image.MAX_IMAGE_PIXELS = MAX_PIXELS
 
 
 class ConversionError(ValueError):
@@ -78,7 +84,18 @@ class ImageConverter:
         camera photo that is going to be shrunk anyway."""
         try:
             image = Image.open(io.BytesIO(data))
-            width, height = image.size
+        except Image.DecompressionBombError:
+            raise ConversionError("the picture is too large to convert") from None
+        except Exception as exc:  # noqa: BLE001 -- any decoder failure means "unreadable"
+            raise ConversionError(f"the picture could not be read ({exc})") from None
+        # Opening reads the header, not the pixels; this is the point at which the size is
+        # known and nothing has been allocated for it yet.
+        width, height = image.size
+        if width * height > MAX_PIXELS:
+            image.close()
+            raise ConversionError(f"the picture is {width}x{height} pixels; at most "
+                                  f"{MAX_PIXELS // 1_000_000} megapixels can be converted")
+        try:
             if longest and image.format == "JPEG" and max(width, height) > longest:
                 scale = longest / max(width, height)
                 image.draft("RGB", (int(width * scale) + 1, int(height * scale) + 1))

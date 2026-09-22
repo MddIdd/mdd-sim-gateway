@@ -101,6 +101,16 @@ class CheckAttachmentTests(unittest.TestCase):
                                                    b"%PDF-1.7").error)
         self.assertIn("is empty", self.check("a.jpg", "image/jpeg", b"").error)
 
+    def test_a_video_that_stops_short_is_refused_rather_than_read_past_its_end(self):
+        # An upload cut off part way through still parses as boxes; the movie header is then
+        # there but empty. Reading it as if it were whole used to raise IndexError, which
+        # reaches the client as a 500 instead of "this file cannot be sent".
+        head = box(b"ftyp", b"isom" + b"\x00" * 8)
+        for tail in (box(b"mvhd"), box(b"mvhd", b"\x00" * 3), box(b"mvhd", b"\x01" + b"\x00" * 8)):
+            result = self.check("clip.mp4", "video/mp4", head + box(b"moov", tail))
+            self.assertIn("no audio or video track", result.error)
+        self.assertIn("no movie header", self.check("clip.mp4", "video/mp4", head).error)
+
 
 class CapabilityTableTests(unittest.TestCase):
     def test_every_format_has_one_policy_and_a_unique_type(self):

@@ -194,13 +194,19 @@ def _inspect_iso(data: bytes) -> tuple[dict, str | None]:
         return info, "the file is incomplete (it has no movie header)"
     mvhd = _child(data, *moov, b"mvhd")
     if mvhd:
-        s = mvhd[0]
-        if data[s] == 1:
-            scale = int.from_bytes(data[s + 20:s + 24], "big")
-            length = int.from_bytes(data[s + 24:s + 32], "big")
-        else:
-            scale = int.from_bytes(data[s + 12:s + 16], "big")
-            length = int.from_bytes(data[s + 16:s + 20], "big")
+        # A file that stops mid-upload still has boxes; one of them can be a movie header with
+        # nothing, or almost nothing, in it. Read a field only once the box is long enough to
+        # hold it -- a header that stops short simply has no duration, which is what a file
+        # without one gives the caller anyway.
+        start, stop = mvhd
+        version = data[start] if stop > start else None
+        scale = length = 0
+        if version == 1 and stop - start >= 32:
+            scale = int.from_bytes(data[start + 20:start + 24], "big")
+            length = int.from_bytes(data[start + 24:start + 32], "big")
+        elif version == 0 and stop - start >= 20:
+            scale = int.from_bytes(data[start + 12:start + 16], "big")
+            length = int.from_bytes(data[start + 16:start + 20], "big")
         if scale and 0 < length < 2 ** 62:
             info["duration_ms"] = -(-length * 1000 // scale)
     for kind, start, end in _boxes(data, *moov):

@@ -2,6 +2,28 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [Unreleased]
+
+### Upgrade notes
+
+- **The control plane gains one Python package**, `phonenumbers`, which the address book uses
+  to tell two spellings of one number apart from two different numbers. It is a pure-Python
+  Apache-2.0 port of Google's libphonenumber with no dependencies and no native code;
+  `install.sh reload` installs it from a wheel, and a host that reloads offline needs it
+  available first.
+
+### Added
+
+- **An address book.** Contacts can be added by hand or imported from a vCard (.vcf) or CSV
+  export, and exported in either format. Two spellings of one number are recognised as one by
+  reducing both to E.164 -- `+44 7700 900123`, `07700 900123` and `00447700900123` are the
+  same contact -- using the country the line is in, which the gateway already works out for
+  its country exits. A number that only means something where it was dialled, such as a short
+  code or a subscriber number with its area code left off, is deliberately left alone: local
+  `10000` is not one destination everywhere, and a SIM carries a country but never an area
+  code. Re-importing an export folds into what is already there instead of doubling it, and a
+  contact that cannot be read is reported by name rather than dropped in silence.
+
 ## [1.12.0] - 2026-09-26
 
 First release with the full-container deployment. The automatic update channel stays on 1.9.5.

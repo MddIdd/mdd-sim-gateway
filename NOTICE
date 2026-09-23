@@ -16,6 +16,13 @@ frankmorgner/vsmartcard (GPL-3.0), installed from the distribution's vsmartcard-
 Distributing a built image or host install means also offering the corresponding sources for
 those components under their own licenses.
 
+The control plane installs the pillow-heif wheel so that MMS can accept HEIC and HEIF
+pictures. That wheel bundles libheif and libde265 (LGPL-3.0) and x265 (GPL-2.0-or-later), so
+the binary as distributed is GPL-2.0-or-later, and a host install carrying it means also
+offering the corresponding sources for those components under their own licenses. Pillow's
+own wheels bundle libjpeg-turbo, libpng, libwebp, libavif and others under permissive
+licenses; see THIRD_PARTY_LICENSES.md.
+
 This product includes the Android Open Source Project Carrier ID table, licensed under
 the Apache License 2.0, for offline carrier identification. Android is a trademark of
 Google LLC; this project is not endorsed by or affiliated with Google.

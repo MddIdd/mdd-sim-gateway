@@ -938,8 +938,16 @@ setup_venv() {
     info "control requirements already satisfied — reusing the installed packages"
   else
     "$VENV_DIR/bin/python" -m pip install --quiet wheel \
-      -r "$REPO_DIR/control/requirements.txt"
+      -r "$REPO_DIR/control/requirements.txt" \
+      || die "installing the control requirements failed; nothing has been restarted. An offline host needs the wheels available first."
   fi
+  # Installed is not the same as usable: Pillow and pillow-heif carry native libraries, and
+  # the control plane deliberately starts without them -- MMS picture conversion then simply
+  # stops, which nobody notices until a photo is sent. A reload must not leave the gateway in
+  # that state, so prove the venv imports what the control plane needs before it is restarted.
+  # Add to this list when a dependency brings native code of its own.
+  "$VENV_DIR/bin/python" -c "import PIL.Image, pillow_heif" >/dev/null 2>&1 \
+    || die "the control requirements install but do not import (Pillow/pillow-heif); nothing has been restarted."
   info "venv ready"
 }
 

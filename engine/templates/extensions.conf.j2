@@ -129,6 +129,17 @@ same => n,Hangup()
 ; Single dial attempt (no auto-redial). The dial result (incl. far-end reject) is
 ; reported to the manager for the call log.
 [from-local]
+; Number normalization BEFORE dialing: some carrier IMS cores (e.g. T-Mobile/Mavenir US)
+; reject a domestic INVITE whose Request-URI user part still carries the '+' prefix with
+; 500/503 "CC_IMS_TRY_NEXT_MGCF_FAIL". The same core expects the international format
+; (011<country-code>...) for foreign numbers. Normalize at the dialplan edge so the
+; catch-all below always dials a carrier-acceptable form:
+;   +1XXXXXXXXXX  -> 1XXXXXXXXXX   (US domestic)
+;   +<cc>...      -> 011<cc>...    (international from a US-PLMN line)
+; USSD/service codes starting with * or # never match these patterns and pass through
+; untouched (they are percent-escaped by the catch-all, as before).
+exten => _+1.,1,Goto(from-local,${EXTEN:1},1)
+exten => _+[2-9].,1,Goto(from-local,011${EXTEN:1},1)
 ; _[+0-9*#]. (not _.) so the special h/i/t extensions never match here and log phantom calls.
 ; '*' and '#' are in the class so supplementary-service and USSD codes (*21*<number>#, *#21#,
 ; #225#) reach the carrier's IMS, which is what decides their meaning. h/i/t are pure letters

@@ -513,3 +513,33 @@ class EsimProfileRefreshTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_tmobile_us_profile_enables_user_eq_phone(self):
+        profile = config.carrier_sip_defaults("310", "240", "test-card")
+
+        self.assertTrue(profile["user_eq_phone"])
+        # T-Mobile US needs only the SIP presentation flag; PANI/access_type stay
+        # operator-managed so we must NOT invent GB-style identity defaults here.
+        self.assertNotIn("pani", profile)
+        self.assertNotIn("access_type", profile)
+
+    def test_explicit_user_eq_phone_false_wins_over_carrier_default(self):
+        merged = config.merge_carrier_sip_defaults(
+            "310", "240", "test-card", {"user_eq_phone": False})
+
+        self.assertFalse(merged["user_eq_phone"])
+
+    def test_tmobile_us_profile_enables_user_eq_phone(self):
+        profile = config.carrier_sip_defaults("310", "240", "test-card")
+
+        self.assertEqual(profile, {"user_eq_phone": True})
+        # T-Mobile US needs only the SIP presentation flag; PANI/access_type stay
+        # operator-managed so we must NOT invent GB-style identity defaults here.
+        self.assertNotIn("pani", profile)
+        self.assertNotIn("access_type", profile)
+
+    def test_explicit_user_eq_phone_false_wins_over_carrier_default(self):
+        merged = config.merge_carrier_sip_defaults(
+            "310", "240", "test-card", {"user_eq_phone": False})
+
+        self.assertFalse(merged["user_eq_phone"])

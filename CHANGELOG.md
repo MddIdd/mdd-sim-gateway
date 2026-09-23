@@ -2,6 +2,20 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- Outbound VoWiFi calls to T-Mobile US (Mavenir IMS core) are no longer rejected with
+  500/503 "CC_IMS_TRY_NEXT_MGCF_FAIL". Originating INVITEs now present `;user=phone`
+  on telephone-number request URIs (carrier profile `310-240` sets `user_eq_phone`),
+  and the `from-local` dialplan normalizes `+1XXXXXXXXXX` to the domestic `1XXXXXXXXXX`
+  form (other `+<country>` destinations become `011<country>...`) before dialing.
+  USSD/service codes (`*`, `#`) are unaffected.
+- The browser softphone now accepts plain-digit dial targets (e.g. 10-digit US local
+  numbers like `8004444444`, or 11-digit numbers like `18004444444`), automatically
+  normalizing them to international E.164 format without requiring manual `+` input.
+
 ## [1.11.0] - 2026-09-22
 
 ### Fixed

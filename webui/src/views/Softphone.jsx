@@ -95,6 +95,8 @@ export const normalizeDialTarget = (value) => {
   // ceiling is the USSD limit from 3GPP TS 22.030.
   if (/^[*#][*#\d]{1,180}$/.test(number)) return number
   if (number.startsWith('00')) number = `+${number.slice(2)}`
+  else if (/^[2-9]\d{9}$/.test(number)) number = `+1${number}`
+  else if (/^[1-9]\d{6,14}$/.test(number)) number = `+${number}`
   return /^\+[1-9]\d{6,14}$/.test(number) ? number : ''
 }
 

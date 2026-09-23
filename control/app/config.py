@@ -986,13 +986,22 @@ CARRIER_CP_PREF = {
 }
 
 # Carrier-specific SIP presentation required after the secure ePDG tunnel is established.
-# These are protocol defaults, not retained per-SIM data: deleting a line still removes its
-# complete configuration, and a later insertion deterministically rebuilds a valid profile.
 # Explicit values stored under instance.sip always win over these defaults.
+# user_eq_phone=True notes:
+#   - O2 UK: originating voice INVITEs with telephone-number request URIs must carry
+#     ;user=phone or the TAS terminates the call with 487 Request Terminated.
+#   - T-Mobile US (and Mavenir-based MVNOs): the MGCF refuses to route an originating
+#     INVITE whose Request-URI user part lacks ;user=phone and returns
+#     500/503 "CC_IMS_TRY_NEXT_MGCF_FAIL" for every domestic destination.
+#   - Counter-example: some SMSCs (e.g. Telus) REJECT SMS MESSAGE request URIs carrying
+#     ;user=phone — keep the flag voice-only and do not extend it to the message path.
 CARRIER_SIP_PROFILES = {
     "234-10": {  # O2 UK and MVNOs such as giffgaff
         "pani_country": "GB",
         "access_type": "wlan1",
+        "user_eq_phone": True,
+    },
+    "310-240": {  # T-Mobile US and its Mavenir-core MVNOs
         "user_eq_phone": True,
     },
 }
@@ -1014,6 +1023,10 @@ def carrier_sip_defaults(mcc: str, mnc: str, identity: str = "") -> dict:
                     if key in CARRIER_SIP_PROFILES), None)
     if not profile:
         return {}
+    # A profile may carry only presentation flags (e.g. user_eq_phone) without a PANI
+    # identity; in that case return the flags as-is and derive no BSSID/country defaults.
+    if "pani_country" not in profile:
+        return {"user_eq_phone": bool(profile["user_eq_phone"])}
     seed = str(identity or keys[0]).strip()
     node = bytearray(hashlib.sha256(("mdd-pani:" + seed).encode("utf-8")).digest()[:6])
     node[0] = (node[0] | 0x02) & 0xFE  # locally administered, never multicast

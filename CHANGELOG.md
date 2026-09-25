@@ -2,6 +2,18 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- In the full-container deployment every modem was named "Cellular modem": Hardware looked for its
+  modem profiles in a `config.json` that container deployments do not have. It now reads Control's
+  `config.yaml`, so a modem shows its profile name (such as "DJI/Quectel EC25") as in a native
+  install, and configured profiles take effect.
+- The VoWiFi row of a carrier without Wi-Fi Calling alternated every few seconds between the reason
+  and "Stopped.", because a live line event replaced the device snapshot's explanation. It now
+  keeps the reason while the line is off.
+
 ## [1.12.0-rc9] - 2026-09-25
 
 Ninth release candidate. The automatic update channel stays on 1.9.5.

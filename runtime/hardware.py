@@ -32,7 +32,8 @@ EVENT_ROOTS = (
     ("usbmisc", Path("/sys/class/usbmisc"), re.compile(r"cdc-wdm\d+")),
     ("net", Path("/sys/class/net"), re.compile(r"wwan\d+")),
 )
-DEFAULT_MODEM_PROFILES = (("2c7c", "0125", 2),)
+# (vid, pid, AT interface, display name), the same default as control/app/config.py.
+DEFAULT_MODEM_PROFILES = (("2c7c", "0125", 2, "DJI/Quectel EC25"),)
 BASE_VPCD_PORT = 0x3C00
 VPCD_PORT_STRIDE = 0x100
 VPCD_SLOTS = 3
@@ -256,20 +257,42 @@ class HardwareSupervisor:
             raise RuntimeError(f"ModemManager rejected {action} event for {subsystem}/{name}")
 
     def modem_profiles(self):
+        """Modem profiles from the Control configuration, else the built-in default.
+
+        Control keeps its configuration in config.yaml. This used to read a config.json that
+        no container deployment has, so a configured profile was never seen and every modem
+        was named "Cellular modem" instead of the profile's name, as a native install shows.
+        Parsed once per file change: this runs on every reconcile pass.
+        """
+        path = self.data_path / "config.yaml"
+        try:
+            stat = path.stat()
+            stamp = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            return list(DEFAULT_MODEM_PROFILES)
+        cached = getattr(self, "_modem_profiles_cache", None)
+        if cached and cached[0] == stamp:
+            return list(cached[1])
         profiles = list(DEFAULT_MODEM_PROFILES)
         try:
-            configured = json.loads((self.data_path / "config.json").read_text(encoding="utf-8"))
+            import yaml  # pylint: disable=import-outside-toplevel
+            loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+            configured = yaml.load(path.read_text(encoding="utf-8"), Loader=loader) or {}
             values = (configured.get("hardware") or {}).get("modem_profiles") or []
             parsed = [(str(item["vid"]).lower(), str(item["pid"]).lower(),
-                       int(item.get("at_interface", 2))) for item in values]
+                       int(item.get("at_interface", 2)),
+                       str(item.get("name") or "").strip()[:120] or "USB modem")
+                      for item in values]
             if parsed:
                 profiles = parsed
-        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        except Exception:  # pylint: disable=broad-except  # a bad file keeps the default
             pass
+        self._modem_profiles_cache = (stamp, tuple(profiles))
         return profiles
 
     def discover_modems(self):
-        profiles = {(vid, pid): interface for vid, pid, interface in self.modem_profiles()}
+        profiles = {(vid, pid): (interface, name)
+                    for vid, pid, interface, name in self.modem_profiles()}
         modems = []
         for usb in Path("/sys/bus/usb/devices").glob("*"):
             try:
@@ -277,9 +300,10 @@ class HardwareSupervisor:
                 pid = usb.joinpath("idProduct").read_text().strip().lower()
             except OSError:
                 continue
-            interface = profiles.get((vid, pid))
-            if interface is None:
+            profile = profiles.get((vid, pid))
+            if profile is None:
                 continue
+            interface, name = profile
             ports = sorted(Path("/sys/bus/usb/devices").glob(
                 f"{usb.name}:1.{interface}/ttyUSB*"))
             ports += sorted(Path("/sys/bus/usb/devices").glob(
@@ -297,7 +321,7 @@ class HardwareSupervisor:
             suffix = serial or usb.name
             hardware_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", f"{vid}-{pid}-{suffix}").strip("-")
             modems.append({"id": hardware_id, "tty": "/dev/" + ports[0].name,
-                           "usb_path": usb.name, "vid": vid, "pid": pid})
+                           "usb_path": usb.name, "vid": vid, "pid": pid, "name": name})
         return sorted(modems, key=lambda item: item["id"])
 
     def modem_object_for_tty(self, tty, objects):
@@ -942,7 +966,7 @@ class HardwareSupervisor:
             target_data = bool(wanted.get("cellular_enabled")) and not bool(
                 wanted.get("flight_mode"))
             assignment = {
-                "name": "Cellular modem", "tty": modem["tty"],
+                "name": modem.get("name") or "Cellular modem", "tty": modem["tty"],
                 "usb_path": modem["usb_path"], "vid": modem["vid"], "pid": modem["pid"],
             }
             assignments[device_id] = assignment
@@ -1014,7 +1038,7 @@ class HardwareSupervisor:
         for modem in discovered:
             device_id = modem["id"]
             assignments[device_id] = {
-                "name": "Cellular modem", "tty": modem["tty"],
+                "name": modem.get("name") or "Cellular modem", "tty": modem["tty"],
                 "usb_path": modem["usb_path"], "vid": modem["vid"], "pid": modem["pid"],
                 "base_port": modem.get("base_port"),
             }

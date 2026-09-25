@@ -52,11 +52,18 @@ function mergeLiveLineStatus(device, status) {
   // the useful provisioning explanation, while a generic live STOPPED event only describes
   // the engine.  Preserve the draft explanation so those two feeds cannot make the card text
   // alternate every few seconds.
-  const actual = isDraft
+  // The same holds for a line left off because its carrier offers no Wi-Fi Calling: the
+  // snapshot says why, a live STOPPED event only says "Stopped.".
+  const unsupportedIdle = currentCapability.support?.status === 'unsupported'
+    && currentCapability.desired === false
+    && String(status?.state || '').toUpperCase() === 'STOPPED'
+  const keepSnapshot = isDraft || unsupportedIdle
+  const actual = keepSnapshot
     ? (currentCapability.actual || 'off')
     : lineCapabilityState(status, currentCapability.desired !== false)
-  const reason = isDraft
-    ? (currentCapability.reason || 'Automatic setup is waiting for SIM or hardware information')
+  const reason = keepSnapshot
+    ? (currentCapability.reason
+      || (isDraft ? 'Automatic setup is waiting for SIM or hardware information' : ''))
     : (status.reason || '')
   return {
     ...device,

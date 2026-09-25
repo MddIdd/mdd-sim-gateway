@@ -587,6 +587,52 @@ class HardwareRuntimeTests(unittest.TestCase):
 
 
 
+class ModemProfileTests(unittest.TestCase):
+    """Containers read the profiles from config.yaml; they used to look for a config.json no
+    container deployment has, so every modem was called "Cellular modem"."""
+
+    def test_without_a_configuration_the_default_profile_names_the_dji_module(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = HardwareSupervisor(interval=0, data_path=Path(temp))
+            self.assertEqual(app.modem_profiles(), [("2c7c", "0125", 2, "DJI/Quectel EC25")])
+
+    def test_configured_profiles_come_from_config_yaml_with_their_names(self):
+        with tempfile.TemporaryDirectory() as temp:
+            data = Path(temp)
+            (data / "config.yaml").write_text(
+                "hardware:\n  modem_profiles:\n"
+                "    - {name: Quectel EG25-G, vid: 2C7C, pid: '0125', at_interface: 3}\n"
+                "    - {vid: 1e0e, pid: '9001'}\n")
+            app = HardwareSupervisor(interval=0, data_path=data)
+            self.assertEqual(app.modem_profiles(), [("2c7c", "0125", 3, "Quectel EG25-G"),
+                                                    ("1e0e", "9001", 2, "USB modem")])
+
+    def test_a_configuration_without_profiles_keeps_the_default(self):
+        with tempfile.TemporaryDirectory() as temp:
+            data = Path(temp)
+            (data / "config.yaml").write_text("settings: {}\n")
+            app = HardwareSupervisor(interval=0, data_path=data)
+            self.assertEqual(app.modem_profiles()[0][3], "DJI/Quectel EC25")
+
+    def test_an_unreadable_configuration_keeps_the_default(self):
+        with tempfile.TemporaryDirectory() as temp:
+            data = Path(temp)
+            (data / "config.yaml").write_text("hardware: [unclosed\n")
+            app = HardwareSupervisor(interval=0, data_path=data)
+            self.assertEqual(app.modem_profiles()[0][3], "DJI/Quectel EC25")
+
+    def test_the_file_is_parsed_once_until_it_changes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            data = Path(temp)
+            (data / "config.yaml").write_text("settings: {}\n")
+            app = HardwareSupervisor(interval=0, data_path=data)
+            import yaml
+            with patch.object(yaml, "load", wraps=yaml.load) as load:
+                app.modem_profiles()
+                app.modem_profiles()
+            self.assertEqual(load.call_count, 1)
+
+
 class AdaptiveCadenceTests(unittest.TestCase):
     """A pass forks mmcli/nmcli per modem. At a fixed 3 s cadence that was about a fifth of a
     Raspberry Pi core for a modem nobody was touching."""

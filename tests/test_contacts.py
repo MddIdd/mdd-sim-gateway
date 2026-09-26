@@ -284,15 +284,39 @@ class StoreTests(_BookTest):
                          {"added": 0, "merged": 0, "skipped": 2})
         self.assertEqual(store.contacts_count(2), 2)
 
-    def test_a_renamed_contact_with_a_known_number_gains_the_new_number(self):
+    def test_the_same_person_with_a_new_number_gains_it(self):
         store.contact_create(2, {"name": "Alice", "numbers": [UK]}, GB)
         parsed, _ = contacts.parse_vcard(
-            "BEGIN:VCARD\nVERSION:3.0\nFN:Alice Smith\nTEL:" + UK + "\nTEL:" + US + "\nEND:VCARD\n")
+            "BEGIN:VCARD\nVERSION:3.0\nFN:alice\nTEL:" + UK + "\nTEL:" + US + "\nEND:VCARD\n")
         self.assertEqual(store.contacts_import(2, parsed, GB),
                          {"added": 0, "merged": 1, "skipped": 0})
         self.assertEqual(store.contacts_count(2), 1)
-        # The number decides identity; the name already stored is left alone.
         self.assertEqual(store.contacts_resolve(2, [US], "gb")[US]["name"], "Alice")
+
+    def test_two_people_sharing_a_number_stay_two_people(self):
+        # A home landline: both are imported, and a second import changes nothing.
+        parsed, _ = contacts.parse_vcard(
+            "BEGIN:VCARD\nVERSION:3.0\nFN:Alice\nTEL:" + UK + "\nEND:VCARD\n"
+            "BEGIN:VCARD\nVERSION:3.0\nFN:Bob\nTEL:" + UK_NATIONAL + "\nEND:VCARD\n")
+        self.assertEqual(store.contacts_import(2, parsed, GB),
+                         {"added": 2, "merged": 0, "skipped": 0})
+        self.assertEqual(store.contacts_import(2, parsed, GB),
+                         {"added": 0, "merged": 0, "skipped": 2})
+        self.assertEqual(sorted(c["name"] for c in store.contacts_list(2)), ["Alice", "Bob"])
+
+    def test_a_contact_stored_under_its_number_takes_the_name_a_later_import_brings(self):
+        # A card whose name could not be read was stored under its number; importing the same
+        # contact again with its name repairs it rather than being counted as already there.
+        store.contacts_import(2, [{"name": "", "numbers": [UK]}], GB)
+        self.assertEqual(store.contacts_list(2)[0]["name"], UK)
+        self.assertEqual(store.contacts_import(2, [{"name": "张三", "numbers": [UK_NATIONAL]}], GB),
+                         {"added": 0, "merged": 1, "skipped": 0})
+        self.assertEqual([c["name"] for c in store.contacts_list(2)], ["张三"])
+        # And the other way round: a card with no name adds nothing but a number it lacked.
+        self.assertEqual(store.contacts_import(2, [{"name": "", "numbers": [UK, US]}], GB),
+                         {"added": 0, "merged": 1, "skipped": 0})
+        self.assertEqual([(c["name"], len(c["numbers"])) for c in store.contacts_list(2)],
+                         [("张三", 2)])
 
     def test_a_national_spelling_is_reconciled_through_the_line_s_country(self):
         # The case that made the trailing-digit comparison untenable: short enough that the
@@ -338,14 +362,14 @@ class StoreTests(_BookTest):
 
     def test_an_import_folds_into_the_same_contact_every_time(self):
         # Two entries may share a number, as they may on a phone; the one an import folds into
-        # is the one a caller is named after, not whichever row SQLite returns first.
+        # is decided by name, and among entries named after their number by name then id, not
+        # by whichever row SQLite returns first.
         store.contact_create(2, {"name": "Zoe", "numbers": [UK]}, GB)
         store.contact_create(2, {"name": "Alice", "numbers": [UK]}, GB)
-        store.contacts_import(2, [{"name": "Alice (work)", "numbers": [UK, US]}], GB)
+        store.contacts_import(2, [{"name": "ALICE", "numbers": [UK, US]}], GB)
         by_name = {c["name"]: [n["number"] for n in c["numbers"]]
                    for c in store.contacts_list(2)}
-        self.assertEqual(by_name["Alice"], [UK, US])
-        self.assertEqual(by_name["Zoe"], [UK])
+        self.assertEqual(by_name, {"Alice": [UK, US], "Zoe": [UK]})
         self.assertEqual(store.contacts_resolve(2, [UK], GB)[UK]["name"], "Alice")
 
     def test_the_book_is_bounded(self):

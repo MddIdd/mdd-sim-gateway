@@ -11,6 +11,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import threading
@@ -2787,12 +2788,28 @@ def contacts_rekey(region: str = "") -> int:
     return len(changed)
 
 
-def contacts_import(owner: int, incoming, region: str = "") -> dict:
-    """Add contacts, folding one that shares a number with an existing entry into it.
+def _name_is_a_number(name: str, keys: set[str], region: str) -> bool:
+    """Whether `name` is only one of the contact's own numbers standing in for a name.
 
-    A re-import of the same export must not double the address book, and matching on the number
-    rather than the name is what makes that true across a rename -- the number is the identity
-    here, the name is a label on it.
+    That is what a card without a readable name is stored under, and a later import that does
+    carry a name should be able to give it one.
+    """
+    if re.search(r"[^\d\s()+\-.]", str(name or "")):
+        return False
+    return contacts_format.number_key(name, region) in keys
+
+
+def contacts_import(owner: int, incoming, region: str = "") -> dict:
+    """Add contacts, folding one into an existing entry only when it is the same person.
+
+    A re-import of the same export must not double the address book, so an incoming contact
+    that shares a number with an entry of the same name is folded into it, gaining any number it
+    did not have. Sharing a number is not enough on its own: two people on one home landline are
+    two contacts, as they are on a phone.
+
+    An entry named after its own number -- a card whose name could not be read -- is the same
+    person as a named one sharing its number, and takes the name. So is an incoming card without
+    a name, which is folded into the entry it shares a number with.
     """
     added = merged = skipped = 0
     now = int(time.time())
@@ -2801,25 +2818,41 @@ def contacts_import(owner: int, incoming, region: str = "") -> dict:
                               (int(owner),)).fetchone()[0])
         for contact in incoming:
             clean = contacts_format.normalize_contact(contact, region)
-            keys = sorted({contacts_format.number_key(item["number"], region)
-                           for item in clean["numbers"]})
+            keys = {contacts_format.number_key(item["number"], region)
+                    for item in clean["numbers"]}
             placeholders = ",".join("?" for _ in keys)
-            row = c.execute(
-                f"SELECT contacts.id AS id FROM contact_numbers "
+            candidates = c.execute(
+                f"SELECT DISTINCT contacts.id AS id, contacts.name AS name FROM contact_numbers "
                 f"JOIN contacts ON contacts.id = contact_numbers.contact_id "
                 f"WHERE contacts.owner=? AND contact_numbers.match_key IN ({placeholders}) "
-                f"ORDER BY contacts.name COLLATE NOCASE, contacts.id LIMIT 1",
-                (int(owner), *keys)).fetchone() if keys else None
-            if row:
-                existing = int(row["id"])
-                have = {contacts_format.number_key(item["number"], region)
-                        for item in _contact_numbers(c, [existing]).get(existing, [])}
+                f"ORDER BY contacts.name COLLATE NOCASE, contacts.id",
+                (int(owner), *sorted(keys))).fetchall()
+            numbers = _contact_numbers(c, [int(r["id"]) for r in candidates])
+            have = {int(r["id"]): {contacts_format.number_key(item["number"], region)
+                                   for item in numbers.get(int(r["id"]), [])}
+                    for r in candidates}
+            unnamed = _name_is_a_number(clean["name"], keys, region)
+            target = rename = None
+            for row in candidates:
+                if row["name"].casefold() == clean["name"].casefold() or unnamed:
+                    target = row
+                    break
+            if target is None and not unnamed:
+                target = next((row for row in candidates
+                               if _name_is_a_number(row["name"], have[int(row["id"])], region)),
+                              None)
+                rename = target
+            if target is not None:
+                existing = int(target["id"])
                 fresh = [item for item in clean["numbers"]
-                         if contacts_format.number_key(item["number"], region) not in have]
-                if not fresh:
+                         if contacts_format.number_key(item["number"], region)
+                         not in have[existing]]
+                if not fresh and rename is None:
                     skipped += 1
                     continue
                 _add_numbers(c, existing, fresh, region)
+                if rename is not None:
+                    c.execute("UPDATE contacts SET name=? WHERE id=?", (clean["name"], existing))
                 c.execute("UPDATE contacts SET updated_ts=? WHERE id=?", (now, existing))
                 merged += 1
                 continue
@@ -2832,4 +2865,3 @@ def contacts_import(owner: int, incoming, region: str = "") -> dict:
             count += 1
             added += 1
     return {"added": added, "merged": merged, "skipped": skipped}
-

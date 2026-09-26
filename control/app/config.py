@@ -79,6 +79,9 @@ DEFAULTS = {
         "debug": {"asterisk": False, "charon": False, "pcap": False, "ami": False},
         "manager_url": "",          # reachable URL engines POST events to (auto if empty)
         "retry": {"max": 3, "interval": 30},   # auto-retry attempts + seconds per attempt
+        # Minutes an enabled line may stay off the network before the line_offline notification
+        # is sent. Short outages are the retry policy's job; this is for the ones it is losing.
+        "line_offline_notify_minutes": 10,
         # Proactive IKEv2 SA rekey. IKEv2 does NOT negotiate SA lifetime on the wire (RFC 7296
         # dropped it), so rekey timing is local policy (3GPP TS 24.302 clause 7.2.2C: use a
         # configured value, else an implementation value). We rekey the CHILD (ESP) SA every

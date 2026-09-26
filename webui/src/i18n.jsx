@@ -187,7 +187,7 @@ const zh = {
   'Ring timeout (seconds)': '振铃超时（秒）', Tunnel: '隧道', 'SA rekey interval (minutes, 0 = off)': 'SA 换钥间隔（分钟，0=关闭）',
   'Webhook push': 'Webhook 推送', Format: '格式', 'Enable webhook push': '启用 Webhook 推送', 'Webhook URL': 'Webhook 地址',
   'Webhook format': 'Webhook 格式', 'Generic JSON webhook': '通用 JSON Webhook',
-  'Events to push': '推送事件', 'Incoming call': '来电', 'Missed call': '未接来电', 'Number keeping result': '保号执行结果', 'Incoming SMS': '收到短信', 'Host alert': '主机异常', 'Line number changed': '线路号码变更', 'Line cannot recover': '线路无法自动恢复', 'Telegram push': 'Telegram 推送',
+  'Events to push': '推送事件', 'Incoming call': '来电', 'Missed call': '未接来电', 'Number keeping result': '保号执行结果', 'Incoming SMS': '收到短信', 'Host alert': '主机异常', 'Line number changed': '线路号码变更', 'Line cannot recover': '线路无法自动恢复', 'Line offline': '线路离线', 'Line recovered': '线路已恢复', 'Line offline alert': '线路离线提醒', 'Sent when an enabled line stays off the network this long, and again when it comes back. Short drops are left to automatic recovery.': '已启用的线路持续离线超过这个时长时推送一次，恢复后再推送一次。短暂掉线交给自动恢复处理，不会打扰你。', 'Notify after (minutes)': '离线多久后通知（分钟）', 'Telegram push': 'Telegram 推送',
   'Enable Telegram push': '启用 Telegram 推送', 'Bot token': '机器人 Token', 'Chat / Channel ID': '聊天/频道 ID',
   'Save settings': '保存设置', 'Saved. Restart the control surface for TLS/port changes, and re-provision a line for ring-timeout changes, to take effect.': '已保存。TLS/端口修改需重启控制界面，振铃超时修改需重新配置线路后生效。', Error: '错误',
   'Provision SIM': '配置 SIM', Modem: '模块', 'internal slots': '内部虚拟槽', Name: '名称', required: '必填',

@@ -57,7 +57,16 @@ Docker 的保守 dangling-only 清理；“清理旧版与回滚镜像”是显�
 
 安装完成后，在受信的局域网或 VPN 中立即打开 `https://主机地址:8443`，创建至少 10 字符的管理员密码。首次设置完成前，任何能访问该端口的客户端都可申领初始管理员。配置自有证书时，证书和私钥应只允许 root 读取。运行数据目录默认为 `0700`，凭据文件为 `0600`。
 
-浏览器电话与 WebUI 同源：信令走 `wss://主机地址:8443/api/instances/<线路>/softphone/ws`，由控制面经 Docker 网桥转发到对应线路的引擎，引擎不向主机发布信令端口，也不需要单独信任证书。放在反向代理之后时，只需让 WebUI 地址本身转发 WebSocket 升级（`Upgrade`/`Connection` 头），无需为软电话另开路径或端口。控制面只接受来自自身页面的 WebSocket（`Origin` 必须与浏览器访问的主机一致）：代理保留 `Host` 头时无需任何设置；代理把 `Host` 改成内网地址时，需在设置里把代理地址填入"可信反向代理"，并由代理传递 `X-Forwarded-Host`。通话音频仍使用各线路的 RTP 端口。
+浏览器电话与 WebUI 同源：信令走 `wss://主机地址:8443/api/instances/<线路>/softphone/ws`，由控制面经 Docker 网桥转发到对应线路的引擎，引擎不向主机发布信令端口，也不需要单独信任证书。放在反向代理之后时，只需让 WebUI 地址本身转发 WebSocket 升级（`Upgrade`/`Connection` 头），无需为软电话另开路径或端口。控制面只接受来自自身页面的 WebSocket（`Origin` 必须与浏览器访问的主机一致）：代理保留 `Host` 头时无需任何设置；代理把 `Host` 改成内网地址时，需在设置里把代理地址填入"可信反向代理"，并由代理传递 `X-Forwarded-Host`。nginx 默认会改写 `Host`，在网关的 `location` 里加上下面几行即可：
+
+```nginx
+proxy_set_header Host $host;
+proxy_http_version 1.1;
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection "upgrade";
+```
+
+不符合时，WebUI 顶部会出现"实时更新和软电话已停用"的提示，控制面日志记录 `refused WebSocket ... from origin`。通话音频仍使用各线路的 RTP 端口。
 
 ## 更新
 

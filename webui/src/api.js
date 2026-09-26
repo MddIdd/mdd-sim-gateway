@@ -290,6 +290,12 @@ export function connectWs(onMsg, onAuthLost) {
         onAuthLost?.()
         return
       }
+      // 4403: the gateway does not recognise this page's origin (a reverse proxy rewriting the
+      // Host header without being listed as trusted). Retrying cannot fix that; the server log says why.
+      if (event.code === 4403) {
+        alive = false
+        return
+      }
       if (alive) setTimeout(open, 2000)
     }
     ws.onerror = () => { try { ws.close() } catch {} }

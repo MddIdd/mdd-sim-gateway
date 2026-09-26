@@ -1162,15 +1162,22 @@ remove_orchestrator() {
 # hands it to every engine it starts. A native install keeps it in a systemd drop-in, which a
 # reload leaves alone. The docker-mode control container is recreated on every reload, so take
 # the value from the installer's environment, else from the container being replaced: an update
-# must not silently put the engines back on the default. Non-numeric values are ignored.
+# must not silently put the engines back on the default. SWU_TUN_MTU=default drops a carried-over
+# value. Anything outside 1280-1500 is ignored: below 1280 the kernel takes IPv6 off ipsec0,
+# which an IPv6 PDN needs, and above 1500 the ESP packets cannot fit a normal uplink.
 control_tun_mtu() {
   value="${SWU_TUN_MTU:-}"
+  [ "$value" = default ] && return 0
   [ -n "$value" ] || value=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' \
     "$CONTROL_NAME" 2>/dev/null | sed -n 's/^SWU_TUN_MTU=//p' | head -n 1)
   case "$value" in
     '') ;;
     *[!0-9]*) warn "ignoring SWU_TUN_MTU=$value (not a number)" >&2 ;;
-    *) printf '%s' "$value" ;;
+    *) if [ "${#value}" -le 4 ] && [ "$value" -ge 1280 ] && [ "$value" -le 1500 ]; then
+         printf '%s' "$value"
+       else
+         warn "ignoring SWU_TUN_MTU=$value (outside 1280-1500)" >&2
+       fi ;;
   esac
 }
 

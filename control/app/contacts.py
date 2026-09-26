@@ -118,7 +118,7 @@ class ContactError(ValueError):
     """A refused address-book operation whose message is safe to show the caller."""
 
 
-def normalize_contact(contact: dict, regions=()) -> dict:
+def normalize_contact(contact: dict) -> dict:
     """Bound and tidy one contact, refusing the two things that make an entry meaningless."""
     name = clean_name(contact.get("name"))
     numbers = []
@@ -129,12 +129,11 @@ def normalize_contact(contact: dict, regions=()) -> dict:
         number = clean_number((item or {}).get("number"))
         if not number or not digits_of(number):
             continue
-        # Deduplicated on what matching compares, not on the exact digits: an export that
-        # lists a number in both national and international form is one number.
-        keys = set(number_keys(number, regions).values())
-        if keys & seen:
+        # Only a number written exactly the same way twice is dropped. Two spellings of one
+        # number are both kept as the owner wrote them; each finds the same contact anyway.
+        if number in seen:
             continue
-        seen |= keys
+        seen.add(number)
         numbers.append({"label": str((item or {}).get("label") or "").strip()[:LABEL_MAX],
                         "number": number})
     if not name and numbers:

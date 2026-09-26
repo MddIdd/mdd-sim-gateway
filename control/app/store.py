@@ -2760,7 +2760,7 @@ def _write_numbers(c, contact_id: int, numbers, regions) -> None:
 
 
 def contact_create(owner: int, contact: dict, regions=()) -> dict:
-    clean = contacts_format.normalize_contact(contact, regions)
+    clean = contacts_format.normalize_contact(contact)
     now = int(time.time())
     with _lock, _conn() as c:
         count = int(c.execute("SELECT COUNT(*) FROM contacts WHERE owner=?",
@@ -2776,7 +2776,7 @@ def contact_create(owner: int, contact: dict, regions=()) -> dict:
 
 
 def contact_update(owner: int, contact_id: int, contact: dict, regions=()) -> dict | None:
-    clean = contacts_format.normalize_contact(contact, regions)
+    clean = contacts_format.normalize_contact(contact)
     now = int(time.time())
     with _lock, _conn() as c:
         exists = c.execute("SELECT id FROM contacts WHERE owner=? AND id=?",
@@ -2872,7 +2872,7 @@ def contacts_import(owner: int, incoming, regions=()) -> dict:
         count = int(c.execute("SELECT COUNT(*) FROM contacts WHERE owner=?",
                               (int(owner),)).fetchone()[0])
         for contact in incoming:
-            clean = contacts_format.normalize_contact(contact, regions)
+            clean = contacts_format.normalize_contact(contact)
             rows = c.execute("SELECT * FROM contacts WHERE owner=? AND name=?",
                              (int(owner), clean["name"])).fetchall()
             if any(_contact_shape(doc) == _contact_shape(clean) for doc in _contact_docs(c, rows)):

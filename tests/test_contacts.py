@@ -83,9 +83,9 @@ class MatchingTests(unittest.TestCase):
         # A card with only a number is named after it rather than refused.
         self.assertEqual(contacts.normalize_contact({"numbers": [UK]})["name"], UK)
 
-    def test_one_contact_does_not_keep_the_same_number_twice(self):
-        clean = contacts.normalize_contact({"name": "A", "numbers": [UK, UK_NATIONAL, US]}, GB)
-        self.assertEqual([n["number"] for n in clean["numbers"]], [UK, US])
+    def test_one_contact_keeps_each_spelling_but_not_the_same_one_twice(self):
+        clean = contacts.normalize_contact({"name": "A", "numbers": [UK, UK_NATIONAL, US, UK]})
+        self.assertEqual([n["number"] for n in clean["numbers"]], [UK, UK_NATIONAL, US])
 
 
 class VCardTests(unittest.TestCase):
@@ -398,9 +398,6 @@ class StoreTests(_BookTest):
         # Searching finds a contact through any of the gateway's countries.
         self.assertEqual([c["name"] for c in store.contacts_list(2, UK, regions=regions)],
                          ["Alice"])
-        # One number written two ways in one card is still one number.
-        clean = contacts.normalize_contact({"name": "A", "numbers": [UK, UK_NATIONAL]}, regions)
-        self.assertEqual(len(clean["numbers"]), 1)
 
     def test_the_book_is_bounded(self):
         with patch.object(contacts, "MAX_CONTACTS_PER_OWNER", 2):

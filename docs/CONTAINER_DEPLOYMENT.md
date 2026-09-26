@@ -157,7 +157,7 @@ https://NAS_LAN_IP:10443/
 5. 蜂窝模块能读取 SIM 状态，按需开启 4G 后 NAS 默认网关保持不变；
 6. 配置国家出口后，UDP 检查通过并显示实际节点名称；
 7. 启用 VoWiFi，依次看到 SWu 已连接、USIM 鉴权成功和 IMS 已注册；
-8. 浏览器通话页能正常打开，反向代理部署还需确认 WebSocket Upgrade 被转发；
+8. 浏览器通话页能正常打开，反向代理部署还需确认 WebSocket Upgrade 被转发，且保留 `Host` 头（或已列为可信反向代理并传递 `X-Forwarded-Host`）；
 9. 在正式使用前完成一次短信和通话测试。
 
 浏览器软电话信令与 WebUI 同源，不需要额外发布 WSS 端口。Engine 的 RTP 端口从默认

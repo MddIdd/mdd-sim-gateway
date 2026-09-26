@@ -5829,6 +5829,12 @@ async def api_contacts_resolve(body: dict, request: Request):
     return {"contacts": await asyncio.to_thread(store.contacts_resolve, owner, numbers, region)}
 
 
+def _contact_file(raw: bytes, filename: str) -> tuple[list[dict], list[str]]:
+    # Phone exports are UTF-8 or a local code page; a byte that fits neither is replaced rather
+    # than failing the whole import, so one bad character cannot cost three hundred contacts.
+    return contacts.parse(raw.decode("utf-8", errors="replace"), filename)
+
+
 @app.post("/api/contacts/import")
 async def api_contacts_import(request: Request):
     """Import a vCard or CSV export (multipart field "file", or a JSON body with "text")."""
@@ -5855,18 +5861,22 @@ async def api_contacts_import(request: Request):
                 # A form parsed here rather than by FastAPI is not closed for us.
                 await form.close()
         else:
-            body = await counted.json()
+            try:
+                body = await counted.json()
+            except ValueError:
+                raise HTTPException(400, "the body is not JSON") from None
+            if not isinstance(body, dict):
+                raise HTTPException(400, "the body must be a JSON object")
             filename = str(body.get("filename") or "")
             raw = str(body.get("text") or "").encode("utf-8")
     except _ContactUploadTooLarge:
         raise too_large from None
     if len(raw) > CONTACT_IMPORT_LIMIT:
         raise too_large
-    # Phone exports are UTF-8 or a local code page; a byte that fits neither is replaced rather
-    # than failing the whole import, so one bad character cannot cost three hundred contacts.
-    text = raw.decode("utf-8", errors="replace")
     try:
-        parsed, problems = contacts.parse(text, filename)
+        # Reading a file of this size takes long enough that it must not hold up the event loop,
+        # which carries every call and message on the gateway.
+        parsed, problems = await asyncio.to_thread(_contact_file, raw, filename)
         region = await asyncio.to_thread(_contact_region_current)
         result = await asyncio.to_thread(store.contacts_import, owner, parsed, region)
     except contacts.ContactError as exc:

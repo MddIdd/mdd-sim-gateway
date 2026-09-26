@@ -1,6 +1,8 @@
 """The address book: matching numbers as they actually arrive, and surviving real exports."""
 import asyncio
+import json
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -438,6 +440,35 @@ class ApiTests(_BookTest):
             asyncio.run(self.main.api_contacts_import(request))
         self.assertEqual((refused.exception.status_code, sent), (413, []))
 
+
+    def test_input_that_is_not_an_address_book_is_refused_with_a_4xx(self):
+        field = b"name,number\r\n" + b"a" * 200_000 + b",1\r\n"
+        cases = [(b"{not json", "application/json"), (b"[1]", "application/json"),
+                 (b'{"text": ' + json.dumps(field.decode()).encode() + b'}', "application/json")]
+        for body, content_type in cases:
+            request, _ = self.request(body, content_type)
+            with patch.object(self.main, "_contact_region", lambda: GB), \
+                    self.assertRaises(self.main.HTTPException) as refused:
+                asyncio.run(self.main.api_contacts_import(request))
+            self.assertEqual(refused.exception.status_code, 400, body[:20])
+
+    def test_the_file_is_read_off_the_event_loop(self):
+        request, _ = self.request(b'{"text": "name,number\\nA,+1 555 0100"}', "application/json")
+        original, threads = self.main._contact_file, []
+
+        def read(*args):
+            threads.append(threading.get_ident())
+            return original(*args)
+
+        async def run():
+            threads.append(threading.get_ident())
+            return await self.main.api_contacts_import(request)
+
+        with patch.object(self.main, "_contact_region", lambda: GB), \
+                patch.object(self.main, "_contact_file", read):
+            self.assertEqual(asyncio.run(run())["added"], 1)
+        self.assertEqual(len(threads), 2)
+        self.assertNotEqual(threads[0], threads[1])
 
 if __name__ == "__main__":
     unittest.main()

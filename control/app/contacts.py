@@ -326,7 +326,11 @@ def _csv_column_map(header) -> dict[str, int]:
 
 def parse_csv(text: str) -> tuple[list[dict], list[str]]:
     """Read a CSV address book. Rows sharing a name are folded into one contact's numbers."""
-    rows = list(csv.reader(io.StringIO(str(text or ""))))
+    try:
+        rows = list(csv.reader(io.StringIO(str(text or ""))))
+    except csv.Error as exc:
+        # A field past the csv module's limit (128 KB), or a stray NUL: not an address book.
+        raise ContactError(f"the file cannot be read as CSV ({exc})") from None
     if not rows:
         return [], []
     columns = _csv_column_map(rows[0])

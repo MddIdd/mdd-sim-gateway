@@ -2,6 +2,30 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [Unreleased]
+
+### Upgrade notes
+
+- **Behind a reverse proxy that rewrites `Host` -- nginx does by default -- live updates and
+  the softphone stop after this upgrade** until the proxy keeps the host name the browser used.
+  For nginx add `proxy_set_header Host $http_host;` to the gateway's `location` (not `$host`,
+  which drops a port other than 443 and is refused just the same); for any other proxy, either
+  keep `Host`, or list the proxy under Settings → Security → Trusted reverse proxies and have it
+  send `X-Forwarded-Host`. The WebUI shows a banner saying so when it happens. Direct
+  access and proxies that keep `Host` (Caddy, Traefik and Cloudflare do) need nothing.
+
+### Security
+
+- WebSocket handshakes pass the same authentication as the API, in one middleware, so a socket
+  added later cannot be left open by forgetting a check. A socket signed in with the session
+  cookie must also come from the gateway's own page: its `Origin` has to match the host the
+  browser asked for, or the forwarded host from a trusted reverse proxy.
+
+### Removed
+
+- The silent fallback for WebUI tabs older than the first public release, which kept a
+  signed-out event socket open instead of closing it with 4401.
+
 ## [1.12.0] - 2026-09-26
 
 First release with the full-container deployment. The automatic update channel stays on 1.9.5.

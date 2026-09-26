@@ -276,7 +276,7 @@ export const api = {
   },
 }
 
-export function connectWs(onMsg, onAuthLost) {
+export function connectWs(onMsg, onAuthLost, onOriginRefused) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   let ws, alive = true
   const open = () => {
@@ -288,6 +288,13 @@ export function connectWs(onMsg, onAuthLost) {
       if (event.code === 4401) {
         alive = false
         onAuthLost?.()
+        return
+      }
+      // 4403: the gateway does not recognise this page's origin -- a reverse proxy rewrote the
+      // Host header without being listed as trusted. Retrying cannot fix that; say so instead.
+      if (event.code === 4403) {
+        alive = false
+        onOriginRefused?.()
         return
       }
       if (alive) setTimeout(open, 2000)

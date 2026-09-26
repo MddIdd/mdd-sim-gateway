@@ -12,7 +12,6 @@ import asyncio
 import base64
 import glob
 import hashlib
-import hmac
 import ipaddress
 import json
 import logging
@@ -34,7 +33,8 @@ from . import config as cfg
 from . import (store, engine, status as status_mod, sim, card, notify_push, lpa, auth,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
                sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd, mms,
-               mms_media, mms_transport, softphone_ws, modem_ims, vowifi_support, modem_voice)
+               mms_media, mms_transport, softphone_ws, modem_ims, vowifi_support, modem_voice,
+               gate, line_offline)
 from .version import VERSION
 from .ami import AmiClient
 from .runtime import RuntimeRegistry
@@ -492,6 +492,8 @@ class Hub:
         # Shared with the acknowledgement endpoint. The poller owns condition lifecycle;
         # the API only marks currently visible items handled.
         self.host_alert_state: dict | None = None
+        # Per-line outage clock for the offline notification; loaded on the first pass.
+        self.line_offline_state: dict[str, dict] | None = None
 
     def cards_list(self) -> list[dict]:
         """Reader/card entries sorted by current PC/SC index (the UI display order)."""
@@ -1628,6 +1630,7 @@ async def status_poller():
             await sync_modem_msisdns()
             await asyncio.gather(*(_poll_instance_status(inst)
                                    for inst in instances))
+            await _check_line_offline(instances)
             if time.monotonic() - last_prune >= LINE_HISTORY_PRUNE_INTERVAL_SECONDS:
                 last_prune = time.monotonic()
                 await asyncio.to_thread(store.prune_line_states,
@@ -1638,6 +1641,117 @@ async def status_poller():
             await asyncio.wait_for(hub.status_wakeup.wait(), timeout=_status_poll_delay(instances))
         except asyncio.TimeoutError:
             pass
+
+
+def _line_offline_observation(inst: dict) -> tuple[str | None, str]:
+    """Classify a line's latest sample for the offline notification.
+
+    Driven by the user's intent rather than by the status label: an enabled line whose
+    container is not running reads STOPPED, which the timeline files as "off", but nobody
+    asked for it to be off and it is exactly the kind of silent outage this exists to report.
+    """
+    iid = str(inst["id"])
+    if not inst.get("enabled", True) or inst.get("provisioning_state") == "draft":
+        return line_offline.IGNORE, ""
+    st = hub.status_cache.get(iid)
+    if not st:
+        return None, ""
+    state = str(st.get("state") or "").upper()
+    if state == "OK":
+        return line_offline.UP, ""
+    if _line_state_kind(st) is None:
+        return None, ""
+    allowed, blocked = _line_auto_start_allowed(inst)
+    if not allowed and blocked != "no_card":
+        return line_offline.IGNORE, ""
+    return line_offline.DOWN, line_offline.reason_text(state, str(st.get("reason_code") or ""))
+
+
+def _line_offline_state_path() -> str:
+    return os.path.join(cfg.DATA_DIR, "line-offline-state.json")
+
+
+def _load_line_offline_state() -> dict[str, dict]:
+    try:
+        with open(_line_offline_state_path(), encoding="utf-8") as handle:
+            return line_offline.restore(json.load(handle))
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_line_offline_state(state: dict) -> None:
+    path = _line_offline_state_path()
+    try:
+        temporary = path + ".tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(state, handle)
+        os.replace(temporary, path)
+    except OSError as exc:
+        log.debug("cannot persist line offline state: %r", exc)
+
+
+def _line_offline_clock(wall: float) -> str:
+    return datetime.fromtimestamp(wall, _local_tz()).strftime("%m-%d %H:%M")
+
+
+async def _check_line_offline(instances: list[dict]) -> None:
+    """Announce lines that stayed offline past the threshold, and their recovery."""
+    try:
+        if hub.line_offline_state is None:
+            hub.line_offline_state = await asyncio.to_thread(_load_line_offline_state)
+        settings = cfg.get_settings()
+        observations = {str(inst["id"]): _line_offline_observation(inst) for inst in instances}
+        went_offline, recovered, changed = line_offline.evaluate(
+            hub.line_offline_state, observations, line_offline.threshold_seconds(settings),
+            time.time(), time.monotonic())
+        if changed:
+            await asyncio.to_thread(_save_line_offline_state,
+                                    line_offline.persistable(hub.line_offline_state))
+        by_id = {str(inst["id"]): inst for inst in instances}
+        for event, entries in ((notify_push.EV_LINE_OFFLINE, went_offline),
+                               (notify_push.EV_LINE_RECOVERED, recovered)):
+            if entries:
+                _announce_line_offline(settings, event, entries, by_id)
+    except Exception as exc:  # noqa - a notification must never stall status sampling
+        log.debug("line offline check failed: %r", exc)
+
+
+def _announce_line_offline(settings: dict, event: str, entries: list[dict],
+                           by_id: dict[str, dict]) -> None:
+    offline = event == notify_push.EV_LINE_OFFLINE
+    for entry in entries:
+        log.warning("line %s %s %.0fs offline", entry["instance"],
+                    "has been" if offline else "recovered after", entry["duration"])
+
+    def describe(entry: dict) -> str:
+        head = (f"已离线 {line_offline.format_duration(entry['duration'])}"
+                f"（自 {_line_offline_clock(entry['since'])} 起）")
+        return f"{head}。\n{entry['reason']}" if offline and entry.get("reason") else f"{head}。"
+
+    if len(entries) == 1:
+        entry = entries[0]
+        inst = by_id.get(entry["instance"]) or {"id": entry["instance"]}
+        tail = ("网关仍在自动重试，恢复后会再通知。" if offline
+                else "线路已重新注册，可以正常收发短信和通话。")
+        text = f"{describe(entry)}\n{tail}"
+        source = inst.get("msisdn") or ""
+        target, match = inst, None
+    else:
+        # Lines that drop together share a cause — the uplink, the exit, the power — and one
+        # message says so better than a burst of identical ones. Feishu bots routed by line
+        # still receive it when any of their lines is among them.
+        names = []
+        for entry in entries:
+            inst = by_id.get(entry["instance"]) or {}
+            name = inst.get("name") or f"线路 {entry['instance']}"
+            names.append(f"• {name}：{describe(entry).replace(chr(10), ' ')}")
+        tail = ("多条线路同时离线，通常是网络、出口或供电问题。网关仍在自动重试。" if offline
+                else "以上线路已重新注册。")
+        text = "\n".join([*names, "", tail])
+        target = {"id": "", "name": f"{len(entries)} 条线路"}
+        source, match = "", [entry["instance"] for entry in entries]
+    asyncio.create_task(asyncio.to_thread(
+        notify_push.dispatch, settings, event, target, source, text, match))
 
 
 HOST_ALERT_POLL_SECONDS = 60.0
@@ -2804,42 +2918,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="MDD Sim Gateway", lifespan=lifespan)
 
-_AUTH_PUBLIC = {"/api/auth/status", "/api/auth/setup", "/api/auth/login"}
-
-
-@app.middleware("http")
-async def require_admin_session(request: Request, call_next):
-    """Protect every management API and require CSRF on state changes.
-
-    The engine callback is authenticated separately with the per-install internal token.
-    Static assets remain public so the browser can render the login screen.
-    """
-    path = request.url.path
-    if not path.startswith("/api/") or path in _AUTH_PUBLIC:
-        return await call_next(request)
-    if path == "/api/engine/event":
-        expected = cfg.internal_event_token()
-        supplied = request.headers.get("x-mdd-engine-token", "")
-        if not expected or not hmac.compare_digest(supplied, expected):
-            return JSONResponse({"detail": "invalid engine token"}, status_code=401)
-        return await call_next(request)
-    current = auth.session(request.cookies.get(auth.SESSION_COOKIE))
-    if not current:
-        return JSONResponse({"detail": "authentication required"}, status_code=401)
-    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
-        supplied = request.headers.get("x-mdd-csrf-token", "")
-        if not hmac.compare_digest(supplied, current["csrf"]):
-            return JSONResponse({"detail": "invalid CSRF token"}, status_code=403)
-    request.state.admin_session = current
-    return await call_next(request)
+# Authentication for every API request and WebSocket handshake; see gate.py.
+app.add_middleware(gate.Gate)
 
 
 @app.get("/api/auth/status")
 def api_auth_status(request: Request):
-    current = auth.session(request.cookies.get(auth.SESSION_COOKIE))
-    return {"configured": auth.configured(), "authenticated": bool(current),
-            "username": auth.username(),
-            "csrf": current.get("csrf") if current else ""}
+    who = gate.current(request)
+    return {"configured": auth.configured(), "authenticated": who.kind == "admin",
+            "username": auth.username(), "csrf": who.csrf}
 
 
 @app.post("/api/auth/setup")
@@ -2907,13 +2994,7 @@ def api_auth_password(body: dict, request: Request):
 
 def _audit_client(request: Request, settings: dict) -> str:
     peer = request.client.host if request.client else ""
-    trusted = (settings.get("security") or {}).get("trusted_proxies") or []
-    try:
-        address = ipaddress.ip_address(peer)
-        allowed = any(address in ipaddress.ip_network(str(item), strict=False) for item in trusted)
-    except ValueError:
-        allowed = False
-    if allowed:
+    if gate.trusted_proxy(peer, settings):
         forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
         try:
             return str(ipaddress.ip_address(forwarded))
@@ -4781,6 +4862,12 @@ def api_put_settings(body: dict):
             raise HTTPException(400, "invalid new-device defaults")
         if any(not isinstance(value, bool) for value in defaults.values()):
             raise HTTPException(400, "new-device defaults must be boolean")
+    if "line_offline_notify_minutes" in body:
+        minutes = body.get("line_offline_notify_minutes")
+        if isinstance(minutes, bool) or not isinstance(minutes, int) \
+                or not line_offline.MIN_MINUTES <= minutes <= line_offline.MAX_MINUTES:
+            raise HTTPException(400, f"offline notification delay must be "
+                                     f"{line_offline.MIN_MINUTES}-{line_offline.MAX_MINUTES} minutes")
     for channel in ("webhook", "telegram", "pushplus"):
         try:
             notify_push.validate_message_templates(body.get(channel) or {})
@@ -5097,7 +5184,7 @@ def api_host_alerts_clear():
 
 @app.get("/api/system/update/check")
 async def api_system_update_check(force: bool = False):
-    """Read-only release lookup. Requires an admin session (see _AUTH_PUBLIC).
+    """Read-only release lookup. Requires an admin session (see gate.PUBLIC_PATHS).
 
     The periodic UI poll uses the short in-process cache; only an explicit "Check for updates"
     click passes force=true, so repeated logins/reloads cannot burn GitHub's unauthenticated
@@ -6797,12 +6884,8 @@ def api_softphone(iid: str, request: Request):
 async def ws_softphone(ws: WebSocket, iid: str):
     """The browser softphone's SIP-over-WebSocket, relayed to the line's engine.
 
-    WebSocket handshakes bypass the HTTP middleware, so the session check is repeated here.
-    The session cookie is SameSite=Strict, so a cross-site page cannot open this socket as the
-    admin. Rejections close before accepting (the browser sees a failed handshake)."""
-    if not auth.session(ws.cookies.get(auth.SESSION_COOKIE)):
-        await ws.close(code=4401)
-        return
+    The session and the page's origin are checked by the gateway middleware before this runs
+    (gate.py). Rejections close before accepting (the browser sees a failed handshake)."""
     inst = cfg.get_instance(iid)
     webrtc = ((inst or {}).get("sip") or {}).get("webrtc") or {}
     if not inst or not webrtc.get("enable", True) or \
@@ -7672,21 +7755,8 @@ async def api_esim_notification_remove(
 # ----------------------------- WebSocket -----------------------------
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
-    # Accept before the application-level close so browsers receive code 4401 instead of
-    # treating the rejected handshake as an opaque HTTP 403 and reconnecting forever.
+    # Signed-out browsers are closed with 4401 by the gateway middleware (gate.py).
     await ws.accept()
-    if not auth.session(ws.cookies.get(auth.SESSION_COOKIE)):
-        if ws.query_params.get("auth_close") == "1":
-            await ws.close(code=4401)
-        else:
-            # A tab loaded before this fix does not understand 4401 and reconnects every two
-            # seconds after any close. Keep that unauthenticated legacy socket out of the hub
-            # but quietly open until the user reloads or closes the tab.
-            try:
-                await ws.receive_text()
-            except Exception:
-                pass
-        return
     hub.clients.add(ws)
     try:
         while True:

@@ -428,7 +428,8 @@ class BrandPrefixTests(unittest.TestCase):
     the event alone does not say which machine is talking."""
 
     EVENTS = ("incoming_sms", "incoming_call", "missed_call", "voicemail_received",
-              "host_alert", "number_changed", "line_unrecoverable", "keepalive_result",
+              "host_alert", "number_changed", "line_unrecoverable", "line_offline",
+              "line_recovered", "keepalive_result",
               "balance_low", "software_update")
 
     def _payload(self, event):

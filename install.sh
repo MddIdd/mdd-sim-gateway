@@ -1158,6 +1158,22 @@ remove_orchestrator() {
 }
 
 # ------------------------------------------------------------------ containerized control plane
+# SWU_TUN_MTU fixes the engines' ipsec0 MTU for a carrier that drops fragments; the control plane
+# hands it to every engine it starts. A native install keeps it in a systemd drop-in, which a
+# reload leaves alone. The docker-mode control container is recreated on every reload, so take
+# the value from the installer's environment, else from the container being replaced: an update
+# must not silently put the engines back on the default. Non-numeric values are ignored.
+control_tun_mtu() {
+  value="${SWU_TUN_MTU:-}"
+  [ -n "$value" ] || value=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' \
+    "$CONTROL_NAME" 2>/dev/null | sed -n 's/^SWU_TUN_MTU=//p' | head -n 1)
+  case "$value" in
+    '') ;;
+    *[!0-9]*) warn "ignoring SWU_TUN_MTU=$value (not a number)" >&2 ;;
+    *) printf '%s' "$value" ;;
+  esac
+}
+
 run_control() {
   install -d -m 0700 "$MDD_DATA_DIR"
   DATA_ABS=$(data_dir_abs)
@@ -1165,6 +1181,7 @@ run_control() {
   [ -z "$LAN_IP" ] && LAN_IP=$(detect_lan_ip)
   [ -z "$LAN_IP" ] && warn "could not auto-detect a LAN IP; set MDD_ADVERTISE_ADDR — SIP/WebRTC audio needs a routable host address"
 
+  TUN_MTU=$(control_tun_mtu)
   if docker inspect "$CONTROL_NAME" >/dev/null 2>&1; then
     docker_container_owned "$CONTROL_NAME" || die "refusing to replace foreign container '$CONTROL_NAME'"
     docker rm -f "$CONTROL_NAME" >/dev/null
@@ -1191,6 +1208,7 @@ run_control() {
     -e MDD_MANAGER_URL="https://host.docker.internal:${MDD_PORT}" \
     -e MDD_ENGINE_IMAGE="${ENGINE_IMAGE}" \
     -e MDD_PCSCD_DIR=/run/pcscd \
+    ${TUN_MTU:+-e SWU_TUN_MTU=$TUN_MTU} \
     -e MDD_SINGBOX_BIN=/usr/local/bin/sing-box \
     -e MDD_XRAY_BIN=/usr/local/bin/xray \
     "$CONTROL_IMAGE"

@@ -9,6 +9,7 @@
 
 - 4G 不在线：检查“设备 → 详情”的 ModemManager 对象、注册、APN 和 bearer；运行设备诊断。
 - VoWiFi 停在部分连接：检查国家出口 UDP 验证、ePDG、SIM 是否开通 Wi‑Fi Calling、PIN 剩余次数及引擎日志。
+- 隧道已连接但 IMS 注册一直无响应（Asterisk 日志 `No response received ... on registration attempt`）：部分运营商会丢弃分片的 SIP 包，把隧道 MTU 调低通常能解决，例如 `SWU_TUN_MTU=1280`，需设在控制面上。原生安装写进 systemd drop-in（`/etc/systemd/system/mdd-sim-gateway-control.service.d/` 下的 `.conf`，内容为 `[Service]` 加 `Environment=SWU_TUN_MTU=1280`），再执行 `systemctl daemon-reload` 并重启控制面；docker 模式执行 `sudo SWU_TUN_MTU=1280 ./install.sh reload`，之后的重新加载和更新会沿用；全容器部署在 Compose 文件中 `control` 的 `environment` 里加上这一项。改动后需重建线路才生效。
 - 服务更新后 VoWiFi 突然停止：确认引擎容器仍存在，并检查控制面日志中是否把虚拟读卡器维护误判为 `card removed`。当前版本会在编排器退出信号到达时立即发布维护标记，并保留 45 秒重建窗口；旧版本应先恢复读卡桥再重新启动线路。
 - 浏览器电话一直未注册：它与 WebUI 同源连接 `/api/instances/<线路>/softphone/ws`。经反向代理访问时确认代理转发了 WebSocket 升级头；控制面日志出现 `refused WebSocket ... from origin` 表示代理改写了 `Host`，需把代理地址加入"可信反向代理"并传递 `X-Forwarded-Host`；直连时确认线路引擎在运行。控制面日志中的 `softphone relay: engine ... unreachable` 表示引擎的 Asterisk 未在网桥地址 8088 上监听，通常是引擎镜像未随本版本刷新。
 - 能振铃但没声音：确认 `MDD_ADVERTISE_ADDR` 是软电话可达的主机地址，并检查 RTP 端口与浏览器麦克风权限。

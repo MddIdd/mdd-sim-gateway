@@ -4297,6 +4297,18 @@ async def _unified_devices() -> list[dict]:
                     cell_actual = "off"
                 elif flight_desired:
                     cell_actual, cell_reason = "off", "Flight mode is enabled"
+                elif host_cell.get("state") == "failed":
+                    # ModemManager gave up on the modem; the orchestrator reboots it when
+                    # that can help. VoWiFi runs through the bridge regardless.
+                    failure = host_cell.get("failure") or {}
+                    cell_actual = "error"
+                    cell_reason = (
+                        "ModemManager could not start this modem. Check the SIM."
+                        if not failure.get("resettable", True) else
+                        "ModemManager could not start this modem, and rebooting it did not "
+                        "help. Reconnect the modem or restart the host."
+                        if failure.get("exhausted") else
+                        "ModemManager could not start this modem. It is being rebooted.")
                 elif radio_on and registered and host_cell.get("data_active"):
                     cell_actual = "on"
                 elif radio_on:

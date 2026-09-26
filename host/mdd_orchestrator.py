@@ -340,6 +340,16 @@ BRIDGE_RETRY_BASE_SECONDS = 15.0
 BRIDGE_RETRY_CEILING_SECONDS = 600.0
 BRIDGE_STABLE_SECONDS = 60.0
 BRIDGE_SETTLE_SECONDS = 5.0
+# ModemManager parks a modem in state "failed" when its initialisation fails, and does not try
+# again on its own. For these reasons the cause is inside the module (seen: QMI clients left
+# behind by a ModemManager restart mid-probe, "unknown-capabilities"), and a module reboot
+# clears it. Other reasons (sim-missing, sim-error, esim-without-profiles) are not fixed by a
+# reboot and are only reported. Each reboot also interrupts that modem's VoWiFi (about a minute
+# and a half on the test gateway until it registered again), so they are spaced out and bounded.
+MM_RESETTABLE_FAILURES = {"unknown-capabilities", "unknown"}
+MM_FAILED_GRACE_SECONDS = 60.0
+MM_RESET_BACKOFF_SECONDS = 300.0
+MM_RESET_ATTEMPTS = 3
 # Grace between publishing "launching" and expecting systemd to report the updater unit as
 # active, so a loop pass that races a launch cannot retire the run it just started.
 UPDATE_LAUNCH_GRACE_SECONDS = 90.0
@@ -661,6 +671,9 @@ class Orchestrator:
         # status document reported every freshly respawned process as a running bridge.
         self._bridge_started: dict[str, float] = {}
         self._bridge_failures: dict[str, dict] = {}
+        # device id -> ModemManager's "failed" verdict on it: reason, since when, and the
+        # module reboots tried. Cleared once ModemManager reports any other state.
+        self._modem_failed: dict[str, dict] = {}
         # Whether this gateway is configured VoWiFi-only (hardware.modem_backend = serial).
         self._serial_mode = False
         # device id -> the exact command its bridge runs, for the support bundle.
@@ -1065,7 +1078,10 @@ class Orchestrator:
             # refused read as an indefinite spinner with no explanation; the reason belongs
             # in the error field instead.
             degraded = self._degraded.get(device_id, "")
-            device_transitioning = bool(transitioning or (not degraded and
+            # A modem ModemManager has failed is a settled outcome as well: its reason is in
+            # the cellular state, and VoWiFi carries on through the bridge.
+            modem_failed = device_id in self._modem_failed
+            device_transitioning = bool(transitioning or (not degraded and not modem_failed and
                 present and (target_data_active != observed_data_active or
                              (backend_active and radio_enabled is not None and
                               bool(wanted.get("flight_mode")) == radio_enabled) or
@@ -1153,15 +1169,7 @@ class Orchestrator:
             if not Path(port).exists():
                 continue
             try:
-                modem = serial.Serial(port, 115200, timeout=.5, write_timeout=2,
-                                      exclusive=True)
-                try:
-                    modem.reset_input_buffer()
-                    modem.write(b"AT+CFUN=1,1\r")
-                    modem.flush()
-                    time.sleep(1)
-                finally:
-                    modem.close()
+                self.reboot_modem(port)
                 reset += 1
             except Exception as exc:
                 errors.append(f"{port}: {exc}")
@@ -1170,6 +1178,65 @@ class Orchestrator:
         if reset:
             # USB serial ports disappear and return after the module reboot.
             time.sleep(12)
+
+    @staticmethod
+    def reboot_modem(port: str) -> None:
+        """Reboot the module behind an AT port (AT+CFUN=1,1). Its USB ports disappear and
+        come back; the caller waits for them."""
+        modem = serial.Serial(port, 115200, timeout=.5, write_timeout=2, exclusive=True)
+        try:
+            modem.reset_input_buffer()
+            modem.write(b"AT+CFUN=1,1\r")
+            modem.flush()
+            time.sleep(1)
+        finally:
+            modem.close()
+
+    def recover_failed_modem(self, modem: dict, reason: str) -> None:
+        """ModemManager gave up on this modem. Reboot the module when that can help, spaced
+        out and at most MM_RESET_ATTEMPTS times; ModemManager probes it afresh when its ports
+        return. Retrying --enable, as before, only repeated "Wrong state" every cycle."""
+        device_id = modem["id"]
+        now = time.time()
+        record = self._modem_failed.setdefault(
+            device_id, {"reason": reason, "since": now, "resets": 0, "last_reset": 0.0})
+        record["reason"] = reason
+        if reason not in MM_RESETTABLE_FAILURES or record["resets"] >= MM_RESET_ATTEMPTS:
+            return
+        if now - record["since"] < MM_FAILED_GRACE_SECONDS:
+            return
+        if record["last_reset"] and \
+                now - record["last_reset"] < MM_RESET_BACKOFF_SECONDS * (2 ** (record["resets"] - 1)):
+            return
+        if serial is None or self.dry_run:
+            return
+        record["resets"] += 1
+        record["last_reset"] = now
+        self.log(f"ModemManager failed {device_id} ({reason}); rebooting the module "
+                 f"(attempt {record['resets']} of {MM_RESET_ATTEMPTS})")
+        try:
+            self.reboot_modem(modem["tty"])
+        except Exception as exc:
+            self.log(f"could not reboot {device_id}: {exc}")
+
+    def forget_absent_modem_failures(self, live_ids: set) -> None:
+        """A module this loop just rebooted is briefly absent; keeping its record is what
+        bounds the reboots. Anything else absent was unplugged, which starts afresh."""
+        now = time.time()
+        self._modem_failed = {device_id: value for device_id, value
+                              in self._modem_failed.items()
+                              if device_id in live_ids or
+                              now - value["last_reset"] < MM_RESET_BACKOFF_SECONDS}
+
+    def modem_failure(self, device_id: str) -> dict:
+        """What the control plane shows for a failed modem; {} when it is not failed."""
+        record = self._modem_failed.get(device_id)
+        if not record:
+            return {}
+        resettable = record["reason"] in MM_RESETTABLE_FAILURES
+        return {"reason": record["reason"], "resettable": resettable,
+                "resets": record["resets"],
+                "exhausted": resettable and record["resets"] >= MM_RESET_ATTEMPTS}
 
     def _bridge_stderr_path(self, hwid: str):
         # Since 1.3.10 this carries the bridge's stdout too: its activity lines used to go
@@ -1509,6 +1576,10 @@ class Orchestrator:
         text = detail.stdout or ""
         power = self._kv(text, "modem.generic.power-state").lower()
         state = self._kv(text, "modem.generic.state").lower()
+        failed_reason = (self._kv(text, "modem.generic.state-failed-reason").lower()
+                         if state == "failed" else "")
+        if failed_reason in {"--", "none"}:
+            failed_reason = "unknown"
         primary = self._kv(text, "modem.generic.primary-port")
         ports = re.findall(r"modem\.generic\.ports\.value\[\d+\]\s*:\s*([^ ]+) \(([^)]+)\)", text)
         network_port = next((name for name, kind in ports if kind == "net"), "")
@@ -1538,7 +1609,7 @@ class Orchestrator:
         snapshot = {
             "available": True, "mm_object": obj, "powered": power == "on",
             "radio_enabled": radio_enabled,
-            "state": state, "registration": registration,
+            "state": state, "failed_reason": failed_reason, "registration": registration,
             "operator": operator,
             "signal": int(signal) if signal.isdigit() else None,
             "primary_port": primary, "network_interface": network_port,
@@ -1896,6 +1967,14 @@ class Orchestrator:
                 if not obj:
                     continue
                 snapshot = self.modem_snapshot(modem)
+                if snapshot.get("state") == "failed":
+                    # Enabling a failed modem only ever answers "Wrong state". Report it
+                    # and recover instead; VoWiFi does not depend on it.
+                    self.recover_failed_modem(modem, snapshot.get("failed_reason") or "unknown")
+                    snapshot["failure"] = self.modem_failure(device_id)
+                    self.cellular_states[device_id] = snapshot
+                    continue
+                self._modem_failed.pop(device_id, None)
                 observed = snapshot.get("radio_enabled") if snapshot.get("available") else None
                 if observed == radio_enabled:
                     self.radio_states[device_id] = radio_enabled
@@ -3028,6 +3107,7 @@ class Orchestrator:
                           if device_id in live_ids}
         self._bridge_failures = {device_id: value for device_id, value
                                  in self._bridge_failures.items() if device_id in live_ids}
+        self.forget_absent_modem_failures(live_ids)
         old = read_json(self.hw_state_path).get("assignments") or {}
         ports = [BASE_VPCD_PORT + i * VPCD_PORT_STRIDE for i in range(VPCD_PORT_SLOTS)]
         # A port saved by a release that started at vpcd's own default is migrated here:

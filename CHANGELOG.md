@@ -14,6 +14,14 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   send `X-Forwarded-Host`. The WebUI shows a banner saying so when it happens. Direct
   access and proxies that keep `Host` (Caddy, Traefik and Cloudflare do) need nothing.
 
+### Fixed
+
+- A modem that ModemManager put in state "failed" (seen as `unknown-capabilities` after
+  ModemManager restarted mid-probe) is no longer asked to enable every cycle and left marked
+  as starting. The orchestrator reboots the module when that can help, after a minute and at
+  most three times, spaced out. The cellular badge says what happened, and VoWiFi, which
+  keeps working through the SIM bridge, is no longer shown as starting.
+
 ### Security
 
 - WebSocket handshakes pass the same authentication as the API, in one middleware, so a socket

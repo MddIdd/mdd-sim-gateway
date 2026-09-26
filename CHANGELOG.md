@@ -6,11 +6,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Upgrade notes
 
-- **The control plane gains one Python package**, `phonenumbers`, which the address book uses
-  to tell two spellings of one number apart from two different numbers. It is a pure-Python
-  Apache-2.0 port of Google's libphonenumber with no dependencies and no native code;
-  `install.sh reload` installs it from a wheel, and a host that reloads offline needs it
-  available first.
+- **The control image gains one Python package**, `phonenumberslite`, which the address book
+  uses to tell two spellings of one number apart from two different numbers. It is the
+  pure-Python Apache-2.0 port of Google's libphonenumber without the geocoding and carrier data
+  (about 5 MB installed instead of 46 MB), with no dependencies and no native code. It comes
+  with the new control image; nothing needs installing on the host.
 
 ### Added
 
@@ -21,8 +21,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   its country exits. A number that only means something where it was dialled, such as a short
   code or a subscriber number with its area code left off, is deliberately left alone: local
   `10000` is not one destination everywhere, and a SIM carries a country but never an area
-  code. Re-importing an export folds into what is already there instead of doubling it, and a
-  contact that cannot be read is reported by name rather than dropped in silence.
+  code. Android's vCard 2.1 (quoted-printable names), iOS, iCloud and Google exports are read
+  as they are written. Re-importing an export folds into what is already there instead of
+  doubling it, while two people sharing a number stay two contacts; a contact that cannot be
+  read is reported by name rather than dropped in silence. A CSV export is safe to open in a
+  spreadsheet.
   Conversations, the call log and the incoming-call overlay show the name instead of the
   number once it is known.
 

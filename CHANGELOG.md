@@ -8,9 +8,10 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 - **Behind a reverse proxy that rewrites `Host` -- nginx does by default -- live updates and
   the softphone stop after this upgrade** until the proxy keeps the host name the browser used.
-  For nginx add `proxy_set_header Host $host;` to the gateway's `location`; for any other proxy,
-  either keep `Host`, or list the proxy under Settings → Security → Trusted reverse proxies and
-  have it send `X-Forwarded-Host`. The WebUI shows a banner saying so when it happens. Direct
+  For nginx add `proxy_set_header Host $http_host;` to the gateway's `location` (not `$host`,
+  which drops a port other than 443 and is refused just the same); for any other proxy, either
+  keep `Host`, or list the proxy under Settings → Security → Trusted reverse proxies and have it
+  send `X-Forwarded-Host`. The WebUI shows a banner saying so when it happens. Direct
   access and proxies that keep `Host` (Caddy, Traefik and Cloudflare do) need nothing.
 
 ### Security

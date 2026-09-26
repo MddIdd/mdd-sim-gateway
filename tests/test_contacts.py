@@ -1,6 +1,7 @@
 """The address book: matching numbers as they actually arrive, and surviving real exports."""
 import asyncio
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -119,11 +120,65 @@ class VCardTests(unittest.TestCase):
         _, problems = contacts.parse_vcard("BEGIN:VCARD\nFN:Cut off\nTEL:" + UK + "\n")
         self.assertTrue(problems)
 
-    def test_quoted_printable_is_refused_rather_than_stored_as_mojibake(self):
-        _, problems = contacts.parse_vcard(
-            "BEGIN:VCARD\nVERSION:2.1\nFN;CHARSET=UTF-8;ENCODING=QUOTED-PRINTABLE:=E5=BC=A0\n"
+    def test_an_android_two_point_one_name_in_quoted_printable_is_decoded(self):
+        # Android's default export: every non-ASCII name is quoted-printable UTF-8, and a long
+        # one is wrapped with a soft break ("=" at the end of the line, no indent).
+        card = ("BEGIN:VCARD\r\nVERSION:2.1\r\n"
+                "N;CHARSET=UTF-8;ENCODING=QUOTED-PRINTABLE:=E5=BC=A0;=E4=B8=89;;;\r\n"
+                "FN;CHARSET=UTF-8;ENCODING=QUOTED-PRINTABLE:=E5=BC=A0=\r\n=E4=B8=89\r\n"
+                "TEL;CELL:" + UK + "\r\nEND:VCARD\r\n")
+        read, problems = contacts.parse_vcard(card)
+        self.assertEqual(problems, [])
+        self.assertEqual(read[0]["name"], "张三")
+        self.assertEqual(read[0]["numbers"][0]["label"], "CELL")
+        # The character set is the one the card declares, and one nobody knows is refused
+        # rather than guessed at.
+        read, _ = contacts.parse_vcard(
+            "BEGIN:VCARD\nVERSION:2.1\nFN;CHARSET=GB2312;QUOTED-PRINTABLE:=D5=C5=C8=FD\n"
             "TEL:" + UK + "\nEND:VCARD\n")
-        self.assertTrue(any("quoted-printable" in p for p in problems))
+        self.assertEqual(read[0]["name"], "张三")
+        read, problems = contacts.parse_vcard(
+            "BEGIN:VCARD\nVERSION:2.1\nFN;CHARSET=X-NONE;ENCODING=QUOTED-PRINTABLE:=D5=C5\n"
+            "TEL:" + UK + "\nEND:VCARD\n")
+        self.assertEqual(read[0]["name"], UK)
+        self.assertIn("character set", problems[0])
+
+    def test_a_byte_order_mark_does_not_hide_the_first_card(self):
+        card = ("\ufeffBEGIN:VCARD\r\nVERSION:3.0\r\nFN:Alice\r\nTEL:" + UK +
+                "\r\nEND:VCARD\r\n")
+        for name in ("contacts.vcf", "contacts"):
+            read, problems = contacts.parse(card, name)
+            self.assertEqual(([c["name"] for c in read], problems), (["Alice"], []), name)
+
+    def test_grouped_properties_are_read_and_their_apple_labels_used(self):
+        # iOS, iCloud and Google: a number in a group, its label in the same group.
+        card = ("BEGIN:VCARD\nVERSION:3.0\nFN:Alice\n"
+                "item1.TEL;type=pref:" + UK + "\nitem1.X-ABLabel:_$!<Mobile>!$_\n"
+                "item2.TEL:" + US + "\nitem2.X-ABLabel:Boat\n"
+                "item3.TEL;type=HOME:+1 555 0101\nEND:VCARD\n")
+        read, problems = contacts.parse_vcard(card)
+        self.assertEqual(problems, [])
+        self.assertEqual([(n["label"], n["number"]) for n in read[0]["numbers"]],
+                         [("Mobile", UK), ("Boat", US), ("HOME", "+1 555 0101")])
+
+    def test_how_a_value_is_written_is_not_taken_for_its_label(self):
+        read, _ = contacts.parse_vcard(
+            "BEGIN:VCARD\nVERSION:4.0\nFN:A\nTEL;VALUE=uri;TYPE=cell:tel:" + UK +
+            "\nTEL;VALUE=uri:tel:" + US + "\nEND:VCARD\n")
+        self.assertEqual([n["label"] for n in read[0]["numbers"]], ["cell", ""])
+
+    def test_escapes_are_undone_in_one_pass(self):
+        read, _ = contacts.parse_vcard(
+            "BEGIN:VCARD\nVERSION:3.0\nFN:A\\\\nB\\, C\\nD\nTEL:" + UK + "\nEND:VCARD\n")
+        self.assertEqual(read[0]["name"], "A\\nB, C\nD")
+
+    def test_a_file_of_nothing_but_continuation_lines_is_read_in_linear_time(self):
+        card = ("BEGIN:VCARD\nVERSION:3.0\nNOTE:x\n" + " y\n" * 1_000_000 +
+                "FN:Alice\nTEL:" + UK + "\nEND:VCARD\n")
+        started = time.monotonic()
+        read, _ = contacts.parse_vcard(card)
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertEqual(read[0]["note"], ("x" + "y" * 1_000_000)[:contacts.NOTE_MAX])
 
     def test_export_and_import_return_the_same_book(self):
         book = [{"name": "Alice; Smith", "company": "Example, Ltd", "note": "line\nbreak",

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import csv
 import io
+import quopri
 import re
 
 import phonenumbers
@@ -123,24 +124,50 @@ def normalize_contact(contact: dict, region: str = "") -> dict:
 
 
 # ----------------------------- vCard -----------------------------
-_VCARD_ESCAPES = (("\\\\", "\\"), ("\\n", "\n"), ("\\N", "\n"), ("\\,", ","), ("\\;", ";"))
+# One pass, so an escaped backslash is never read again as the start of another escape: the
+# three characters \\n in a card are a backslash followed by "n", not a newline.
+_VCARD_ESCAPE = re.compile(r"\\(.)", re.S)
+_VCARD_UNESCAPED = {"n": "\n", "N": "\n"}
+# Apple writes its standard labels as _$!<Mobile>!$_ and a custom one as plain text.
+_APPLE_LABEL = re.compile(r"^_\$!<(.*)>!\$_$")
+# Parameters that describe how a value is written, never what kind of number it is.
+_NOT_A_TYPE = {"VALUE", "CHARSET", "ENCODING", "PREF", "PID", "ALTID", "LANGUAGE"}
+
+
+def _quoted_printable(head: str) -> bool:
+    return "QUOTED-PRINTABLE" in head.upper()
 
 
 def _unfold(text: str) -> list[str]:
-    """Join continuation lines. A vCard wraps long values and continues them with one space."""
-    lines: list[str] = []
+    """Join continuation lines into the logical lines they were cut from.
+
+    A vCard wraps a long value and continues it with one space or tab. A 2.1 value in
+    quoted-printable is different: it is wrapped with a soft break, a "=" at the end of the line,
+    and the next line carries on without an indent -- Android writes a long name exactly so.
+
+    The pieces of each line are collected and joined once. Appending to a string that already
+    sits in a list copies it every time, and a file of nothing but short continuation lines turns
+    that into seconds of work.
+    """
+    lines: list[list[str]] = []
+    soft_break = False
     for raw in str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        if raw[:1] in (" ", "\t") and lines:
-            lines[-1] += raw[1:]
+        if lines and (soft_break or raw[:1] in (" ", "\t")):
+            pieces = lines[-1]
+            if soft_break:
+                pieces[-1] = pieces[-1][:-1]
+                pieces.append(raw)
+            else:
+                pieces.append(raw[1:])
         else:
-            lines.append(raw)
-    return lines
+            lines.append([raw])
+        head = lines[-1][0].partition(":")[0]
+        soft_break = _quoted_printable(head) and raw.endswith("=")
+    return ["".join(pieces) for pieces in lines]
 
 
 def _unescape(value: str) -> str:
-    for encoded, plain in _VCARD_ESCAPES:
-        value = value.replace(encoded, plain)
-    return value
+    return _VCARD_ESCAPE.sub(lambda m: _VCARD_UNESCAPED.get(m.group(1), m.group(1)), value)
 
 
 def _escape(value: str) -> str:
@@ -148,24 +175,56 @@ def _escape(value: str) -> str:
             .replace(",", "\\,").replace(";", "\\;"))
 
 
-def _property(line: str) -> tuple[str, list[str], str] | None:
+def _property(line: str) -> tuple[str, str, list[str], str] | None:
+    """(group, name, parameters, value) of one logical line.
+
+    iOS, iCloud and Google put related properties in a group -- item1.TEL beside
+    item1.X-ABLabel -- and the group is only a tie between them, not part of the name.
+    """
     head, _, value = line.partition(":")
     if not _:
         return None
     parts = head.split(";")
-    return parts[0].strip().upper(), [p.strip() for p in parts[1:]], value
+    group, _, name = parts[0].strip().rpartition(".")
+    return group.upper(), name.upper(), [p.strip() for p in parts[1:]], value
+
+
+def _decode(parameters: list[str], value: str) -> str:
+    """A 2.1 value as text: quoted-printable bytes in the declared character set.
+
+    Android's default export writes every non-ASCII name this way. The character set is the one
+    the card declares -- UTF-8 when it says nothing, as Android does -- and a set Python does not
+    know is refused by the caller rather than guessed at, since a wrong guess stores mojibake
+    under somebody's name.
+    """
+    upper = [p.upper() for p in parameters]
+    if not any(p.startswith("ENCODING=") and "QUOTED-PRINTABLE" in p or p == "QUOTED-PRINTABLE"
+               for p in upper):
+        return value
+    charset = next((p.partition("=")[2].strip('"') for p in parameters
+                    if p.upper().startswith("CHARSET=")), "") or "utf-8"
+    return quopri.decodestring(value.encode("ascii", "replace")).decode(charset, "replace")
 
 
 def _type_label(parameters: list[str]) -> str:
-    """The human label of a TEL property: TYPE=CELL, or the bare TYPE=... of vCard 2.1."""
+    """The human label of a TEL property: TYPE=CELL, or the bare CELL of vCard 2.1."""
     for parameter in parameters:
-        name, _, value = parameter.partition("=")
-        candidate = (value or name).strip().strip('"')
+        name, has_value, value = parameter.partition("=")
+        if has_value and name.strip().upper() in _NOT_A_TYPE:
+            continue
+        candidate = (value if has_value else name).strip().strip('"')
         for word in candidate.split(","):
             word = word.strip()
-            if word.upper() not in ("PREF", "VOICE", "INTERNET", "TEL", "") and not word.isdigit():
+            if (word.upper() not in ("PREF", "VOICE", "INTERNET", "TEL", "QUOTED-PRINTABLE", "")
+                    and not word.isdigit()):
                 return word[:LABEL_MAX]
     return ""
+
+
+def _group_label(value: str) -> str:
+    label = _unescape(value).strip()
+    apple = _APPLE_LABEL.match(label)
+    return (apple.group(1) if apple else label)[:LABEL_MAX]
 
 
 def parse_vcard(text: str) -> tuple[list[dict], list[str]]:
@@ -177,28 +236,29 @@ def parse_vcard(text: str) -> tuple[list[dict], list[str]]:
         parsed = _property(line.strip())
         if not parsed:
             continue
-        name, parameters, value = parsed
+        group, name, parameters, value = parsed
         if name == "BEGIN" and value.strip().upper() == "VCARD":
             current = {"name": "", "formatted": "", "structured": "", "company": "",
-                       "note": "", "numbers": []}
+                       "note": "", "numbers": [], "labels": {}}
             continue
         if current is None:
             continue
         if name == "END" and value.strip().upper() == "VCARD":
+            numbers = [{"label": current["labels"].get(group) or label, "number": number}
+                       for group, label, number in current["numbers"]]
             candidate = {"name": current["formatted"] or current["structured"],
                          "company": current["company"], "note": current["note"],
-                         "numbers": current["numbers"]}
+                         "numbers": numbers}
             try:
                 contacts.append(normalize_contact(candidate))
             except ContactError as exc:
                 problems.append(f"{candidate['name'] or '(unnamed)'}: {exc}")
             current = None
             continue
-        if any(p.upper().startswith("ENCODING=") and "QUOTED-PRINTABLE" in p.upper()
-               for p in parameters):
-            # Only 2.1 exporters emit this, and only for non-ASCII names. Decoding it wrongly
-            # would store mojibake under somebody's name; saying so lets them re-export.
-            problems.append(f"{name}: quoted-printable is not supported; export as vCard 3.0")
+        try:
+            value = _decode(parameters, value)
+        except LookupError:
+            problems.append(f"{name}: unknown character set; export as vCard 3.0")
             continue
         if name == "FN":
             current["formatted"] = _unescape(value).strip()
@@ -214,7 +274,9 @@ def parse_vcard(text: str) -> tuple[list[dict], list[str]]:
             number = _unescape(value).strip()
             if number.lower().startswith("tel:"):
                 number = number[4:]
-            current["numbers"].append({"label": _type_label(parameters), "number": number})
+            current["numbers"].append((group, _type_label(parameters), number))
+        elif name == "X-ABLABEL" and group:
+            current["labels"][group] = _group_label(value)
     if current is not None:
         problems.append("the file ends inside a card (END:VCARD is missing)")
     return contacts, problems
@@ -313,7 +375,8 @@ def to_csv(contacts) -> str:
 
 def parse(text: str, filename: str = "") -> tuple[list[dict], list[str]]:
     """Read whichever of the two formats this is, by content first and name second."""
-    sample = str(text or "").lstrip("﻿").lstrip()
-    if sample[:11].upper().startswith("BEGIN:VCARD") or filename.lower().endswith((".vcf", ".vcard")):
+    # Windows and Outlook start a file with a byte-order mark; left on, it hides the first card.
+    text = str(text or "").lstrip("﻿")
+    if text.lstrip()[:11].upper().startswith("BEGIN:VCARD") or filename.lower().endswith((".vcf", ".vcard")):
         return parse_vcard(text)
     return parse_csv(text)

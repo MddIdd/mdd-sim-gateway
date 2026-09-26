@@ -171,7 +171,10 @@ def _unescape(value: str) -> str:
 
 
 def _escape(value: str) -> str:
-    return (str(value or "").replace("\\", "\\\\").replace("\n", "\\n")
+    # A carriage return ends a line for every reader, so left bare it would end the property and
+    # start another one with whatever followed it.
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    return (text.replace("\\", "\\\\").replace("\n", "\\n")
             .replace(",", "\\,").replace(";", "\\;"))
 
 
@@ -314,6 +317,35 @@ _CSV_ALIASES = {
 }
 
 
+# A spreadsheet reads a cell starting with one of these as a formula, and a formula can reach
+# outside the sheet. OWASP's advice, and what spreadsheet exporters do: a leading apostrophe,
+# which the spreadsheet shows as text and hides.
+_CSV_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+
+
+_PHONE_SPELLING = re.compile(r"^\+[\d\s().\-/]*$")
+
+
+def _csv_text(value) -> str:
+    text = str(value or "")
+    return "'" + text if text.startswith(_CSV_FORMULA_START) else text
+
+
+def _csv_number(value) -> str:
+    """A number is guarded like text unless it is a plain international spelling.
+
+    "+44 7700 900123" has to stay as written, and the worst a spreadsheet makes of it is
+    arithmetic. Anything else after the "+" can be a function call.
+    """
+    text = str(value or "")
+    return text if _PHONE_SPELLING.match(text) else _csv_text(text)
+
+
+def _csv_untext(value: str) -> str:
+    """The cell as written before _csv_text, so an export imports back unchanged."""
+    return value[1:] if value.startswith("'") and value[1:].startswith(_CSV_FORMULA_START) else value
+
+
 def _csv_column_map(header) -> dict[str, int]:
     found: dict[str, int] = {}
     for index, cell in enumerate(header or []):
@@ -342,7 +374,8 @@ def parse_csv(text: str) -> tuple[list[dict], list[str]]:
     for line, row in enumerate(rows[1:], start=2):
         def cell(field):
             index = columns.get(field)
-            return str(row[index]).strip() if index is not None and index < len(row) else ""
+            return (_csv_untext(str(row[index]).strip())
+                    if index is not None and index < len(row) else "")
         number = cell("number")
         if not number:
             continue
@@ -365,15 +398,19 @@ def parse_csv(text: str) -> tuple[list[dict], list[str]]:
 
 
 def to_csv(contacts) -> str:
-    """One row per number, which is what a spreadsheet and every importer expect."""
+    """One row per number, which is what a spreadsheet and every importer expect.
+
+    Every cell is guarded against being read as a formula, except a number spelled
+    internationally, which has to keep its "+" (_csv_number).
+    """
     out = io.StringIO()
     writer = csv.writer(out, lineterminator="\r\n")
     writer.writerow(CSV_COLUMNS)
     for contact in contacts:
         for item in contact.get("numbers") or []:
-            writer.writerow([contact.get("name") or "", item.get("number") or "",
-                             item.get("label") or "", contact.get("company") or "",
-                             contact.get("note") or ""])
+            writer.writerow([_csv_text(contact.get("name")), _csv_number(item.get("number")),
+                             _csv_text(item.get("label")), _csv_text(contact.get("company")),
+                             _csv_text(contact.get("note"))])
     return out.getvalue()
 
 

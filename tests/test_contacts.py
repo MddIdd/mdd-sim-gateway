@@ -1,5 +1,7 @@
 """The address book: matching numbers as they actually arrive, and surviving real exports."""
 import asyncio
+import csv
+import io
 import json
 import tempfile
 import threading
@@ -182,6 +184,14 @@ class VCardTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 3)
         self.assertEqual(read[0]["note"], ("x" + "y" * 1_000_000)[:contacts.NOTE_MAX])
 
+    def test_a_carriage_return_cannot_start_a_property_of_its_own(self):
+        exported = contacts.to_vcard([{"name": "Alice\rTEL:+1 555 0199",
+                                       "numbers": [{"number": UK}]}])
+        self.assertNotIn("\rTEL", exported)
+        read, _ = contacts.parse_vcard(exported)
+        self.assertEqual([n["number"] for n in read[0]["numbers"]], [UK])
+        self.assertEqual(read[0]["name"], "Alice\nTEL:+1 555 0199")
+
     def test_export_and_import_return_the_same_book(self):
         book = [{"name": "Alice; Smith", "company": "Example, Ltd", "note": "line\nbreak",
                  "numbers": [{"label": "CELL", "number": UK}, {"label": "", "number": US}]}]
@@ -214,6 +224,20 @@ class CsvTests(unittest.TestCase):
                  "numbers": [{"label": "cell", "number": UK}]}]
         read, _ = contacts.parse_csv(contacts.to_csv(book))
         self.assertEqual(read[0]["numbers"], [{"label": "cell", "number": UK}])
+
+    def test_an_export_cannot_carry_a_formula_into_a_spreadsheet(self):
+        book = [{"name": "=HYPERLINK(\"http://example.invalid\")", "company": "@SUM(A1)",
+                 "note": "-2+3", "numbers": [{"label": "+cell", "number": UK},
+                                              {"label": "", "number": "=1+2 555"}]}]
+        rows = list(csv.reader(io.StringIO(contacts.to_csv(book))))[1:]
+        self.assertEqual(rows[0], ["'=HYPERLINK(\"http://example.invalid\")", UK, "'+cell",
+                                   "'@SUM(A1)", "'-2+3"])
+        self.assertEqual(rows[1][1], "'=1+2 555")
+        # And it reads back as it was written.
+        read, _ = contacts.parse_csv(contacts.to_csv(book))
+        self.assertEqual((read[0]["name"], read[0]["company"], read[0]["note"]),
+                         (book[0]["name"], "@SUM(A1)", "-2+3"))
+        self.assertEqual(read[0]["numbers"], book[0]["numbers"])
 
     def test_the_format_is_chosen_by_content_not_by_the_file_name(self):
         card = "BEGIN:VCARD\nVERSION:3.0\nFN:Alice\nTEL:" + UK + "\nEND:VCARD\n"

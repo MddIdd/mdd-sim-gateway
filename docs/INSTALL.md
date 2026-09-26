@@ -60,11 +60,13 @@ Docker 的保守 dangling-only 清理；“清理旧版与回滚镜像”是显�
 浏览器电话与 WebUI 同源：信令走 `wss://主机地址:8443/api/instances/<线路>/softphone/ws`，由控制面经 Docker 网桥转发到对应线路的引擎，引擎不向主机发布信令端口，也不需要单独信任证书。放在反向代理之后时，只需让 WebUI 地址本身转发 WebSocket 升级（`Upgrade`/`Connection` 头），无需为软电话另开路径或端口。控制面只接受来自自身页面的 WebSocket（`Origin` 必须与浏览器访问的主机一致）：代理保留 `Host` 头时无需任何设置；代理把 `Host` 改成内网地址时，需在设置里把代理地址填入"可信反向代理"，并由代理传递 `X-Forwarded-Host`。nginx 默认会改写 `Host`，在网关的 `location` 里加上下面几行即可：
 
 ```nginx
-proxy_set_header Host $host;
+proxy_set_header Host $http_host;
 proxy_http_version 1.1;
 proxy_set_header Upgrade $http_upgrade;
 proxy_set_header Connection "upgrade";
 ```
+
+用 `$http_host` 而不是 `$host`：`$host` 不带端口，代理监听 443 以外的端口时同样会被拒绝。
 
 不符合时，WebUI 顶部会出现"实时更新和软电话已停用"的提示，控制面日志记录 `refused WebSocket ... from origin`。通话音频仍使用各线路的 RTP 端口。
 

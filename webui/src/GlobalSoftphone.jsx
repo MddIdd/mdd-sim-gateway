@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api.js'
-import { Softphone as Phone, microphoneMessage } from './softphone.js'
+import { Softphone as Phone, microphoneMessage, RELAY_UNAVAILABLE, RELAY_UNREACHABLE } from './softphone.js'
 import { useI18n } from './i18n.jsx'
 
 const GREEN = '#22c55e'
@@ -77,9 +77,13 @@ export default function GlobalSoftphone({ instances, excludedId, showToast }) {
             showToast?.(t(microphoneMessage(data)))
           } else if (type === 'audioblocked') {
             showToast?.(t('Browser blocked call audio. Click the page once and try again.'))
+          } else if (type === 'relayunavailable') {
+            showToast?.(t(RELAY_UNAVAILABLE))
+          } else if (type === 'relayunreachable') {
+            showToast?.(t(RELAY_UNREACHABLE))
           }
         }
-        phone = new Phone(onEvent, null)
+        phone = new Phone(onEvent, null, () => api.softphone(id))
         if (!phone.start(prov, prov.host || location.hostname)) return
         phones.current.set(id, phone)
       }).catch(() => {})

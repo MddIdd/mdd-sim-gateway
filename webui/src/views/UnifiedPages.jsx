@@ -241,6 +241,30 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
   </div>
 }
 
+// How call media reaches the lines. Shown only: switching rebuilds every line, publishes or
+// withdraws host ports and starts or removes the relay, so it is the installer's job
+// (install.sh media relay | direct).
+function MediaModePanel() {
+  const { t } = useI18n()
+  const [media, setMedia] = useState(null)
+  useEffect(() => {
+    let alive = true
+    api.media().then((value) => { if (alive) setMedia(value) }).catch(() => {})
+    return () => { alive = false }
+  }, [])
+  if (!media) return null
+  const relay = media.mode === 'relay'
+  const ready = media.relay?.state === 'ready'
+  return <div className="u-form-grid"><div>
+    <label>{t('Call media')}</label>
+    <p>
+      {relay ? t('Media relay, port {port}', { port: media.public_port || media.port }) : t('Direct (each line publishes its RTP ports)')}
+      {relay && <> · <Badge state={ready ? 'on' : 'error'}>{ready ? t('Relay ready') : t('Relay unavailable')}</Badge></>}
+    </p>
+    <p className="u-note">{t('Switch with install.sh media relay or install.sh media direct on the gateway host.')}</p>
+  </div></div>
+}
+
 function deviceTitle(d, index) { return d.name || d.label || d.model || `Device ${index + 1}` }
 function simName(d, t) {
   if (d.present === false) return t('Device not connected')
@@ -1042,7 +1066,7 @@ export function SystemPage({ showToast, openUpdateDialog }) {
       setS({ ...s, hardware: { ...s.hardware, modem_backend: serial ? 'serial' : 'auto' } })
     }} />{t('VoWiFi-only mode (do not run ModemManager)')}</label><p className="u-hint">{t('serialModeHint')}</p></>}
     {tab === 'web' && <><h2>{t('Web access')}</h2><label><input type="checkbox" className="u-toggle" checked={!!s.tls?.self_signed} onChange={e => setS({ ...s, tls: { ...s.tls, self_signed: e.target.checked } })} />{t('Use self-signed certificate')}</label><div className="u-form-grid"><div><label>{t('Bind address')}</label><input value={s.bind || ''} onChange={e => setS({ ...s, bind: e.target.value })} /></div><div><label>{t('HTTPS port')}</label><input type="number" value={s.http_port || 8443} onChange={e => setS({ ...s, http_port: +e.target.value })} /></div><div><label>{t('Domain')}</label><input value={s.tls?.domain || ''} onChange={e => setS({ ...s, tls: { ...s.tls, domain: e.target.value } })} /></div><div><label>{t('Certificate path')}</label><input value={s.tls?.cert_path || ''} onChange={e => setS({ ...s, tls: { ...s.tls, cert_path: e.target.value } })} /></div><div><label>{t('Private key path')}</label><input value={s.tls?.key_path || ''} onChange={e => setS({ ...s, tls: { ...s.tls, key_path: e.target.value } })} /></div></div></>}
-    {tab === 'voice' && <><h2>{t('Calls & VoWiFi')}</h2><div className="u-form-grid"><div><label>{t('Ring timeout (seconds)')}</label><input type="number" value={s.ring_timeout ?? 35} onChange={e => setS({ ...s, ring_timeout: +e.target.value })} /></div><div><label>{t('Max retries')}</label><input type="number" value={s.retry?.max ?? 3} onChange={e => setS({ ...s, retry: { ...s.retry, max: +e.target.value } })} /></div><div><label>{t('Seconds per attempt')}</label><input type="number" value={s.retry?.interval ?? 30} onChange={e => setS({ ...s, retry: { ...s.retry, interval: +e.target.value } })} /></div><div><label>{t('Data channel rekey interval (minutes, 0 = not initiated by the gateway)')}</label><input type="number" value={s.rekey?.minutes ?? 30} onChange={e => setS({ ...s, rekey: { ...s.rekey, minutes: +e.target.value } })} /></div><div><label>{t('Control channel rekey interval (minutes, 0 = off)')}</label><input type="number" value={s.rekey?.ike_minutes ?? 150} onChange={e => setS({ ...s, rekey: { ...s.rekey, ike_minutes: +e.target.value } })} /></div></div>
+    {tab === 'voice' && <><h2>{t('Calls & VoWiFi')}</h2><MediaModePanel /><div className="u-form-grid"><div><label>{t('Ring timeout (seconds)')}</label><input type="number" value={s.ring_timeout ?? 35} onChange={e => setS({ ...s, ring_timeout: +e.target.value })} /></div><div><label>{t('Max retries')}</label><input type="number" value={s.retry?.max ?? 3} onChange={e => setS({ ...s, retry: { ...s.retry, max: +e.target.value } })} /></div><div><label>{t('Seconds per attempt')}</label><input type="number" value={s.retry?.interval ?? 30} onChange={e => setS({ ...s, retry: { ...s.retry, interval: +e.target.value } })} /></div><div><label>{t('Data channel rekey interval (minutes, 0 = not initiated by the gateway)')}</label><input type="number" value={s.rekey?.minutes ?? 30} onChange={e => setS({ ...s, rekey: { ...s.rekey, minutes: +e.target.value } })} /></div><div><label>{t('Control channel rekey interval (minutes, 0 = off)')}</label><input type="number" value={s.rekey?.ike_minutes ?? 150} onChange={e => setS({ ...s, rekey: { ...s.rekey, ike_minutes: +e.target.value } })} /></div></div>
       <p className="u-hint" style={{ margin: '4px 0 0' }}>{t('Some carriers silently expire a VoWiFi session on a fixed clock (observed: ~2h50m). The control channel (IKE) rekey renews the session before that clock fires; keep it below the shortest carrier interval. 0 disables it.')}</p>
       <h3 style={{ marginBottom: 4 }}>{t('Voicemail')}</h3>
       <p className="u-hint" style={{ margin: '0 0 8px' }}>{t('Record a message when an incoming call goes unanswered — including when no browser is open. Recordings stay on the gateway and are played from the call log.')}</p>

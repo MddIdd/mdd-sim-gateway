@@ -317,6 +317,10 @@ EXIT_RANK_WARMUP_SECONDS = float(os.environ.get("MDD_EXIT_RANK_WARMUP", "25"))
 # state that had not changed. When a cycle finds nothing to do the loop backs off, while still
 # waking on the base interval to stat the input documents so an operator action is never
 # delayed by more than one base tick.
+# sing-tun makes every tun it creates the host's catch-all resolver whenever resolvectl is
+# present (see release_tun_dns). It does so once, shortly after start; this bounds how long
+# the orchestrator keeps looking for that registration after sing-box (re)starts.
+TUN_DNS_WATCH_SECONDS = float(os.environ.get("MDD_TUN_DNS_WATCH", "60"))
 IDLE_INTERVAL_SECONDS = float(os.environ.get("MDD_IDLE_INTERVAL", "15"))
 # A modem is plugged in so its SIM can be read; cellular data is a per-device capability, not
 # the box's route to the internet. Set this when the modem genuinely IS the only uplink.
@@ -558,6 +562,8 @@ class Orchestrator:
         # When sing-box last (re)started; measurements before it settles are cold-start
         # numbers, not node quality.
         self.singbox_started_at = 0.0
+        # Country tuns whose systemd-resolved registration has not been undone yet.
+        self.tun_dns_pending: set[str] = set()
         self.exit_node_history = self.root / "exit-node-history.jsonl"
         self.reselect_path = self.root / "exit-reselect.json"
         self.reselect_handled_path = self.root / "exit-reselect-handled.json"
@@ -2567,6 +2573,11 @@ class Orchestrator:
             except subprocess.TimeoutExpired: old.kill(); old.wait()
         os.replace(candidate, self.generated)
         self.singbox = subprocess.Popen([binary, "run", "-c", str(self.generated)])
+        # The restore path below relaunches the previous config, whose tuns register the same
+        # way; the union covers whichever of the two ends up running.
+        self.tun_dns_pending |= {str(item.get("interface_name"))
+                                 for item in config.get("inbounds") or []
+                                 if item.get("type") == "tun" and item.get("interface_name")}
         time.sleep(0.8)
         if self.singbox.poll() is not None:
             # Restore and restart the last checked/running config. Routes are kept only after
@@ -2579,6 +2590,36 @@ class Orchestrator:
             raise RuntimeError("sing-box exited during startup")
         self.last_proxy_fingerprint = fingerprint
         self.last_proxy_config = deepcopy(config)
+
+    def release_tun_dns(self):
+        """Take the country tuns back out of the host's DNS.
+
+        sing-tun runs ``resolvectl domain <tun> ~.``, ``default-route <tun> true`` and
+        ``dns <tun> <address+1>`` on every tun it brings up, whether or not auto_route is set,
+        and sing-box exposes no option to stop it. On a host resolving through
+        systemd-resolved (Ubuntu desktop and server) that makes the tun the resolver for every
+        name, and nothing answers there: the exits only carry routed ePDG addresses, so the
+        whole host lost DNS the moment an exit was enabled (Discussion #104). Hosts without
+        resolvectl, such as Raspberry Pi OS, never received the registration.
+
+        The registration is made once, asynchronously, shortly after start, so it is looked
+        for on each pass for a bounded time and reverted as soon as it appears.
+        """
+        if self.dry_run or not self.tun_dns_pending:
+            return
+        ctl = shutil.which("resolvectl")
+        if not ctl:
+            self.tun_dns_pending.clear()
+            return
+        for iface in sorted(self.tun_dns_pending):
+            shown = run([ctl, "domain", iface])
+            if shown.returncode == 0 and "~." in shown.stdout.split():
+                run([ctl, "revert", iface])
+                self.tun_dns_pending.discard(iface)
+                self.log(f"removed {iface} from the host DNS configuration "
+                         "(sing-box registers every tun as the catch-all resolver)")
+        if time.time() - self.singbox_started_at > TUN_DNS_WATCH_SECONDS:
+            self.tun_dns_pending.clear()
 
     def apply_xray(self, config: dict | None):
         if not config:
@@ -2701,7 +2742,10 @@ class Orchestrator:
                             exits_state[country] = {**exits_state[country], "ready": False,
                                                     "error": f"Xray is unavailable: {exc}"}
                     self.log(f"Xray failed; {len(self._xray_countries)} exit(s) affected: {exc}")
-                self.apply_singbox(config)
+                try:
+                    self.apply_singbox(config)
+                finally:
+                    self.release_tun_dns()
             else:
                 self.apply_xray(None)
             # Ranking must come first: update_selected_nodes then reports the node this cycle

@@ -13,10 +13,14 @@ const MMS_SMIL_TYPE = 'application/smil'
 // applies (or the wait is worth explaining). 'retrieved' has full parts and needs neither.
 const MMS_PENDING_STATES = new Set(['notified', 'downloading', 'failed', 'expired'])
 
-export default function Messages({ selected, subscribe, showToast, instances, cards, devices, setSelected, initialLoading, loadErrors }) {
+export default function Messages({ selected, subscribe, showToast, instances, cards, devices, setSelected, initialLoading, loadErrors, refreshUnread }) {
   const { t: tr } = useI18n()
   const id = selected?.id
   const [threads, setThreads] = useState([])
+  // Unread counts per conversation, from the gateway: "read" is something the reader did, and
+  // the browser cannot work it out on its own -- it would have to have seen every message that
+  // ever arrived, on every device.
+  const [unread, setUnread] = useState({})
   const [threadsLoading, setThreadsLoading] = useState(false)
   const [peer, setPeer] = useState(null)
   // One request for the whole conversation list, not one per row.
@@ -52,6 +56,9 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
   // The list's scrollTop at the last scroll event, to tell the reader scrolling up from
   // everything else that fires a scroll event.
   const lastScrollTop = useRef(0)
+  // Read inside the peer effect, which must not re-run when a count changes.
+  const unreadRef = useRef(unread)
+  unreadRef.current = unread
   activeId.current = id
   activePeer.current = peer
   attachmentsRef.current = attachments
@@ -72,8 +79,12 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
     const request = ++threadsRequest.current
     if (showLoading) setThreadsLoading(true)
     try {
-      const r = await api.threads(id)
-      if (request === threadsRequest.current && activeId.current === id) setThreads(r.threads)
+      const [r, counts] = await Promise.all([api.threads(id), api.unreadMessages(id).catch(() => null)])
+      if (request === threadsRequest.current && activeId.current === id) {
+        setThreads(r.threads)
+        // An older control plane has no unread endpoint; the list still works without it.
+        if (counts) setUnread(counts.unread || {})
+      }
     } catch {}
     finally {
       if (request === threadsRequest.current && activeId.current === id) setThreadsLoading(false)
@@ -208,7 +219,13 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
     ++messagesRequest.current
     setMsgs([])
     setMessagesLoading(Boolean(peer))
-    if (peer) loadMsgs(peer, true)
+    if (peer) {
+      loadMsgs(peer, true)
+      if (unreadRef.current[peer]) {
+        setUnread((current) => { const next = { ...current }; delete next[peer]; return next })
+        api.markThreadRead(id, { peer }).then(() => refreshUnread?.()).catch(() => {})
+      }
+    }
   }, [peer, loadMsgs])
   // Open every conversation at its newest message, and keep following it as messages
   // arrive or MMS thumbnails finish loading (which grows the list after the first paint).
@@ -248,11 +265,22 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
   useEffect(() => { if (!msgs.length) { setSelMode(false); setSelIds(new Set()) } }, [msgs.length])
   useEffect(() => subscribe((msg) => {
     if (msg.type === 'sms' && msg.instance === id) {
-      loadThreads()
+      // A message arriving in the conversation on screen is read as it arrives; counting it as
+      // unread would badge something the reader is looking at.
+      const onScreen = peer && msg.message?.direction === 'in' && msg.message?.peer === peer
+      const marked = onScreen ? api.markThreadRead(id, { peer }).catch(() => {}) : Promise.resolve()
+      marked.then(() => { loadThreads(); if (onScreen) refreshUnread?.() })
       loadBinary()
       if (peer) loadMsgs(peer)
     }
-  }), [subscribe, id, peer, loadThreads, loadMsgs, loadBinary])
+  }), [subscribe, id, peer, loadThreads, loadMsgs, loadBinary, refreshUnread])
+
+  const markAllRead = async () => {
+    setUnread({})
+    try { await api.markThreadRead(id, { all: true }) } catch {}
+    loadThreads()
+    refreshUnread?.()
+  }
 
   const sendMms = async (to) => {
     const forId = id
@@ -425,6 +453,9 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
             onClick={clearAll}>{tr('Clear all conversations')}</button>}
         <button className="btn btn-ghost" style={{ width: '100%', marginBottom: 10, fontSize: 12 }}
           onClick={() => setShowMmsSettings(true)}>{tr('MMS settings')}</button>
+        {Object.keys(unread).length > 0 &&
+          <button className="btn btn-ghost" style={{ width: '100%', marginBottom: 10, fontSize: 12 }}
+            onClick={markAllRead}>{tr('Mark all read')}</button>}
         {threads.map((t) => (
           // The row is a button, not a div that happens to listen for clicks: a touch device
           // delivers a click to an element that is actually interactive, and a keyboard can
@@ -438,6 +469,7 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
                 {t.last_kind === 'mms' ? `[${tr('MMS')}]${t.last_body ? ' ' + t.last_body : ''}` : t.last_body}
               </span>
             </button>
+            {!!unread[t.peer] && <span className="u-thread-unread" aria-label={tr('{count} unread', { count: unread[t.peer] })}>{unread[t.peer]}</span>}
             <button className="row-del" title="Delete conversation" aria-label={`Delete conversation with ${t.peer}`}
               onClick={(e) => deleteThread(t.peer, e)}>🗑</button>
           </div>

@@ -399,6 +399,7 @@ label:has(>.u-toggle) { display:flex; align-items:center; gap:10px; min-height:3
  .u-messages-split:not(.in-conversation) .u-messages-thread { display:none; }
  .u-messages-back { display:inline-flex; }
 }
+.u-thread-unread { flex:0 0 auto; min-width:20px; height:20px; padding:0 6px; border-radius:10px; background:var(--primary); color:#fff; font-size:11px; font-weight:700; display:grid; place-items:center; }
 @media(max-width:560px){
  .u-main>header p { display:none; }.u-content { padding:12px; }.u-metrics,.u-device-grid,.u-form-grid,.u-details.cols,.u-notifications-page>.u-tabs+.u-device-grid { grid-template-columns:1fr; }.u-section-title { align-items:stretch; flex-direction:column; }.u-add-exit { flex:0; width:100%; }.u-country-picker { min-width:0; }.u-capability { align-items:flex-start; }.u-cap-actions { flex-direction:column; align-items:flex-end; }.u-card-foot { justify-content:stretch; }.u-card-foot .btn { flex:1; padding-left:6px; padding-right:6px; }.u-hardware-action,.u-hardware-danger,.u-line-delete,.u-saved-lines { grid-template-columns:1fr; align-items:stretch; }.u-hardware-action .btn,.u-line-delete .btn { justify-self:start; }.u-toast { top:12px; width:calc(100vw - 24px); max-width:none; }.u-update-note { align-items:stretch; flex-direction:column; }.u-update-note .btn { align-self:flex-start; }.u-modal-actions .btn { flex:1 1 auto; }
  .u-proxy-toolbar { justify-content:space-between; }.u-icon-button span { display:none; }.u-proxy-type-grid { grid-template-columns:1fr; }.u-proxy-type { min-height:82px; }.u-proxy-modal { padding:17px; }
@@ -416,3 +417,4 @@ label:has(>.u-toggle) { display:flex; align-items:center; gap:10px; min-height:3
 .u-sidebar nav button .u-nav-dot { margin-left:auto; }
 .u-nav-dot.warning { background:#d97706; }
 .u-nav-dot.critical { background:#dc2626; }
+.u-nav-count { flex:none; margin-left:auto; min-width:18px; height:18px; padding:0 5px; border-radius:9px; background:var(--primary); color:#fff; font-size:11px; font-weight:700; display:grid; place-items:center; }

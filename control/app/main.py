@@ -5992,6 +5992,49 @@ def api_threads(iid: str):
     return {"threads": store.list_threads(iid)}
 
 
+# Declared before /messages/{peer}: a path parameter would otherwise swallow "unread" and
+# answer with the conversation with somebody called that.
+@app.get("/api/instances/{iid}/messages/unread")
+async def api_messages_unread(iid: str, request: Request):
+    """Which conversations on this line have not been read, and how many messages each."""
+    owner = _owner(request)
+    counts = await asyncio.to_thread(store.unread_counts, owner, str(iid))
+    return {"unread": counts, "total": sum(counts.values())}
+
+
+@app.post("/api/instances/{iid}/messages/read")
+async def api_messages_read(iid: str, body: dict, request: Request):
+    """Mark one conversation read, or the whole line.
+
+    A client's first run marks the line read: an upgrade must not present years of history as
+    unread. Afterwards it marks each conversation as the person opens it.
+    """
+    owner = _owner(request)
+    message_id = body.get("message_id")
+    if message_id is not None:
+        try:
+            message_id = int(message_id)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "message_id must be a message id") from None
+    if body.get("all"):
+        position = await asyncio.to_thread(store.mark_line_read, owner, str(iid), message_id)
+        return {"ok": True, "line": str(iid), "last_read_id": position}
+    peer = str(body.get("peer") or "").strip()
+    if not peer:
+        raise HTTPException(400, "provide peer or all")
+    position = await asyncio.to_thread(store.mark_thread_read, owner, str(iid), peer,
+                                       message_id)
+    return {"ok": True, "peer": peer, "last_read_id": position}
+
+
+@app.get("/api/messages/unread")
+async def api_messages_unread_total(request: Request):
+    """One number for a badge, across every line."""
+    owner = _owner(request)
+    lines = [str(inst.get("id")) for inst in cfg.list_instances()]
+    return {"total": await asyncio.to_thread(store.unread_total, owner, lines), "lines": lines}
+
+
 @app.get("/api/instances/{iid}/messages/binary")
 def api_binary_sms(iid: str, limit: int = 200):
     """Non-text payloads received on this line: binary/SIM-addressed SMS that are kept out of

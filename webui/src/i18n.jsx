@@ -4,6 +4,7 @@ const STORAGE_KEY = 'mdd-language'
 
 const zh = {
   'Back to conversations': '返回会话列表',
+  '{count} unread': '{count} 条未读', 'Mark all read': '全部标为已读',
   Contacts: '通讯录', 'Add contact': '添加联系人', 'Contact added': '联系人已添加', 'Contact removed': '联系人已删除',
   'Search by name, company or number': '按姓名、公司或号码搜索', Company: '公司', Numbers: '号码', Note: '备注',
   'Label (mobile, work…)': '标签（手机、工作…）', 'Add a number': '添加号码',

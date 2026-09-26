@@ -17,7 +17,6 @@ class _Browser:
     enough to exercise directly."""
 
     def __init__(self, subprotocols=("sip",)):
-        self.cookies = {main.auth.SESSION_COOKIE: "token"}
         self.headers = {"sec-websocket-protocol": ", ".join(subprotocols)} if subprotocols else {}
         self.accepted = None
         self.close_code = None
@@ -65,11 +64,10 @@ class SoftphoneRelayTests(unittest.IsolatedAsyncioTestCase):
         self.server.close()
         await self.server.wait_closed()
 
-    def patched(self, *, session=True, instance=None, runtime=None, port=None):
+    def patched(self, *, instance=None, runtime=None, port=None):
         instance = {"id": "sim1", "sip": {"webrtc": {"enable": True}}} if instance is None else instance
         runtime = runtime or {"running": True, "ip": "127.0.0.1", "container_id": "c1"}
         for p in (
-            patch.object(main.auth, "session", return_value={"csrf": "x"} if session else None),
             patch.object(main.cfg, "get_instance", return_value=instance),
             patch.object(main.engine, "container_runtime", return_value=runtime),
             patch.object(softphone_ws, "ENGINE_WS_PORT", self.port if port is None else port),
@@ -98,9 +96,6 @@ class SoftphoneRelayTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(main.ws_softphone(browser, "sim1"), 10)
         self.assertIsNone(browser.accepted)
         return browser.close_code
-
-    async def test_signed_out_browser_is_refused(self):
-        self.assertEqual(await self.refused(session=False), 4401)
 
     async def test_unknown_line_disabled_softphone_or_missing_subprotocol_is_refused(self):
         cases = [

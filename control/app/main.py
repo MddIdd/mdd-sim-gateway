@@ -12,7 +12,6 @@ import asyncio
 import base64
 import glob
 import hashlib
-import hmac
 import ipaddress
 import json
 import logging
@@ -34,7 +33,8 @@ from . import config as cfg
 from . import (store, engine, status as status_mod, sim, card, notify_push, lpa, auth,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
                sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd, mms,
-               mms_media, mms_transport, softphone_ws, modem_ims, vowifi_support, modem_voice)
+               mms_media, mms_transport, softphone_ws, modem_ims, vowifi_support, modem_voice,
+               gate)
 from .version import VERSION
 from .ami import AmiClient
 from .runtime import RuntimeRegistry
@@ -2804,42 +2804,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="MDD Sim Gateway", lifespan=lifespan)
 
-_AUTH_PUBLIC = {"/api/auth/status", "/api/auth/setup", "/api/auth/login"}
-
-
-@app.middleware("http")
-async def require_admin_session(request: Request, call_next):
-    """Protect every management API and require CSRF on state changes.
-
-    The engine callback is authenticated separately with the per-install internal token.
-    Static assets remain public so the browser can render the login screen.
-    """
-    path = request.url.path
-    if not path.startswith("/api/") or path in _AUTH_PUBLIC:
-        return await call_next(request)
-    if path == "/api/engine/event":
-        expected = cfg.internal_event_token()
-        supplied = request.headers.get("x-mdd-engine-token", "")
-        if not expected or not hmac.compare_digest(supplied, expected):
-            return JSONResponse({"detail": "invalid engine token"}, status_code=401)
-        return await call_next(request)
-    current = auth.session(request.cookies.get(auth.SESSION_COOKIE))
-    if not current:
-        return JSONResponse({"detail": "authentication required"}, status_code=401)
-    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
-        supplied = request.headers.get("x-mdd-csrf-token", "")
-        if not hmac.compare_digest(supplied, current["csrf"]):
-            return JSONResponse({"detail": "invalid CSRF token"}, status_code=403)
-    request.state.admin_session = current
-    return await call_next(request)
+# Authentication for every API request and WebSocket handshake; see gate.py.
+app.add_middleware(gate.Gate)
 
 
 @app.get("/api/auth/status")
 def api_auth_status(request: Request):
-    current = auth.session(request.cookies.get(auth.SESSION_COOKIE))
-    return {"configured": auth.configured(), "authenticated": bool(current),
-            "username": auth.username(),
-            "csrf": current.get("csrf") if current else ""}
+    who = gate.current(request)
+    return {"configured": auth.configured(), "authenticated": who.kind == "admin",
+            "username": auth.username(), "csrf": who.csrf}
 
 
 @app.post("/api/auth/setup")
@@ -2907,13 +2880,7 @@ def api_auth_password(body: dict, request: Request):
 
 def _audit_client(request: Request, settings: dict) -> str:
     peer = request.client.host if request.client else ""
-    trusted = (settings.get("security") or {}).get("trusted_proxies") or []
-    try:
-        address = ipaddress.ip_address(peer)
-        allowed = any(address in ipaddress.ip_network(str(item), strict=False) for item in trusted)
-    except ValueError:
-        allowed = False
-    if allowed:
+    if gate.trusted_proxy(peer, settings):
         forwarded = request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
         try:
             return str(ipaddress.ip_address(forwarded))
@@ -5097,7 +5064,7 @@ def api_host_alerts_clear():
 
 @app.get("/api/system/update/check")
 async def api_system_update_check(force: bool = False):
-    """Read-only release lookup. Requires an admin session (see _AUTH_PUBLIC).
+    """Read-only release lookup. Requires an admin session (see gate.PUBLIC_PATHS).
 
     The periodic UI poll uses the short in-process cache; only an explicit "Check for updates"
     click passes force=true, so repeated logins/reloads cannot burn GitHub's unauthenticated
@@ -6797,12 +6764,8 @@ def api_softphone(iid: str, request: Request):
 async def ws_softphone(ws: WebSocket, iid: str):
     """The browser softphone's SIP-over-WebSocket, relayed to the line's engine.
 
-    WebSocket handshakes bypass the HTTP middleware, so the session check is repeated here.
-    The session cookie is SameSite=Strict, so a cross-site page cannot open this socket as the
-    admin. Rejections close before accepting (the browser sees a failed handshake)."""
-    if not auth.session(ws.cookies.get(auth.SESSION_COOKIE)):
-        await ws.close(code=4401)
-        return
+    The session and the page's origin are checked by the gateway middleware before this runs
+    (gate.py). Rejections close before accepting (the browser sees a failed handshake)."""
     inst = cfg.get_instance(iid)
     webrtc = ((inst or {}).get("sip") or {}).get("webrtc") or {}
     if not inst or not webrtc.get("enable", True) or \
@@ -7672,21 +7635,8 @@ async def api_esim_notification_remove(
 # ----------------------------- WebSocket -----------------------------
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
-    # Accept before the application-level close so browsers receive code 4401 instead of
-    # treating the rejected handshake as an opaque HTTP 403 and reconnecting forever.
+    # Signed-out browsers are closed with 4401 by the gateway middleware (gate.py).
     await ws.accept()
-    if not auth.session(ws.cookies.get(auth.SESSION_COOKIE)):
-        if ws.query_params.get("auth_close") == "1":
-            await ws.close(code=4401)
-        else:
-            # A tab loaded before this fix does not understand 4401 and reconnects every two
-            # seconds after any close. Keep that unauthenticated legacy socket out of the hub
-            # but quietly open until the user reloads or closes the tab.
-            try:
-                await ws.receive_text()
-            except Exception:
-                pass
-        return
     hub.clients.add(ws)
     try:
         while True:

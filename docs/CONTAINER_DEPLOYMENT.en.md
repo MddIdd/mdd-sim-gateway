@@ -167,7 +167,8 @@ administrator account immediately. Then verify:
 5. enabling modem 4G leaves the NAS default route unchanged;
 6. the chosen country exit passes UDP checks and shows the selected node;
 7. each enabled line reaches SWu connected, USIM authentication and IMS registered;
-8. the Calls page opens and any reverse proxy forwards WebSocket upgrade headers;
+8. the Calls page opens and any reverse proxy forwards WebSocket upgrade headers and keeps the
+   `Host` header (or is listed as a trusted proxy and sends `X-Forwarded-Host`);
 9. a test SMS and call complete before production use.
 
 The browser phone shares the WebUI origin and needs no separate WSS host port. RTP ranges begin at

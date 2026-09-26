@@ -11,7 +11,6 @@ import glob
 import hashlib
 import json
 import os
-import re
 import shutil
 import sqlite3
 import threading
@@ -2852,73 +2851,32 @@ def contacts_rekey(regions=()) -> int:
     return changed
 
 
-def _all_keys(numbers, regions) -> set[str]:
-    return {key for item in numbers
-            for key in contacts_format.number_keys(item["number"], regions).values()}
-
-
-def _name_is_a_number(name: str, keys: set[str], regions) -> bool:
-    """Whether `name` is only one of the contact's own numbers standing in for a name.
-
-    That is what a card without a readable name is stored under, and a later import that does
-    carry a name should be able to give it one.
-    """
-    if re.search(r"[^\d\s()+\-.]", str(name or "")):
-        return False
-    return bool(set(contacts_format.number_keys(name, regions).values()) & keys)
+def _contact_shape(contact: dict) -> tuple:
+    """Everything an entry says, as written: what makes two entries the same entry."""
+    return (contact["name"], contact["company"], contact["note"],
+            sorted((item.get("label") or "", item["number"]) for item in contact["numbers"]))
 
 
 def contacts_import(owner: int, incoming, regions=()) -> dict:
-    """Add contacts, folding one into an existing entry only when it is the same person.
+    """Add every contact in an import, skipping only an exact copy of an entry already here.
 
-    A re-import of the same export must not double the address book, so an incoming contact
-    that shares a number with an entry of the same name is folded into it, gaining any number it
-    did not have. Sharing a number is not enough on its own: two people on one home landline are
-    two contacts, as they are on a phone.
-
-    An entry named after its own number -- a card whose name could not be read -- is the same
-    person as a named one sharing its number, and takes the name. So is an incoming card without
-    a name, which is folded into the entry it shares a number with.
+    An import adds what the file says and does not decide for the owner which entries are the
+    same person: two people may share a number, one person may be in the book twice, and a
+    name may be spelled two ways. Only an entry identical in every field -- name, company, note,
+    and each number with its label, exactly as written -- is skipped, so importing one export
+    twice does not double the book.
     """
-    added = merged = skipped = 0
+    added = skipped = 0
     now = int(time.time())
     with _lock, _conn() as c:
         count = int(c.execute("SELECT COUNT(*) FROM contacts WHERE owner=?",
                               (int(owner),)).fetchone()[0])
         for contact in incoming:
             clean = contacts_format.normalize_contact(contact, regions)
-            keys = _all_keys(clean["numbers"], regions)
-            candidates, seen = [], set()
-            for row in _contacts_by_key(c, owner, keys, None):
-                if int(row["id"]) not in seen:
-                    seen.add(int(row["id"]))
-                    candidates.append(row)
-            numbers = _contact_numbers(c, list(seen))
-            have = {contact_id: _all_keys(numbers.get(contact_id, []), regions)
-                    for contact_id in seen}
-            unnamed = _name_is_a_number(clean["name"], keys, regions)
-            target = rename = None
-            for row in candidates:
-                if row["name"].casefold() == clean["name"].casefold() or unnamed:
-                    target = row
-                    break
-            if target is None and not unnamed:
-                target = next((row for row in candidates
-                               if _name_is_a_number(row["name"], have[int(row["id"])], regions)),
-                              None)
-                rename = target
-            if target is not None:
-                existing = int(target["id"])
-                fresh = [item for item in clean["numbers"]
-                         if not _all_keys([item], regions) & have[existing]]
-                if not fresh and rename is None:
-                    skipped += 1
-                    continue
-                _add_numbers(c, existing, fresh, regions)
-                if rename is not None:
-                    c.execute("UPDATE contacts SET name=? WHERE id=?", (clean["name"], existing))
-                c.execute("UPDATE contacts SET updated_ts=? WHERE id=?", (now, existing))
-                merged += 1
+            rows = c.execute("SELECT * FROM contacts WHERE owner=? AND name=?",
+                             (int(owner), clean["name"])).fetchall()
+            if any(_contact_shape(doc) == _contact_shape(clean) for doc in _contact_docs(c, rows)):
+                skipped += 1
                 continue
             if count >= contacts_format.MAX_CONTACTS_PER_OWNER:
                 raise contacts_format.ContactError("this address book is full")
@@ -2928,4 +2886,4 @@ def contacts_import(owner: int, incoming, regions=()) -> dict:
             _write_numbers(c, int(cur.lastrowid), clean["numbers"], regions)
             count += 1
             added += 1
-    return {"added": added, "merged": merged, "skipped": skipped}
+    return {"added": added, "skipped": skipped}

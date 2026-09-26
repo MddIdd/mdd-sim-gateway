@@ -383,7 +383,11 @@ def _csv_column_map(header) -> dict[str, int]:
 
 
 def parse_csv(text: str) -> tuple[list[dict], list[str]]:
-    """Read a CSV address book. Rows sharing a name are folded into one contact's numbers."""
+    """Read a CSV address book: one row per number, as to_csv and spreadsheets write it.
+
+    Consecutive rows with the same name, company and note are one contact's numbers. Rows
+    further apart are separate contacts even under one name -- two people may share it.
+    """
     try:
         rows = list(csv.reader(io.StringIO(str(text or ""))))
     except csv.Error as exc:
@@ -394,8 +398,7 @@ def parse_csv(text: str) -> tuple[list[dict], list[str]]:
     columns = _csv_column_map(rows[0])
     if "number" not in columns:
         raise ContactError("the file has no recognisable phone-number column")
-    order: list[str] = []
-    grouped: dict[str, dict] = {}
+    grouped: list[dict] = []
     problems: list[str] = []
     for line, row in enumerate(rows[1:], start=2):
         def cell(field):
@@ -405,21 +408,18 @@ def parse_csv(text: str) -> tuple[list[dict], list[str]]:
         number = cell("number")
         if not number:
             continue
-        name = cell("name") or number
-        key = name.casefold()
-        if key not in grouped:
-            grouped[key] = {"name": name, "company": cell("company"), "note": cell("note"),
-                            "numbers": []}
-            order.append(key)
-        grouped[key]["numbers"].append({"label": cell("label"), "number": number})
+        entry = {"name": cell("name") or number, "company": cell("company"), "note": cell("note")}
+        if not grouped or any(grouped[-1][field] != entry[field] for field in entry):
+            grouped.append({**entry, "numbers": []})
+        grouped[-1]["numbers"].append({"label": cell("label"), "number": number})
         if not digits_of(number):
             problems.append(f"line {line}: '{number}' has no digits")
     contacts = []
-    for key in order:
+    for entry in grouped:
         try:
-            contacts.append(normalize_contact(grouped[key]))
+            contacts.append(normalize_contact(entry))
         except ContactError as exc:
-            problems.append(f"{grouped[key]['name']}: {exc}")
+            problems.append(f"{entry['name']}: {exc}")
     return contacts, problems
 
 

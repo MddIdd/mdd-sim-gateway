@@ -62,11 +62,11 @@ function ImportPanel({ onImported, showToast, t }) {
       forgetContactNames()
       setReport(result)
       onImported()
-      showToast(t('{added} added, {merged} merged, {skipped} already there', result))
+      showToast(t('{added} added, {skipped} already there', result))
     } catch (err) { showToast(err.message) } finally { setBusy(false) }
   }
   return <div className="card u-panel">
-    <div className="u-card-head"><div><h2>{t('Import and export')}</h2><p>{t('vCard (.vcf) or CSV, as exported by a phone or by this page. Importing an export again folds into what is already here instead of doubling it.')}</p></div></div>
+    <div className="u-card-head"><div><h2>{t('Import and export')}</h2><p>{t('vCard (.vcf) or CSV, as exported by a phone or by this page. Every entry is added as it is, except an exact copy of one already here.')}</p></div></div>
     <input ref={fileRef} type="file" accept=".vcf,.vcard,.csv,text/vcard,text/csv" style={{ display: 'none' }} onChange={pick} />
     <div className="u-action-list">
       <button className="btn btn-ghost" disabled={busy} onClick={() => fileRef.current?.click()}>{t(busy ? 'Importing…' : 'Import a file')}</button>
@@ -74,7 +74,7 @@ function ImportPanel({ onImported, showToast, t }) {
       <a className="btn btn-ghost" href={api.contactsExportUrl('csv')}>{t('Export as CSV')}</a>
     </div>
     {report && <>
-      <p className="u-note">{t('{read} read · {added} added · {merged} merged · {skipped} already there', report)}</p>
+      <p className="u-note">{t('{read} read · {added} added · {skipped} already there', report)}</p>
       {!!report.problems?.length && <div className="u-details">{report.problems.map((problem, index) => <div className="u-detail" key={index}><span>{t('Not imported')}</span><b>{problem}</b></div>)}</div>}
     </>}
   </div>

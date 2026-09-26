@@ -23,9 +23,9 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   code or a subscriber number with its area code left off, is deliberately left alone: local
   `10000` is not one destination everywhere, and a SIM carries a country but never an area
   code. Android's vCard 2.1 (quoted-printable names), iOS, iCloud and Google exports are read
-  as they are written. Re-importing an export folds into what is already there instead of
-  doubling it, while two people sharing a number stay two contacts; a contact that cannot be
-  read is reported by name rather than dropped in silence. A CSV export is safe to open in a
+  as they are written. An import adds every entry as it is written and skips only an exact
+  copy of one already there, so importing an export twice does not double the book; a contact
+  that cannot be read is reported by name rather than dropped in silence. A CSV export is safe to open in a
   spreadsheet.
   Conversations, the call log and the incoming-call overlay show the name instead of the
   number once it is known.

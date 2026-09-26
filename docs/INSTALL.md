@@ -68,7 +68,22 @@ proxy_set_header Connection "upgrade";
 
 用 `$http_host` 而不是 `$host`：`$host` 不带端口，代理监听 443 以外的端口时同样会被拒绝。
 
-不符合时，WebUI 顶部会出现"实时更新和软电话已停用"的提示，控制面日志记录 `refused WebSocket ... from origin`。通话音频仍使用各线路的 RTP 端口。
+不符合时，WebUI 顶部会出现"实时更新和软电话已停用"的提示，控制面日志记录 `refused WebSocket ... from origin`。通话音频默认仍使用各线路的 RTP 端口（direct 模式）。
+
+### 通话媒体模式
+
+通话音频有两种模式，可随时切换，切换会依次重建所有运行中的线路（各自重新注册）：
+
+```bash
+sudo ./install.sh media                                      # 查看当前模式
+sudo ./install.sh media direct                                # 默认：各线路发布自己的 RTP 端口
+sudo ./install.sh media relay [--port N] [--bind ADDR] \
+                               [--public-host HOST] [--public-port N]   # 经内置 TURN 中继
+```
+
+relay 模式下不再有任何引擎发布端口，改由一个 coturn 中继容器（`mdd-sim-gateway-relay`）发布单个端口（UDP+TCP，默认 8478），引擎只能通过内部媒体网络与它通信。启用前会先创建媒体网络、在临时引擎容器中确认内核支持所需的 nftables 规则，并等待中继应答 STUN 请求，任一步失败都会回滚且不修改当前模式，原因会打印出来。`--public-host`/`--public-port` 用于路由器/NAT 对外转发的主机名或端口与本机不同的情况；不指定时客户端使用访问 WebUI 时用的主机名和中继端口本身。
+
+启用 relay 后，需要在路由器/防火墙放行该中继端口的 UDP 和 TCP；如果部署在反向代理之后，代理通常只转发 HTTP(S)，中继端口需要单独做 TCP/UDP 直通或端口转发，不能走 HTTP 反代规则。中继不可达或未就绪时线路仍可注册和收发短信，只有浏览器通话会被拒绝或中途结束；切回 direct 会恢复各线路原有的端口分配。
 
 ## 更新
 

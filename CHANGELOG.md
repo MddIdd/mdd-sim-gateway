@@ -14,6 +14,20 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   send `X-Forwarded-Host`. The WebUI shows a banner saying so when it happens. Direct
   access and proxies that keep `Host` (Caddy, Traefik and Cloudflare do) need nothing.
 
+### Added
+
+- Optional relay media mode for call audio: a single built-in TURN relay container carries media
+  for every line instead of each engine publishing its own RTP ports. Switch with
+  `install.sh media relay|direct|status` on a host install, or
+  `python -m app.media relay|direct|status` inside the Control container on a full-container
+  deployment; the relay image is published to ghcr and pulled only when relay mode is enabled.
+  Direct mode (each line publishing its own ports) stays the default and is unchanged.
+
+### Changed
+
+- The engine image now includes nftables, which relay mode uses to filter each line's media
+  interface. An update therefore rebuilds the engine image.
+
 ### Security
 
 - WebSocket handshakes pass the same authentication as the API, in one middleware, so a socket

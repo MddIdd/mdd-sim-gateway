@@ -175,6 +175,31 @@ The browser phone shares the WebUI origin and needs no separate WSS host port. R
 UDP 30000 by default; allow the assigned range between clients and the NAS when crossing VLANs or
 firewalls.
 
+### Call media modes
+
+Call audio defaults to direct mode: each line publishes its own RTP ports (see above). It can
+be switched to relay mode instead, where a single coturn relay container carries all media and no
+Engine publishes any port. The relay container (`mdd-sim-gateway-relay`) and the internal media
+network it uses (`mdd-sim-gateway-media`) are both created and managed by Control on demand,
+**not by the Compose file** — `docker compose down`/`up` does not touch them.
+
+Switch it over SSH inside the Control container:
+
+```sh
+sudo docker exec -w /app/control mdd-sim-gateway-control python -m app.media status
+sudo docker exec -w /app/control mdd-sim-gateway-control python -m app.media direct
+sudo docker exec -w /app/control mdd-sim-gateway-control python -m app.media relay \
+    [--port N] [--bind ADDR] [--public-host HOST] [--public-port N]
+```
+
+Enabling relay first pulls this version's relay image
+(`ghcr.io/mddidd/mdd-sim-gateway-relay:vX.Y.Z`), creates the media network, checks in a throwaway
+Engine container that the kernel supports the required nftables rule, and waits for the relay to
+answer a STUN request; any failure rolls back and leaves the mode unchanged. Switching rebuilds
+every running line one at a time. Once enabled, forward the relay port's UDP and TCP in any router
+or firewall in front of the NAS; behind a reverse proxy that port is not HTTP, so it needs a plain
+TCP/UDP forward of its own.
+
 ## 7. Persistent data, backup and certificates
 
 The configured data directory contains the SQLite database, messages, call records, settings,

@@ -11,7 +11,9 @@
 - VoWiFi 停在部分连接：检查国家出口 UDP 验证、ePDG、SIM 是否开通 Wi‑Fi Calling、PIN 剩余次数及引擎日志。
 - 服务更新后 VoWiFi 突然停止：确认引擎容器仍存在，并检查控制面日志中是否把虚拟读卡器维护误判为 `card removed`。当前版本会在编排器退出信号到达时立即发布维护标记，并保留 45 秒重建窗口；旧版本应先恢复读卡桥再重新启动线路。
 - 浏览器电话一直未注册：它与 WebUI 同源连接 `/api/instances/<线路>/softphone/ws`。经反向代理访问时确认代理转发了 WebSocket 升级头；控制面日志出现 `refused WebSocket ... from origin` 表示代理改写了 `Host`，需把代理地址加入"可信反向代理"并传递 `X-Forwarded-Host`；直连时确认线路引擎在运行。控制面日志中的 `softphone relay: engine ... unreachable` 表示引擎的 Asterisk 未在网桥地址 8088 上监听，通常是引擎镜像未随本版本刷新。
-- 能振铃但没声音：确认 `MDD_ADVERTISE_ADDR` 是软电话可达的主机地址，并检查 RTP 端口与浏览器麦克风权限。
+- 能振铃但没声音：确认 `MDD_ADVERTISE_ADDR` 是软电话可达的主机地址，并检查 RTP 端口与浏览器麦克风权限。此现象针对 direct 模式；relay 模式下浏览器无法连接中继时通话会在约 8 秒后自行结束并提示“无法连接媒体中继”，需要检查中继端口是否已在路由器/防火墙放行，经反向代理时确认该端口走的是 TCP/UDP 直通而不是 HTTP 转发规则。
+- 提示“媒体中继未就绪”，拒绝拨号：线路仍可注册和收发短信，只是通话被拒绝。执行 `sudo ./install.sh media`（或容器部署下的 `docker exec -w /app/control mdd-sim-gateway-control python -m app.media status`）查看中继状态，再用 `docker logs mdd-sim-gateway-relay` 检查中继容器本身是否正常启动。控制面每 30 秒会尝试重启一个停止或缺失的中继容器。
+- 启用 relay 模式被拒绝，提示引擎无法过滤媒体网络：通常是宿主内核过旧、不支持 nftables 的 socket 匹配，或引擎镜像仍是旧版本（未包含该过滤规则）。先确认内核较新，再执行 `sudo ./install.sh reload --engines` 刷新引擎镜像后重试。
 - 读卡器未出现：先用 `lsusb` 确认 USB 层，再运行 `pcsc_scan` 检查 PC/SC 层。SCR Prime（`04d9:c001`）需执行一次 `sudo ./install.sh patchprime` 加入 libccid 设备表；之后支持热插拔。读卡器没有 4G 开关属于正常设计。
 - SIM 逻辑通道分配失败：查看“设备 → 硬件”中的已分配数量、通道用途和明确错误。系统会自动释放本轮部分分配；若持续失败，先重启对应线路，确认仍失败后再安排模块复位，不要只按底层 QMI 错误码猜测原因。
 - Telegram 失败：选择手动 HTTP/SOCKS 代理或已就绪的国家出口，并使用“测试”。

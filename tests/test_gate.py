@@ -131,6 +131,18 @@ class HttpTests(GateTestCase):
         self.assertEqual(result.status, 200)
         self.assertEqual(result.principal.kind, "admin")
 
+    def test_other_services_cookies_do_not_hide_the_session(self):
+        # Browsers send every cookie of the host name, whatever the port; another service on
+        # the same host may write values RFC 6265 does not allow.
+        for other in ('other_app={"x": 1}', "theme=dark mode", 'quoted="a b"', "flag",
+                      "=nameless"):
+            with self.subTest(other=other):
+                scope = http("/api/instances", cookie=None,
+                             headers=[("cookie", f"{other}; {main.auth.SESSION_COOKIE}={SESSION}")])
+                result = run(scope)
+                self.assertEqual(result.status, 200)
+                self.assertEqual(result.principal.kind, "admin")
+
     def test_state_changes_need_the_sessions_csrf_token(self):
         for method in sorted(gate.MUTATING_METHODS):
             for supplied, expected in ((None, 403), ("wrong", 403), (CSRF, 200)):
@@ -175,6 +187,12 @@ class WebSocketTests(GateTestCase):
         result = run(websocket())
         self.assertIsNotNone(result.reached)
         self.assertEqual(result.principal.kind, "admin")
+
+    def test_other_services_cookies_do_not_hide_the_sessions_socket(self):
+        scope = websocket(cookie=None, headers=[
+            ("cookie", f'other_app={{"x": 1}}; theme=dark mode; '
+                       f'{main.auth.SESSION_COOKIE}={SESSION}')])
+        self.assertEqual(run(scope).principal.kind, "admin")
 
     def test_signed_out_socket_is_closed_with_4401_after_accepting(self):
         # The WebUI's event socket reads 4401 as "session ended"; a browser reports a close code

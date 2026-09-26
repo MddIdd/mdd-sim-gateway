@@ -21,9 +21,9 @@ import hmac
 import ipaddress
 import logging
 from dataclasses import dataclass
-from http.cookies import SimpleCookie
 from urllib.parse import urlsplit
 
+from starlette.requests import cookie_parser
 from starlette.responses import JSONResponse
 from starlette.websockets import WebSocket
 
@@ -73,13 +73,15 @@ def _headers(scope) -> dict[str, str]:
 
 
 def _cookie(headers: dict[str, str], name: str) -> str:
-    jar = SimpleCookie()
-    try:
-        jar.load(headers.get("cookie", ""))
-    except Exception:
-        return ""
-    morsel = jar.get(name)
-    return morsel.value if morsel else ""
+    """One cookie's value, read the way browsers send them rather than the way RFC 6265 asks.
+
+    A browser sends every cookie of the host name, whatever the port, so other services on the
+    same host add theirs: values with spaces or quotes are common there. http.cookies drops such
+    a cookie and every one after it without a word, which would lose the session and leave the
+    administrator signed in yet refused. Starlette's parser, which handled this before the gate
+    existed, splits on ";" and keeps going.
+    """
+    return cookie_parser(headers.get("cookie", "")).get(name, "")
 
 
 def _session(headers: dict[str, str]) -> Principal | None:

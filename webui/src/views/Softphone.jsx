@@ -3,6 +3,7 @@ import { api } from '../api.js'
 import { Softphone as Phone, audioInputPresence, microphoneMessage, MEDIA_FAIL_CAUSE } from '../softphone.js'
 import SimSelector from './SimSelector.jsx'
 import { useI18n } from '../i18n.jsx'
+import { useContactNames } from '../contactNames.js'
 
 const GREEN = '#22c55e', RED = '#ef4444'
 const KEYS = [['1', ''], ['2', 'ABC'], ['3', 'DEF'], ['4', 'GHI'], ['5', 'JKL'],
@@ -155,6 +156,19 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
   // one placed after it must keep saying so until it ends.
   const [listenOnly, setListenOnly] = useState(null)
   const [calls, setCalls] = useState([])
+  // The whole visible log in one request; see contactNames.js for why the browser cannot match
+  // a number against the address book itself.
+  const callerNames = useContactNames(calls.map((entry) => entry.peer), id)
+  // The call on this page's own line: it rings here, not in the global overlay, so the name has
+  // to be looked up here too.
+  const callName = useContactNames(call?.number ? [call.number] : [], id)[call?.number] || ''
+  // The name when the book has one, with the number beneath it; the number alone otherwise.
+  const callParty = (size, fallback = '') => callName
+    ? <>
+        <div style={{ fontSize: size, fontWeight: 700 }}>{callName}</div>
+        <div className="mono" style={{ fontSize: 13, color: 'var(--text-mute)' }}>{call.number}</div>
+      </>
+    : <div className="mono" style={{ fontSize: size, fontWeight: 700 }}>{call.number || fallback}</div>
   const [callSelMode, setCallSelMode] = useState(false)
   const [callSel, setCallSel] = useState(() => new Set())
   // Keyed by voicemail id. The <audio> is only created once the user asks to play, so a log
@@ -611,7 +625,7 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
         boxShadow: '0 20px 60px rgba(0,0,0,.6)', animation: 'none' }}>
         <div style={{ fontSize: 13, color: 'var(--text-mute)', letterSpacing: 1, textTransform: 'uppercase' }}>{t('Incoming call')}</div>
         <div style={{ margin: '22px 0' }}><Avatar label={call.number} color={GREEN} size={110} /></div>
-        <div className="mono" style={{ fontSize: 26, fontWeight: 800 }}>{call.number || 'Unknown'}</div>
+        {callParty(26, 'Unknown')}
         <div style={{ fontSize: 13, color: 'var(--text-mute)', marginTop: 6 }}>{selected?.name || 'VoWiFi line'}</div>
         <div style={{ display: 'flex', justifyContent: 'center', gap: 56, marginTop: 34 }}>
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
@@ -695,7 +709,7 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', textAlign: 'center', gap: 16 }}>
             <Avatar label={call.number} />
             <div>
-              <div className="mono" style={{ fontSize: 22, fontWeight: 700 }}>{call.number}</div>
+              {callParty(22)}
               <div style={{ fontSize: 13, color: 'var(--text-mute)', marginTop: 4 }}>{call.serviceCode
                 ? t('Sending the code to the carrier…')
                 : (call.state === 'ringing' ? t('Ringing…') : t('Calling…'))}</div>
@@ -712,7 +726,7 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', textAlign: 'center', gap: 14 }}>
             <Avatar label={call.number} color={GREEN} size={84} />
             <div>
-              <div className="mono" style={{ fontSize: 20, fontWeight: 700 }}>{call.number || 'Unknown'}</div>
+              {callParty(20, 'Unknown')}
               {call.serviceCode
                 ? <div style={{ fontSize: 13, color: GREEN, marginTop: 4 }}>{call.ussdText || t('Carrier accepted the code. Waiting for its reply…')}</div>
                 : <div style={{ fontSize: 15, color: GREEN, marginTop: 4, fontVariantNumeric: 'tabular-nums' }}>{fmtDur(dur)}</div>}
@@ -756,7 +770,7 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
         {call?.state === 'ended' && (
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', textAlign: 'center', gap: 12 }}>
             <Avatar label={call.number} color={call.endCause === 'Rejected' ? RED : 'var(--text-mute)'} />
-            <div className="mono" style={{ fontSize: 20, fontWeight: 700 }}>{call.number || 'Unknown'}</div>
+            <div>{callParty(20, 'Unknown')}</div>
             {call.ussdText && (
               <div style={{ maxWidth: 320, margin: '0 auto', padding: '12px 14px', borderRadius: 10,
                 background: 'var(--input-bg)', border: '1px solid var(--border-strong)',
@@ -890,7 +904,7 @@ export default function Softphone({ selected, subscribe, instances, cards, devic
                   background: checked ? 'var(--active)' : 'var(--input-bg)' }}>
                 {callSelMode && <input type="checkbox" readOnly checked={checked} style={{ width: 'auto', flexShrink: 0 }} />}
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div className="mono" style={{ fontWeight: 600 }}>{c.peer}</div>
+                  <div className={callerNames[c.peer] ? '' : 'mono'} style={{ fontWeight: 600 }}>{callerNames[c.peer] || c.peer}</div>
                   <div style={{ fontSize: 11, color: 'var(--text-mute)' }}>{dlabel} · {new Date(c.start_ts * 1000).toLocaleString()}{c.transport === 'cellular' ? ` · ${t('Cellular modem')}` : ''}</div>
                   {c.ussd_text && (
                     <div title={c.ussd_text} style={{ fontSize: 11.5, marginTop: 3, color: 'var(--text-soft)',

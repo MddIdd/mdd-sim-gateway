@@ -79,6 +79,13 @@ export const api = {
   authLogin: (username, password, remember) => j('POST', '/api/auth/login', { username, password, remember }),
   authLogout: () => j('POST', '/api/auth/logout', {}),
   authPassword: (current_password, new_password) => j('POST', '/api/auth/password', { current_password, new_password }),
+  contacts: (query = '') => j('GET', `/api/contacts${query ? `?query=${encodeURIComponent(query)}` : ''}`),
+  createContact: (body) => j('POST', '/api/contacts', body),
+  updateContact: (id, body) => j('PUT', `/api/contacts/${encodeURIComponent(id)}`, body),
+  deleteContact: (id) => j('DELETE', `/api/contacts/${encodeURIComponent(id)}`),
+  resolveContacts: (numbers, line) => j('POST', '/api/contacts/resolve', { numbers, line }),
+  importContacts: (file) => { const fd = new FormData(); fd.append('file', file, file.name); return form('POST', '/api/contacts/import', fd) },
+  contactsExportUrl: (format) => `/api/contacts/export?format=${encodeURIComponent(format)}`,
   // Unified physical-device control plane. Older deployments may return 404;
   // App.jsx then derives read-only device cards from /api/instances + /api/cards.
   devices: () => j('GET', '/api/devices'),

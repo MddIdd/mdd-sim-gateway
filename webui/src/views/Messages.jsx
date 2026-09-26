@@ -4,6 +4,7 @@ import SimSelector from './SimSelector.jsx'
 import MmsSettings from './MmsSettings.jsx'
 import { fitAttachments } from '../mmsImage.js'
 import { useI18n } from '../i18n.jsx'
+import { useContactNames } from '../contactNames.js'
 
 // application/smil is the MMS presentation part (layout/timing for the other parts); it is
 // never itself content, so it is never rendered as an attachment.
@@ -18,6 +19,8 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
   const [threads, setThreads] = useState([])
   const [threadsLoading, setThreadsLoading] = useState(false)
   const [peer, setPeer] = useState(null)
+  // One request for the whole conversation list, not one per row.
+  const contactNames = useContactNames(threads.map((thread) => thread.peer).concat(peer || []), id)
   const [msgs, setMsgs] = useState([])
   const [messagesLoading, setMessagesLoading] = useState(false)
   const [text, setText] = useState('')
@@ -430,7 +433,7 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
           <div key={t.peer} className="hover-row u-thread-row"
             style={{ background: peer === t.peer ? 'var(--active)' : 'transparent' }}>
             <button type="button" className="u-thread-open" onClick={() => { setPeer(t.peer); setComposing(false) }}>
-              <span style={{ fontWeight: 600, fontSize: 14 }} className="mono">{t.peer}</span>
+              <span style={{ fontWeight: 600, fontSize: 14 }} className={contactNames[t.peer] ? '' : 'mono'}>{contactNames[t.peer] || t.peer}</span>
               <span style={{ fontSize: 12, color: 'var(--text-mute)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {t.last_kind === 'mms' ? `[${tr('MMS')}]${t.last_body ? ' ' + t.last_body : ''}` : t.last_body}
               </span>
@@ -448,7 +451,9 @@ export default function Messages({ selected, subscribe, showToast, instances, ca
         <div style={{ padding: 14, borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
           {paneOpen && <button className="btn btn-ghost u-messages-back" aria-label={tr('Back to conversations')}
             onClick={closePane}>‹</button>}
-          {peer ? <span className="mono" style={{ fontWeight: 600, flex: 1 }}>{peer}</span>
+          {peer ? <span className={contactNames[peer] ? '' : 'mono'} style={{ fontWeight: 600, flex: 1 }}>
+            {contactNames[peer] || peer}{contactNames[peer] && <small className="mono" style={{ marginLeft: 8, fontWeight: 500, color: 'var(--text-mute)' }}>{peer}</small>}
+          </span>
             : <input placeholder={tr('Recipient number e.g. +1...')} value={newTo} onChange={(e) => setNewTo(e.target.value)} style={{ maxWidth: 300, flex: 1 }} />}
           {peer && msgs.length > 0 && (
             selMode ? (

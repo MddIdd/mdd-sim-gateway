@@ -14,6 +14,30 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   send `X-Forwarded-Host`. The WebUI shows a banner saying so when it happens. Direct
   access and proxies that keep `Host` (Caddy, Traefik and Cloudflare do) need nothing.
 
+- **The control image gains one Python package**, `phonenumberslite`, which the address book
+  uses to tell two spellings of one number apart from two different numbers. It is the
+  pure-Python Apache-2.0 port of Google's libphonenumber without the geocoding and carrier data
+  (about 5 MB installed instead of 46 MB), with no dependencies and no native code. It comes
+  with the new control image; nothing needs installing on the host.
+
+### Added
+
+- **An address book.** Contacts can be added by hand or imported from a vCard (.vcf) or CSV
+  export, and exported in either format. Two spellings of one number are recognised as one by
+  reducing both to E.164 -- `+44 7700 900123`, `07700 900123` and `00447700900123` are the
+  same contact -- using the country of the SIM the number arrived on. With SIMs from several
+  countries, each line reads a nationally written book the way a phone holding that SIM would,
+  and a number is never matched through another line's country. A number that only means something where it was dialled, such as a short
+  code or a subscriber number with its area code left off, is deliberately left alone: local
+  `10000` is not one destination everywhere, and a SIM carries a country but never an area
+  code. Android's vCard 2.1 (quoted-printable names), iOS, iCloud and Google exports are read
+  as they are written. An import adds every entry as it is written and skips only an exact
+  copy of one already there, so importing an export twice does not double the book; a contact
+  that cannot be read is reported by name rather than dropped in silence. A CSV export is safe to open in a
+  spreadsheet.
+  Conversations, the call log and the incoming-call overlay show the name instead of the
+  number once it is known.
+
 ### Security
 
 - WebSocket handshakes pass the same authentication as the API, in one middleware, so a socket

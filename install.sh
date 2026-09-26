@@ -71,6 +71,8 @@ ENGINE_IMAGE="mdd-sim-gateway/engine"
 ENGINE_HANDOFF_MANIFEST="$REPO_DIR/engine/release-image.SHA256SUMS"
 CONTROL_NAME="mdd-sim-gateway-control"
 ENGINE_PREFIX="mdd-sim-gateway-engine-"
+RELAY_NAME="mdd-sim-gateway-relay"
+MEDIA_NETWORK="mdd-sim-gateway-media"
 MDD_DOCKER_LABEL="io.mdd-sim-gateway.managed"
 WEBUI_BUILD_IMAGE="node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32"
 
@@ -1321,6 +1323,11 @@ cmd_reload() {
   else
     ensure_engine_image
   fi
+  # Only a gateway in relay media mode needs the relay image. Failing to fetch this version's
+  # keeps the one in use: the update itself is not held back by an optional component.
+  if [ "$(media_mode_recorded)" = relay ]; then
+    ensure_relay_image || warn "could not fetch the media relay image $(relay_image_ref); the relay keeps its current image"
+  fi
   if [ "$MODE" = docker ]; then
     setup_venv
     build_control_image
@@ -1367,6 +1374,61 @@ cmd_reload() {
   # not be reported as failed only because optional disk cleanup could not run.
   cleanup_release_artifacts
   info "reload complete (data preserved)"
+}
+
+# ------------------------------------------------------------------ media mode
+# How call media reaches the lines: direct (each line publishes its RTP ports, the default) or
+# relay (one TURN relay port, nothing published by the engines). control/app/media.py does the
+# work; this runs it in the control plane's own environment and supplies the relay image.
+relay_image_ref() {
+  printf 'ghcr.io/mddidd/mdd-sim-gateway-relay:v%s' "$(tr -d '\n' < "$REPO_DIR/VERSION")"
+}
+
+media_mode_recorded() {
+  grep -q '"mode": "relay"' "$MDD_DATA_DIR/media/state.json" 2>/dev/null && echo relay || echo direct
+}
+
+# This version's relay image: from the release registry, or built from relay/ when that cannot
+# be reached (a source checkout, a release not published yet, or MDD_BUILD_IMAGES=1).
+ensure_relay_image() {
+  ref=$(relay_image_ref)
+  docker image inspect "$ref" >/dev/null 2>&1 && return 0
+  if [ "${MDD_BUILD_IMAGES:-0}" != 1 ] && docker pull "$ref" >/dev/null 2>&1; then
+    info "fetched the media relay image $ref"
+    return 0
+  fi
+  [ -f "$REPO_DIR/relay/Dockerfile" ] || return 1
+  info "building the media relay image $ref from relay/"
+  docker build --build-arg MDD_VERSION="$(tr -d '\n' < "$REPO_DIR/VERSION")" \
+    -t "$ref" "$REPO_DIR/relay"
+}
+
+media_cli() {
+  if [ "$MODE" = local ]; then
+    ( cd "$REPO_DIR/control" && MDD_DATA="$(data_dir_abs)" MDD_HOST_DATA="$(data_dir_abs)" \
+        MDD_ENGINE_IMAGE="$ENGINE_IMAGE" "$VENV_DIR/bin/python" -m app.media "$@" )
+  else
+    docker exec -w /app/control "$CONTROL_NAME" python -m app.media "$@"
+  fi
+}
+
+cmd_media() {
+  need_root
+  resolve_mode
+  control_running || die "the control plane is not running; start it first ($0 start)"
+  # shellcheck disable=SC2086
+  set -- $ARGS
+  sub="${1:-status}"
+  [ $# -gt 0 ] && shift
+  case "$sub" in
+    status) media_cli status ;;
+    relay)
+      ensure_relay_image || die "could not fetch or build the media relay image $(relay_image_ref); media mode unchanged"
+      media_cli relay --image "$(relay_image_ref)" "$@" || exit 1
+      info "open UDP and TCP on the relay port in any firewall or router in front of this host" ;;
+    direct) media_cli direct "$@" ;;
+    *) die "usage: $0 media [status | relay [--port N] [--bind ADDR] [--public-host HOST] [--public-port N] | direct]" ;;
+  esac
 }
 
 cmd_start() {
@@ -1460,6 +1522,8 @@ cmd_uninstall() {
   info "removing MDD containers…"
   if managed_control_exists; then docker rm -f "$CONTROL_NAME" >/dev/null; fi
   for n in $(engine_names); do docker rm -f "$n" >/dev/null 2>&1 || true; done
+  if docker_container_owned "$RELAY_NAME"; then docker rm -f "$RELAY_NAME" >/dev/null 2>&1 || true; fi
+  docker network rm "$MEDIA_NETWORK" >/dev/null 2>&1 || true
   if [ "$PURGE" = 1 ]; then
     # Full teardown: also drop images (incl. the slow, patched engine image) and data+venv.
     info "removing MDD images…"
@@ -1933,6 +1997,9 @@ ${B}MDD Sim Gateway installer${N}
   $0 disable-autostart    do not start on boot
   $0 uninstall [--purge]  remove MDD containers/images/service (--purge also deletes data+venv)
   $0 status               show mode + component status
+  $0 media [relay [--port N] [--public-host HOST] | direct]
+                          show or switch how call media travels: direct (default, each line
+                          publishes its RTP ports) or relay (one TURN port, default 8478)
   $0 diagnose             print a masked card-path report (readers, bridges, lpac, logs)
   $0 reset-admin          reset the local administrator (old credential file is backed up)
   $0 logs                 follow control-plane logs
@@ -1990,6 +2057,7 @@ case "$CMD" in
   disable-autostart)  cmd_disable_autostart ;;
   uninstall)          cmd_uninstall ;;
   status)             cmd_status ;;
+  media)              cmd_media ;;
   diagnose)           cmd_diagnose ;;
   reset-admin)        cmd_reset_admin ;;
   logs)               cmd_logs ;;

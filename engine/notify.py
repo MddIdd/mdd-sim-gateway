@@ -54,8 +54,20 @@ def main():
         import urllib3
         urllib3.disable_warnings()
         token = os.environ.get("MANAGER_EVENT_TOKEN") or env.get("MANAGER_EVENT_TOKEN", "")
-        requests.post(f"{manager_url.rstrip('/')}/api/engine/event",
-                      json=payload, headers={"X-MDD-Engine-Token": token}, timeout=3, verify=False)
+        r = requests.post(f"{manager_url.rstrip('/')}/api/engine/event",
+                          json=payload, headers={"X-MDD-Engine-Token": token}, timeout=3, verify=False)
+        if r.status_code >= 300:
+            _warn(f"{event} -> {manager_url}: HTTP {r.status_code}")
+    except Exception as e:
+        # Still never fail the caller, but leave a trace in the container log: an unreachable
+        # manager used to drop every inbound SMS without a single line anywhere.
+        _warn(f"{event} -> {manager_url}: {type(e).__name__}")
+
+
+def _warn(msg: str):
+    try:
+        print(f"[notify] event not delivered: {msg} (kept in /logs/events.jsonl)",
+              file=sys.stderr, flush=True)
     except Exception:
         pass
 

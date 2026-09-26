@@ -154,7 +154,7 @@ MDD_DATA_DIR=/volume1/docker/mdd-sim-gateway-dev \
 MDD_ADVERTISE_ADDR=10.0.0.100 \
 MDD_HTTP_PORT=10443 \
 MDD_NAS_HOSTNAME=nas.example.com \
-MDD_IMAGE_TAG=v1.12.0-rc.1 \
+MDD_IMAGE_TAG=v1.12.0 \
 docker compose -f runtime/compose.yaml up -d --no-build
 ```
 

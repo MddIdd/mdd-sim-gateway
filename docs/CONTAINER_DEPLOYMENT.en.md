@@ -130,10 +130,6 @@ configuration and notification credentials are not readable by DSM accounts. Do 
 `chown -R user:users` step used by ordinary Compose projects: it would hand those files to that
 account and expose them through File Station or SMB. Edit the YAML through Container Manager.
 
-Compose files from v1.12.0-rc4 and earlier lack this permission. In a folder created in File Station,
-Control and Egress then exit with `Operation not permitted` or `Permission denied`. Run
-`sudo chown root:root <data-dir>` once and start the project again, or use a newer Compose file.
-
 ## 5. Security boundaries in the Compose file
 
 You may change the persistent path, NAS address, host management port and log sizes. Keep these
@@ -209,10 +205,7 @@ only the project data directory and Docker socket; it receives no host PID/netwo
 privileged mode. Keep the NAS powered on during the update and sign in again when the UI returns.
 
 The update is performed by the helper of the **currently running** release, so fixes to the helper
-itself take effect from the next update. The helpers in v1.12.0-rc1 and rc2 are broken and cannot
-update from the web console: in Container Manager, change the four image tags in the project YAML to
-the target release and start the project again, leaving everything else unchanged. From rc3 onward
-the one-click update works.
+itself take effect from the next update.
 
 A successful report means the base containers are healthy and the Engines were recreated on the new
 image. If the health policy had stopped a line during the update, Control recovers it on the new image
@@ -254,8 +247,8 @@ Re-evaluate drivers against the complete build and kernel after every DSM update
 
 **Rebuilding the project reports "dependency failed to start: container mdd-sim-gateway-hardware is
 unhealthy":** a new Hardware container inherits the modem's stale QMI session and must reset the modem
-and wait for it to re-enumerate, which takes a minute or two. From v1.12.0-rc2 the health-check grace
-period is 180 seconds; older images allow less, leaving Control in `Created`. Wait for Hardware to
+and wait for it to re-enumerate, which takes a minute or two; if that outlasts the health-check grace
+period, Control stays in `Created`. Wait for Hardware to
 become healthy, then click Start on the project — not Build, which recreates Hardware again.
 
 **Startup logs say "PIDs limit discarded":** the DSM 7.4 kernel (4.4) has no pids cgroup, so Docker

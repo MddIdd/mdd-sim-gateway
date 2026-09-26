@@ -117,10 +117,6 @@ sudo chmod 444 "$CMDIR/${UUID}.lock"
 不要套用普通 Compose 项目常见的 `chown -R 用户:users` 步骤：那会把这些文件交给该账号，可以通过
 File Station 或 SMB 读取。YAML 的后续编辑应通过 Container Manager 项目界面完成。
 
-v1.12.0-rc4 及更早的 Compose 文件缺少这项权限，在 File Station 新建的目录里 Control 和 Egress
-会以 `Operation not permitted` 或 `Permission denied` 退出。遇到时可执行一次
-`sudo chown root:root <数据目录>` 后重新启动项目，或改用新版 Compose 文件。
-
 首次拉取需要访问 `ghcr.io`。不能访问时，先从同一 Release 下载本机架构的四个离线镜像包，
 核对 `SHA256SUMS` 并在 Container Manager 导入；不得混用不同版本或不同架构的镜像。
 
@@ -199,9 +195,7 @@ Control、Hardware 和 Egress 的命名卷保存运行时 socket 或可重建状
 Docker socket，不使用宿主 PID、网络或特权模式。更新期间不要关闭 NAS；完成后 WebUI 会要求
 重新登录。
 
-执行更新的是**当前运行版本**的助手，所以助手自身的修复要到下一次更新才生效。v1.12.0-rc1 和
-rc2 的助手有缺陷，无法从网页更新：请在 Container Manager 中把项目 YAML 的四处镜像标签改为目标
-版本后重新启动项目，其他内容保持不变。rc3 及以后可以正常使用一键更新。
+执行更新的是**当前运行版本**的助手，所以助手自身的修复要到下一次更新才生效。
 
 助手报告成功只代表基础容器健康、Engine 已按新镜像重建。如果某条线路在更新期间被健康策略暂时
 停止，Control 会在稍后用新镜像自行恢复它，这时线路可能晚一两分钟才重新注册。
@@ -250,8 +244,8 @@ sudo docker ps -aq --filter "label=io.mdd-sim-gateway.component=engine" | xargs 
 
 ### 重建项目后提示 “dependency failed to start: container mdd-sim-gateway-hardware is unhealthy”
 
-新的 Hardware 会继承模块里残留的 QMI 会话，需要先重置模块并等待重新枚举，约一到两分钟。v1.12.0-rc2
-起健康检查宽限期为 180 秒；更早的镜像宽限期较短，Control 会停在“已创建”。等 Hardware 变为健康后，
+新的 Hardware 会继承模块里残留的 QMI 会话，需要先重置模块并等待重新枚举，约一到两分钟，
+超过健康检查宽限期时 Control 会停在“已创建”。等 Hardware 变为健康后，
 在项目页点击“启动”即可，不要点击“构建”，后者会再次重建 Hardware。
 
 ### 启动日志出现 “PIDs limit discarded”

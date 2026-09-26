@@ -6,6 +6,14 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Upgrade notes
 
+- **Behind a reverse proxy that rewrites `Host` -- nginx does by default -- live updates and
+  the softphone stop after this upgrade** until the proxy keeps the host name the browser used.
+  For nginx add `proxy_set_header Host $http_host;` to the gateway's `location` (not `$host`,
+  which drops a port other than 443 and is refused just the same); for any other proxy, either
+  keep `Host`, or list the proxy under Settings → Security → Trusted reverse proxies and have it
+  send `X-Forwarded-Host`. The WebUI shows a banner saying so when it happens. Direct
+  access and proxies that keep `Host` (Caddy, Traefik and Cloudflare do) need nothing.
+
 - **The control image gains one Python package**, `phonenumberslite`, which the address book
   uses to tell two spellings of one number apart from two different numbers. It is the
   pure-Python Apache-2.0 port of Google's libphonenumber without the geocoding and carrier data
@@ -29,6 +37,18 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   spreadsheet.
   Conversations, the call log and the incoming-call overlay show the name instead of the
   number once it is known.
+
+### Security
+
+- WebSocket handshakes pass the same authentication as the API, in one middleware, so a socket
+  added later cannot be left open by forgetting a check. A socket signed in with the session
+  cookie must also come from the gateway's own page: its `Origin` has to match the host the
+  browser asked for, or the forwarded host from a trusted reverse proxy.
+
+### Removed
+
+- The silent fallback for WebUI tabs older than the first public release, which kept a
+  signed-out event socket open instead of closing it with 4401.
 
 ## [1.12.0] - 2026-09-26
 

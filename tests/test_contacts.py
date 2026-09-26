@@ -429,8 +429,21 @@ class ApiTests(_BookTest):
                     "more_body": len(sent) < len(chunks)}
 
         scope = {"type": "http", "method": "POST", "headers": headers,
-                 "state": {"admin_session": {"user": "admin"}}}
+                 "state": {"principal": self.main.gate.Principal("admin")}}
         return self.main.Request(scope, receive), sent
+
+    def test_the_owner_is_the_principal_the_gate_admitted(self):
+        # The gate leaves who is calling in scope["state"]["principal"]; an address book request
+        # that reaches the handler without an administrator there is refused, not served.
+        admitted = self.main.Request({"type": "http", "headers": [],
+                                      "state": {"principal": self.main.gate.Principal("admin")}})
+        self.assertEqual(self.main._owner(admitted), store.ADMIN_OWNER)
+        for state in ({}, {"principal": self.main.gate.ANONYMOUS}):
+            with self.subTest(state=state):
+                with self.assertRaises(self.main.HTTPException) as refused:
+                    self.main._owner(self.main.Request({"type": "http", "headers": [],
+                                                        "state": state}))
+                self.assertEqual(refused.exception.status_code, 401)
 
     def test_the_keys_are_worked_out_again_only_when_the_countries_change(self):
         answers = iter([(), ("gb",), ("gb",), ("cn", "gb")])

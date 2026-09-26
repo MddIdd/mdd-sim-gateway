@@ -205,6 +205,9 @@ export default function App() {
   // update was still running, so a rollback drill that ended on the old version looked like a
   // successful upgrade. Keep a banner up while it runs and report the outcome when it lands.
   const [updateRun, setUpdateRun] = useState(null)
+  // The event socket was refused for the page's origin: live updates and the softphone are off
+  // until the reverse proxy is fixed, so this stays up rather than being a passing toast.
+  const [originRefused, setOriginRefused] = useState(false)
   const lastUpdateState = useRef(null)
   useEffect(()=>{
     if(!authState?.authenticated)return
@@ -241,7 +244,7 @@ export default function App() {
     wsEvents.current.handlers.forEach(h=>h(msg))
     if(msg.type==='sms'&&msg.message?.direction==='in')showToast(t('SMS from {peer}',{peer:msg.message.peer}))
     if(msg.type==='call'&&msg.call?.direction==='in')showToast(t('Incoming call from {peer}',{peer:msg.call.peer}))
-  },expireAuth)},[refresh,showToast,t,authState?.authenticated,expireAuth])
+  },expireAuth,()=>setOriginRefused(true))},[refresh,showToast,t,authState?.authenticated,expireAuth])
   const subscribe=useCallback(h=>{wsEvents.current.handlers.add(h);return()=>wsEvents.current.handlers.delete(h)},[])
   if (!authState) return <div className="auth-shell"><div className="auth-card"><h1>MDD Sim Gateway</h1><p>{t('Loading…')}</p></div></div>
   if (!authState.authenticated) return <AuthScreen configured={authState.configured} accountUsername={authState.username} t={t} onDone={result=>{setCsrf(result.csrf);setAuthState(s=>({...s,configured:true,authenticated:true,csrf:result.csrf}))}} />
@@ -265,7 +268,7 @@ export default function App() {
     </aside>
     <button className="u-menu" onClick={()=>setMenuOpen(!menuOpen)}>☰</button>
     {menuOpen&&<button className="u-scrim" aria-label={t('Close menu')} onClick={()=>setMenuOpen(false)}/>}
-    <main className="u-main"><header><div><h1>{t(NAV.find(x=>x[0]===view)?.[1]||view)}</h1><p>{t(`page.${view}.subtitle`)}</p></div><div className="u-live"><span className="u-dot" />{initialLoading?t('Loading…'):loadErrors.devices?t('Loading failed'):unifiedAvailable.current?t('Live device control'):t('Compatibility view')}</div></header><div className="u-content">{updateRun&&<div className={`u-update-banner ${updateRun.phase==='rollback'?'rollback':''}`} role="status"><b>{updateRun.phase==='rollback'?t('The update to v{version} failed; restoring the previous version…',{version:updateRun.target||''}):t('Updating to v{version}: {step}',{version:updateRun.target||'',step:t(UPDATE_PHASES[normalizedUpdatePhase(updateRun.phase)]||UPDATE_PHASES.requested)})}</b><span>{t('Until the update finishes, the version shown may change and lines may briefly reconnect.')}</span></div>}<div className="u-note" role="note">{t('Responsible use notice')}</div>{content}</div></main>
+    <main className="u-main"><header><div><h1>{t(NAV.find(x=>x[0]===view)?.[1]||view)}</h1><p>{t(`page.${view}.subtitle`)}</p></div><div className="u-live"><span className="u-dot" />{initialLoading?t('Loading…'):loadErrors.devices?t('Loading failed'):unifiedAvailable.current?t('Live device control'):t('Compatibility view')}</div></header><div className="u-content">{originRefused&&<div className="u-update-banner rollback" role="alert"><b>{t('Live updates and the softphone are off: the gateway does not recognise the address this page was opened from.')}</b><span>{t('A reverse proxy in front of the gateway must keep the Host header (nginx: proxy_set_header Host $http_host;), or be listed under Settings → Security → Trusted reverse proxies and send X-Forwarded-Host.')}</span></div>}{updateRun&&<div className={`u-update-banner ${updateRun.phase==='rollback'?'rollback':''}`} role="status"><b>{updateRun.phase==='rollback'?t('The update to v{version} failed; restoring the previous version…',{version:updateRun.target||''}):t('Updating to v{version}: {step}',{version:updateRun.target||'',step:t(UPDATE_PHASES[normalizedUpdatePhase(updateRun.phase)]||UPDATE_PHASES.requested)})}</b><span>{t('Until the update finishes, the version shown may change and lines may briefly reconnect.')}</span></div>}<div className="u-note" role="note">{t('Responsible use notice')}</div>{content}</div></main>
     {toast&&<div className="u-toast" key={toast.id} role="status">{toast.message}</div>}
     {updateOpen&&systemMeta.update?.update_available&&<UpdateModal update={systemMeta.update} current={systemMeta.version} t={t} onClose={()=>setUpdateOpen(false)}/>}
   </div>

@@ -60,6 +60,11 @@ EV_NUMBER_CHANGED = "number_changed"
 # could carry a tunnel, or the failures were never the exit's fault to begin with. Both need
 # a person, and a gateway that cannot recover should say so rather than rebuild forever.
 EV_LINE_UNRECOVERABLE = "line_unrecoverable"
+# A line has stayed off the network past the user's threshold, for whatever reason — including
+# ones the gateway is still busy retrying. The all-clear is its own event so a webhook can
+# tell the two apart and a user can keep one without the other.
+EV_LINE_OFFLINE = "line_offline"
+EV_LINE_RECOVERED = "line_recovered"
 # The scheduled number-keeping action ran. Both outcomes are announced, not just failures:
 # the successful case spent the user's money on their SIM, and that deserves a receipt.
 EV_KEEPALIVE_RESULT = "keepalive_result"
@@ -169,6 +174,8 @@ def _events_enabled(chan: dict) -> dict:
         EV_HOST_ALERT: ev.get(EV_HOST_ALERT, True),
         EV_NUMBER_CHANGED: ev.get(EV_NUMBER_CHANGED, True),
         EV_LINE_UNRECOVERABLE: ev.get(EV_LINE_UNRECOVERABLE, True),
+        EV_LINE_OFFLINE: ev.get(EV_LINE_OFFLINE, True),
+        EV_LINE_RECOVERED: ev.get(EV_LINE_RECOVERED, True),
         EV_KEEPALIVE_RESULT: ev.get(EV_KEEPALIVE_RESULT, True),
         EV_BALANCE_LOW: ev.get(EV_BALANCE_LOW, True),
         EV_MISSED_CALL: ev.get(EV_MISSED_CALL, True),
@@ -244,7 +251,8 @@ def build_payload(event: str, instance: dict, source: str, text: str | None) -> 
         "msisdn": instance.get("msisdn", "") or "",       # the line's own number (may be "")
         "from": source or "",                             # the event's source number
         "text": text if event in (EV_INCOMING_SMS, EV_HOST_ALERT, EV_NUMBER_CHANGED,
-                                  EV_LINE_UNRECOVERABLE, EV_KEEPALIVE_RESULT,
+                                  EV_LINE_UNRECOVERABLE, EV_LINE_OFFLINE,
+                                  EV_LINE_RECOVERED, EV_KEEPALIVE_RESULT,
                                   EV_BALANCE_LOW, EV_VOICEMAIL,
                                   EV_SOFTWARE_UPDATE) else None,
     }
@@ -276,6 +284,10 @@ def _default_notification_message(payload: dict) -> dict:
         return {"title": _titled(f"线路号码已变更 · {sim}"), "content": payload.get("text") or ""}
     if event == EV_LINE_UNRECOVERABLE:
         return {"title": _titled(f"线路无法自动恢复 · {sim}"), "content": payload.get("text") or ""}
+    if event == EV_LINE_OFFLINE:
+        return {"title": _titled(f"线路离线 · {sim}"), "content": payload.get("text") or ""}
+    if event == EV_LINE_RECOVERED:
+        return {"title": _titled(f"线路已恢复 · {sim}"), "content": payload.get("text") or ""}
     if event == EV_KEEPALIVE_RESULT:
         return {"title": _titled(f"保号执行结果 · {sim}"), "content": payload.get("text") or ""}
     if event == EV_BALANCE_LOW:
@@ -329,8 +341,8 @@ _MESSAGE_TEMPLATE_FIELDS = {
 _MAX_MESSAGE_TEMPLATE_LENGTH = 4000
 NOTIFICATION_EVENTS = {
     EV_INCOMING_SMS, EV_INCOMING_CALL, EV_HOST_ALERT, EV_NUMBER_CHANGED,
-    EV_LINE_UNRECOVERABLE, EV_KEEPALIVE_RESULT, EV_BALANCE_LOW, EV_MISSED_CALL,
-    EV_VOICEMAIL, EV_SOFTWARE_UPDATE,
+    EV_LINE_UNRECOVERABLE, EV_LINE_OFFLINE, EV_LINE_RECOVERED, EV_KEEPALIVE_RESULT,
+    EV_BALANCE_LOW, EV_MISSED_CALL, EV_VOICEMAIL, EV_SOFTWARE_UPDATE,
 }
 
 
@@ -582,6 +594,12 @@ def _default_telegram_text(payload: dict) -> str:
     if ev == EV_LINE_UNRECOVERABLE:
         return "\n".join([_telegram_headline("🛑", f"线路无法自动恢复 · {payload.get('sim_name') or payload.get('instance')}"),
                            "", payload.get("text") or ""])
+    if ev == EV_LINE_OFFLINE:
+        return "\n".join([_telegram_headline("📴", f"线路离线 · {payload.get('sim_name') or payload.get('instance')}"),
+                           "", payload.get("text") or ""])
+    if ev == EV_LINE_RECOVERED:
+        return "\n".join([_telegram_headline("✅", f"线路已恢复 · {payload.get('sim_name') or payload.get('instance')}"),
+                           "", payload.get("text") or ""])
     if ev == EV_NUMBER_CHANGED:
         return "\n".join([_telegram_headline("🔄", f"线路号码已变更 · {payload.get('sim_name') or payload.get('instance')}"),
                            "", payload.get("text") or ""])
@@ -769,11 +787,14 @@ def _post_telegram(cfg: dict, payload: dict):
         log.warning("telegram delivery failed: %s", type(exc).__name__)
 
 
-def dispatch(settings: dict, event: str, instance: dict, source: str, text: str | None = None):
+def dispatch(settings: dict, event: str, instance: dict, source: str, text: str | None = None,
+             match_instances: list[str] | None = None):
     """Queue independent deliveries on the notification pool and return their futures.
 
     HTTP and retry waits never run on the caller's thread. Each destination is gated on its
-    own enable flag, event selection and line filter.
+    own enable flag, event selection and line filter. ``match_instances`` is for one message
+    that speaks for several lines: a line-filtered destination receives it when any of them
+    is selected.
     """
     futures = []
     try:
@@ -790,7 +811,8 @@ def dispatch(settings: dict, event: str, instance: dict, source: str, text: str 
             deliveries.append(("pushplus", send_pushplus, pp))
         for position, fs in enumerate(feishu_channels(settings.get("feishu") or {}), start=1):
             if (fs.get("enabled") and _events_enabled(fs).get(event)
-                    and feishu_channel_matches(fs, payload.get("instance"))):
+                    and any(feishu_channel_matches(fs, iid) for iid in
+                            (match_instances or [payload.get("instance")]))):
                 channel_id = str(fs.get("id") or position)
                 delivery_channel = "feishu" if channel_id == "legacy" else f"feishu:{channel_id}"
                 deliveries.append((delivery_channel, send_feishu, fs))

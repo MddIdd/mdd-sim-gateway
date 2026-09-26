@@ -79,6 +79,9 @@ DEFAULTS = {
         "debug": {"asterisk": False, "charon": False, "pcap": False, "ami": False},
         "manager_url": "",          # reachable URL engines POST events to (auto if empty)
         "retry": {"max": 3, "interval": 30},   # auto-retry attempts + seconds per attempt
+        # Minutes an enabled line may stay off the network before the line_offline notification
+        # is sent. Short outages are the retry policy's job; this is for the ones it is losing.
+        "line_offline_notify_minutes": 10,
         # Proactive IKEv2 SA rekey. IKEv2 does NOT negotiate SA lifetime on the wire (RFC 7296
         # dropped it), so rekey timing is local policy (3GPP TS 24.302 clause 7.2.2C: use a
         # configured value, else an implementation value). We rekey the CHILD (ESP) SA every
@@ -1103,6 +1106,25 @@ def cp_mode_order_for(mcc: str, mnc: str) -> str:
     return ",".join(order)
 
 
+def _engine_manager_url(settings: dict) -> str:
+    """Where engine notify.py POSTs events (SMS, calls, tunnel state).
+
+    Explicit setting wins; else MDD_MANAGER_URL env (the installer sets this to the PUBLISHED
+    host port when the control plane runs in a bridge-networked container with a different
+    host port); else the default assumes a 1:1 host.docker.internal:<http_port> mapping.
+
+    In the container stack the Engine sits on an internal network with no route to the host,
+    so only the Control's own MDD_MANAGER_URL is reachable. A saved setting carried over from a
+    native install (host.docker.internal) would make every event time out while notify.py
+    swallows the error: inbound SMS reached the Engine but never the web UI."""
+    env_url = os.environ.get("MDD_MANAGER_URL")
+    if os.environ.get("MDD_CONTAINER_STACK") == "1" and env_url:
+        return env_url
+    return (settings.get("manager_url")
+            or env_url
+            or f"https://host.docker.internal:{settings.get('http_port', 10443)}")
+
+
 def render_instance_json(inst: dict, settings: dict) -> dict:
     """Convert a stored instance into the engine /config/instance.json contract."""
     ports = inst.get("ports", _alloc_ports(inst.get("index", 0)))
@@ -1156,13 +1178,7 @@ def render_instance_json(inst: dict, settings: dict) -> dict:
         "epdg": inst.get("epdg", ""),
         "ami_user": inst.get("ami_user", "vowifi"),
         "ami_secret": ami_secret,
-        # Where engine notify.py POSTs events. Explicit setting wins; else MDD_MANAGER_URL
-        # env (the installer sets this to the PUBLISHED host port when the control plane runs
-        # in a bridge-networked container with a different host port); else the default assumes
-        # a 1:1 host.docker.internal:<http_port> mapping.
-        "manager_url": settings.get("manager_url")
-                       or os.environ.get("MDD_MANAGER_URL")
-                       or f"https://host.docker.internal:{settings.get('http_port', 10443)}",
+        "manager_url": _engine_manager_url(settings),
         "manager_event_token": internal_event_token(),
         "domain": settings.get("tls", {}).get("domain", ""),
         "rtp_start": ports["rtp_start"],

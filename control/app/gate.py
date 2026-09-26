@@ -21,6 +21,7 @@ import hmac
 import ipaddress
 import logging
 from dataclasses import dataclass
+from typing import Callable
 from urllib.parse import urlsplit
 
 from starlette.requests import cookie_parser
@@ -89,19 +90,71 @@ def _session(headers: dict[str, str]) -> Principal | None:
     return Principal("admin", csrf=str(current.get("csrf") or "")) if current else None
 
 
-def principal(scope) -> Principal:
-    """Who is calling, from the credentials this request carries.
+def _engine(headers: dict[str, str]) -> Principal | None:
+    expected = cfg.internal_event_token()
+    supplied = headers.get(ENGINE_TOKEN_HEADER, "")
+    return ENGINE if expected and hmac.compare_digest(supplied, expected) else None
 
-    Only says who; whether that is enough for the path is the middleware's decision. The engine
-    token is honoured only on the engine callback, so it cannot stand in for a session anywhere
-    else.
+
+def _nobody(headers: dict[str, str]) -> Principal | None:
+    return None
+
+
+def _api(scope) -> bool:
+    return (scope.get("path") or "").startswith("/api/")
+
+
+@dataclass(frozen=True)
+class Source:
+    """Where one kind of caller's credential comes from, and what else it must prove.
+
+    ``resolve`` reads the credential from the headers and returns None when there is none or it
+    is not valid. ``required`` refuses the request then; otherwise it goes on as anonymous.
+    ``csrf`` asks state-changing requests for the session's CSRF token, which a browser does not
+    attach by itself. ``origin`` asks a WebSocket handshake for the gateway's own page.
     """
-    headers = _headers(scope)
-    if scope.get("type") == "http" and scope.get("path") == ENGINE_EVENT_PATH:
-        expected = cfg.internal_event_token()
-        supplied = headers.get(ENGINE_TOKEN_HEADER, "")
-        return ENGINE if expected and hmac.compare_digest(supplied, expected) else ANONYMOUS
-    return _session(headers) or ANONYMOUS
+
+    name: str
+    transport: str                          # "http" | "websocket"
+    matches: Callable[[dict], bool]
+    resolve: Callable[[dict[str, str]], Principal | None]
+    required: bool = True
+    refusal: str = "authentication required"
+    csrf: bool = False
+    origin: bool = False
+
+
+# Checked in order; the first source whose ``matches`` accepts the scope decides alone, so a
+# credential is honoured only where its own row says so -- the engine token nowhere but the
+# engine callback, the session cookie nowhere on it.
+SOURCES: tuple[Source, ...] = (
+    # Static assets stay public so the browser can render the login screen.
+    Source("static", "http", lambda scope: not _api(scope), _nobody, required=False),
+    # Reachable signed out; a session, if there is one, is still reported to the handler.
+    Source("public", "http", lambda scope: scope.get("path") in PUBLIC_PATHS, _session,
+           required=False),
+    Source("engine", "http", lambda scope: scope.get("path") == ENGINE_EVENT_PATH, _engine,
+           refusal="invalid engine token"),
+    Source("session", "http", _api, _session, csrf=True),
+    Source("socket", "websocket", lambda scope: True, _session, origin=True),
+)
+
+
+def source_for(scope) -> Source | None:
+    """The one credential source that decides this request, if the gate handles it at all."""
+    for source in SOURCES:
+        if source.transport == scope.get("type") and source.matches(scope):
+            return source
+    return None
+
+
+def principal(scope) -> Principal:
+    """Who is calling, from the credential its source accepts.
+
+    Only says who; whether that is enough for the path is the middleware's decision.
+    """
+    source = source_for(scope)
+    return (source.resolve(_headers(scope)) if source else None) or ANONYMOUS
 
 
 def current(connection) -> Principal:
@@ -166,61 +219,38 @@ def origin_allowed(scope, headers: dict[str, str] | None = None,
 
 
 class Gate:
-    """ASGI middleware: authenticate every API request and every WebSocket handshake."""
+    """ASGI middleware: dispatch every request and handshake to its credential source."""
 
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] == "http":
-            await self._http(scope, receive, send)
-        elif scope["type"] == "websocket":
-            await self._websocket(scope, receive, send)
-        else:
-            await self.app(scope, receive, send)
-
-    @staticmethod
-    def _admit(scope, who: Principal) -> None:
-        scope.setdefault("state", {})["principal"] = who
-
-    async def _http(self, scope, receive, send):
-        path = scope.get("path") or ""
-        if not path.startswith("/api/"):
-            # Static assets stay public so the browser can render the login screen.
-            self._admit(scope, ANONYMOUS)
+        source = source_for(scope)
+        if source is None:
             return await self.app(scope, receive, send)
-        who = principal(scope)
-        if path in PUBLIC_PATHS:
-            # Reachable signed out; a session, if there is one, is still reported to the handler.
-            self._admit(scope, who if who.kind == "admin" else ANONYMOUS)
-            return await self.app(scope, receive, send)
-        if path == ENGINE_EVENT_PATH:
-            if who.kind != "engine":
-                return await JSONResponse({"detail": "invalid engine token"},
-                                          status_code=401)(scope, receive, send)
-        elif who.kind != "admin":
-            return await JSONResponse({"detail": "authentication required"},
-                                      status_code=401)(scope, receive, send)
-        elif scope.get("method", "GET").upper() in MUTATING_METHODS:
-            supplied = _headers(scope).get(CSRF_HEADER, "")
-            if not hmac.compare_digest(supplied, who.csrf):
-                return await JSONResponse({"detail": "invalid CSRF token"},
-                                          status_code=403)(scope, receive, send)
-        self._admit(scope, who)
-        await self.app(scope, receive, send)
-
-    async def _websocket(self, scope, receive, send):
         headers = _headers(scope)
-        who = _session(headers) or ANONYMOUS
-        if who.kind != "admin":
-            return await self._refuse(scope, receive, send, WS_UNAUTHENTICATED)
-        if not origin_allowed(scope, headers):
+        who = source.resolve(headers)
+        if who is None and source.required:
+            return await self._deny(scope, receive, send, 401, source.refusal,
+                                    WS_UNAUTHENTICATED)
+        who = who or ANONYMOUS
+        if source.csrf and scope.get("method", "GET").upper() in MUTATING_METHODS:
+            if not hmac.compare_digest(headers.get(CSRF_HEADER, ""), who.csrf):
+                return await self._deny(scope, receive, send, 403, "invalid CSRF token",
+                                        WS_FORBIDDEN_ORIGIN)
+        if source.origin and not origin_allowed(scope, headers):
             log.warning("refused WebSocket %s from origin %r (host %r, forwarded host %r)",
                         scope.get("path"), headers.get("origin", ""), headers.get("host", ""),
                         headers.get("x-forwarded-host", ""))
-            return await self._refuse(scope, receive, send, WS_FORBIDDEN_ORIGIN)
-        self._admit(scope, who)
+            return await self._deny(scope, receive, send, 403, "origin not allowed",
+                                    WS_FORBIDDEN_ORIGIN)
+        scope.setdefault("state", {})["principal"] = who
         await self.app(scope, receive, send)
+
+    async def _deny(self, scope, receive, send, status: int, detail: str, close_code: int):
+        if scope["type"] == "websocket":
+            return await self._refuse(scope, receive, send, close_code)
+        await JSONResponse({"detail": detail}, status_code=status)(scope, receive, send)
 
     @staticmethod
     async def _refuse(scope, receive, send, code: int) -> None:

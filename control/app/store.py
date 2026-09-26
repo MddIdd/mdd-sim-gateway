@@ -442,9 +442,9 @@ def init():
                 );
                 CREATE INDEX IF NOT EXISTS idx_contacts_owner ON contacts(owner, name);
                 -- `number` is what the person typed, and what is shown back to them.
-                -- `match_key` is what an arriving number is compared against: contacts
-                -- .number_key, which is E.164 when the number can be dialled from anywhere
-                -- and the digits as written when it cannot.
+                -- `match_key` is what an arriving number is compared against on any line:
+                -- contacts.number_key without a country, which is E.164 when the number is
+                -- written internationally and the digits as written when it is not.
                 CREATE TABLE IF NOT EXISTS contact_numbers (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     contact_id INTEGER NOT NULL,
@@ -456,6 +456,18 @@ def init():
                     ON contact_numbers(contact_id);
                 CREATE INDEX IF NOT EXISTS idx_contact_numbers_match
                     ON contact_numbers(match_key);
+                -- The keys a nationally written number has in each country the gateway has a
+                -- line in, where they differ from match_key (contacts.number_keys). Derived from
+                -- `number` and rebuilt whenever those countries change (contacts_rekey).
+                CREATE TABLE IF NOT EXISTS contact_number_keys (
+                    number_id INTEGER NOT NULL,
+                    region TEXT NOT NULL,
+                    match_key TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_contact_number_keys_number
+                    ON contact_number_keys(number_id);
+                CREATE INDEX IF NOT EXISTS idx_contact_number_keys_match
+                    ON contact_number_keys(region, match_key);
                 """
             )
             # migration: per-message failure detail (added later)
@@ -2610,6 +2622,18 @@ def clear_line_states(instance: str) -> int:
 
 
 # ----------------------------- address book -----------------------------
+# Where a contact's numbers are found by key: match_key on every line, and the per-country keys
+# only on a line in that country (contacts.number_keys). `region` is the arriving line's.
+_CONTACT_KEY_ROWS = (
+    "SELECT contact_numbers.contact_id AS contact_id, contact_numbers.match_key AS key "
+    "FROM contact_numbers WHERE contact_numbers.match_key IN ({keys}) "
+    "UNION ALL "
+    "SELECT contact_numbers.contact_id, contact_number_keys.match_key "
+    "FROM contact_number_keys "
+    "JOIN contact_numbers ON contact_numbers.id = contact_number_keys.number_id "
+    "WHERE contact_number_keys.region {region} AND contact_number_keys.match_key IN ({keys})")
+
+
 def _contact_numbers(c, ids) -> dict[int, list[dict]]:
     if not ids:
         return {}
@@ -2630,11 +2654,35 @@ def _contact_docs(c, rows) -> list[dict]:
              "numbers": numbers.get(int(r["id"]), [])} for r in rows]
 
 
-def contacts_list(owner: int, query: str = "", limit: int = 1000, region: str = "") -> list[dict]:
+def _contacts_by_key(c, owner: int, keys, region: str | None, extra: str = "",
+                     limit: int | None = None) -> list:
+    """The owner's contacts holding one of `keys`, by name then id.
+
+    `region` is the arriving line's country: its per-country keys are searched and no other
+    country's. None searches every country's -- right for the owner's own search and for telling
+    whether an import is somebody already in the book, never for naming a caller.
+    """
+    keys = sorted({k for k in keys if k})
+    if not keys:
+        return []
+    placeholders = ",".join("?" for _ in keys)
+    region_clause, region_args = ("IS NOT NULL", ()) if region is None else ("= ?", (region,))
+    union = _CONTACT_KEY_ROWS.format(keys=placeholders, region=region_clause)
+    sql = (f"SELECT contacts.*, matched.key AS matched_key FROM ({union}) AS matched "
+           f"JOIN contacts ON contacts.id = matched.contact_id "
+           f"WHERE contacts.owner=? {extra} ORDER BY contacts.name COLLATE NOCASE, contacts.id")
+    args = (*keys, *region_args, *keys, int(owner))
+    if limit is not None:
+        sql += " LIMIT ?"
+        args += (int(limit),)
+    return c.execute(sql, args).fetchall()
+
+
+def contacts_list(owner: int, query: str = "", limit: int = 1000, regions=()) -> list[dict]:
     """The owner's contacts, optionally narrowed by name, company or number.
 
-    `region` lets a search typed in national form -- "07700 900123" -- reach a contact stored
-    as +447700900123, the same way an arriving number does.
+    `regions` lets a search typed in national form -- "07700 900123" -- reach a contact stored
+    as +447700900123, in whichever of the gateway's countries it is a number.
     """
     text = str(query or "").strip()
     with _lock, _conn() as c:
@@ -2644,18 +2692,26 @@ def contacts_list(owner: int, query: str = "", limit: int = 1000, region: str = 
             return _contact_docs(c, rows)
         like = f"%{text}%"
         digits = contacts_format.digits_of(text)
-        # A search that looks like a number is tried two ways: reduced the way an arriving
-        # number is, so a national spelling finds an international one, and as a plain suffix,
-        # so a fragment such as "900123" still finds the number it ends.
-        key = contacts_format.number_key(text, region) if digits else ""
         rows = c.execute(
             "SELECT DISTINCT contacts.* FROM contacts "
             "LEFT JOIN contact_numbers ON contact_numbers.contact_id = contacts.id "
             "WHERE contacts.owner=? AND (contacts.name LIKE ? OR contacts.company LIKE ? "
-            "   OR contact_numbers.number LIKE ? OR (?<>'' AND contact_numbers.match_key LIKE ?) "
-            "   OR (?<>'' AND contact_numbers.match_key=?)) "
+            "   OR contact_numbers.number LIKE ? OR (?<>'' AND contact_numbers.match_key LIKE ?)) "
             "ORDER BY contacts.name COLLATE NOCASE, contacts.id LIMIT ?",
-            (int(owner), like, like, like, digits, f"%{digits}", key, key, int(limit))).fetchall()
+            (int(owner), like, like, like, digits, f"%{digits}", int(limit))).fetchall()
+        # A search that looks like a number is also tried the way an arriving number is, so a
+        # national spelling finds an international one; a fragment such as "900123" is found by
+        # the suffix match above.
+        if digits:
+            rows = list(rows)
+            seen = {int(r["id"]) for r in rows}
+            for row in _contacts_by_key(c, owner, contacts_format.number_keys(text, regions)
+                                        .values(), None):
+                if int(row["id"]) not in seen:
+                    seen.add(int(row["id"]))
+                    rows.append(row)
+            rows.sort(key=lambda r: (str(r["name"]).casefold(), int(r["id"])))
+            rows = rows[:int(limit)]
         return _contact_docs(c, rows)
 
 
@@ -2678,25 +2734,34 @@ def _drop_numbers(c, contact_ids) -> None:
     for start in range(0, len(ids), 400):
         chunk = ids[start:start + 400]
         placeholders = ",".join("?" for _ in chunk)
+        c.execute(f"DELETE FROM contact_number_keys WHERE number_id IN "
+                  f"(SELECT id FROM contact_numbers WHERE contact_id IN ({placeholders}))",
+                  tuple(chunk))
         c.execute(f"DELETE FROM contact_numbers WHERE contact_id IN ({placeholders})",
                   tuple(chunk))
 
 
-def _add_numbers(c, contact_id: int, numbers, region: str) -> None:
+def _add_country_keys(c, number_id: int, keys: dict[str, str]) -> None:
+    c.executemany("INSERT INTO contact_number_keys(number_id,region,match_key) VALUES(?,?,?)",
+                  [(int(number_id), region, key) for region, key in keys.items() if region])
+
+
+def _add_numbers(c, contact_id: int, numbers, regions) -> None:
     for item in numbers:
-        c.execute("INSERT INTO contact_numbers(contact_id,label,number,match_key) "
-                  "VALUES(?,?,?,?)",
-                  (int(contact_id), item.get("label") or "", item["number"],
-                   contacts_format.number_key(item["number"], region)))
+        keys = contacts_format.number_keys(item["number"], regions)
+        cur = c.execute("INSERT INTO contact_numbers(contact_id,label,number,match_key) "
+                        "VALUES(?,?,?,?)",
+                        (int(contact_id), item.get("label") or "", item["number"], keys[""]))
+        _add_country_keys(c, int(cur.lastrowid), keys)
 
 
-def _write_numbers(c, contact_id: int, numbers, region: str) -> None:
+def _write_numbers(c, contact_id: int, numbers, regions) -> None:
     _drop_numbers(c, [contact_id])
-    _add_numbers(c, contact_id, numbers, region)
+    _add_numbers(c, contact_id, numbers, regions)
 
 
-def contact_create(owner: int, contact: dict, region: str = "") -> dict:
-    clean = contacts_format.normalize_contact(contact, region)
+def contact_create(owner: int, contact: dict, regions=()) -> dict:
+    clean = contacts_format.normalize_contact(contact, regions)
     now = int(time.time())
     with _lock, _conn() as c:
         count = int(c.execute("SELECT COUNT(*) FROM contacts WHERE owner=?",
@@ -2707,12 +2772,12 @@ def contact_create(owner: int, contact: dict, region: str = "") -> dict:
                         "VALUES(?,?,?,?,?,?)",
                         (int(owner), clean["name"], clean["company"], clean["note"], now, now))
         contact_id = int(cur.lastrowid)
-        _write_numbers(c, contact_id, clean["numbers"], region)
+        _write_numbers(c, contact_id, clean["numbers"], regions)
         return {"id": contact_id, "updated_ts": now, **clean}
 
 
-def contact_update(owner: int, contact_id: int, contact: dict, region: str = "") -> dict | None:
-    clean = contacts_format.normalize_contact(contact, region)
+def contact_update(owner: int, contact_id: int, contact: dict, regions=()) -> dict | None:
+    clean = contacts_format.normalize_contact(contact, regions)
     now = int(time.time())
     with _lock, _conn() as c:
         exists = c.execute("SELECT id FROM contacts WHERE owner=? AND id=?",
@@ -2721,7 +2786,7 @@ def contact_update(owner: int, contact_id: int, contact: dict, region: str = "")
             return None
         c.execute("UPDATE contacts SET name=?,company=?,note=?,updated_ts=? WHERE id=?",
                   (clean["name"], clean["company"], clean["note"], now, int(contact_id)))
-        _write_numbers(c, int(contact_id), clean["numbers"], region)
+        _write_numbers(c, int(contact_id), clean["numbers"], regions)
         return {"id": int(contact_id), "updated_ts": now, **clean}
 
 
@@ -2739,9 +2804,10 @@ def contacts_resolve(owner: int, numbers, region: str = "") -> dict[str, dict]:
 
     Answering in the caller's own spelling is what lets a conversation list built from message
     rows use the result without normalising anything itself. `region` is the country of the
-    line the numbers arrived on (egress.line_country): a number written in national form is
-    national to that country and to no other.
+    line the numbers arrived on: a number written in national form is national to that country,
+    and a contact typed in national form is found through that country's key and no other's.
     """
+    region = str(region or "").lower()
     wanted: dict[str, list[str]] = {}
     for number in numbers or []:
         key = contacts_format.number_key(str(number), region)
@@ -2753,42 +2819,45 @@ def contacts_resolve(owner: int, numbers, region: str = "") -> dict[str, dict]:
     with _lock, _conn() as c:
         keys = list(wanted)
         for start in range(0, len(keys), 400):
-            chunk = keys[start:start + 400]
-            placeholders = ",".join("?" for _ in chunk)
-            rows = c.execute(
-                f"SELECT contact_numbers.match_key AS key, contacts.id AS id, "
-                f"contacts.name AS name FROM contact_numbers "
-                f"JOIN contacts ON contacts.id = contact_numbers.contact_id "
-                f"WHERE contacts.owner=? AND contact_numbers.match_key IN ({placeholders}) "
-                f"ORDER BY contacts.name COLLATE NOCASE, contacts.id",
-                (int(owner), *chunk)).fetchall()
-            for row in rows:
-                for original in wanted.get(str(row["key"]), []):
+            for row in _contacts_by_key(c, owner, keys[start:start + 400], region):
+                for original in wanted.get(str(row["matched_key"]), []):
                     out.setdefault(original, {"id": int(row["id"]), "name": row["name"]})
     return out
 
 
-def contacts_rekey(region: str = "") -> int:
-    """Recompute every stored match key for `region`, the country numbers are national to.
+def contacts_rekey(regions=()) -> int:
+    """Rebuild every stored key for `regions`, the countries the gateway has lines in.
 
-    A key is fixed when the number is written, and for a national spelling it depends on the
-    country the gateway was in at that moment: typed before any SIM said where it was, or
-    before a second line in another country made the answer ambiguous, it no longer agrees
-    with how an arriving number is keyed now. The number as typed is kept, so the key can
-    always be worked out again. Returns how many keys changed.
+    A number typed in national form has a key for each of them, and the set changes as lines are
+    added and removed and as a SIM reports where it is. The number as typed is kept, so the keys
+    can always be worked out again. Returns how many numbers' keys changed.
     """
+    regions = contacts_format.as_regions(regions)
     with _lock, _conn() as c:
-        rows = c.execute("SELECT id, number, match_key FROM contact_numbers").fetchall()
-        changed = []
-        for row in rows:
-            key = contacts_format.number_key(row["number"], region)
-            if key != row["match_key"]:
-                changed.append((key, int(row["id"])))
-        c.executemany("UPDATE contact_numbers SET match_key=? WHERE id=?", changed)
-    return len(changed)
+        stored: dict[int, dict[str, str]] = {}
+        for row in c.execute("SELECT id, match_key FROM contact_numbers").fetchall():
+            stored[int(row["id"])] = {"": row["match_key"]}
+        for row in c.execute("SELECT number_id, region, match_key FROM contact_number_keys"):
+            stored.setdefault(int(row["number_id"]), {})[row["region"]] = row["match_key"]
+        changed = 0
+        for row in c.execute("SELECT id, number FROM contact_numbers").fetchall():
+            number_id = int(row["id"])
+            keys = contacts_format.number_keys(row["number"], regions)
+            if keys == stored.get(number_id):
+                continue
+            changed += 1
+            c.execute("UPDATE contact_numbers SET match_key=? WHERE id=?", (keys[""], number_id))
+            c.execute("DELETE FROM contact_number_keys WHERE number_id=?", (number_id,))
+            _add_country_keys(c, number_id, keys)
+    return changed
 
 
-def _name_is_a_number(name: str, keys: set[str], region: str) -> bool:
+def _all_keys(numbers, regions) -> set[str]:
+    return {key for item in numbers
+            for key in contacts_format.number_keys(item["number"], regions).values()}
+
+
+def _name_is_a_number(name: str, keys: set[str], regions) -> bool:
     """Whether `name` is only one of the contact's own numbers standing in for a name.
 
     That is what a card without a readable name is stored under, and a later import that does
@@ -2796,10 +2865,10 @@ def _name_is_a_number(name: str, keys: set[str], region: str) -> bool:
     """
     if re.search(r"[^\d\s()+\-.]", str(name or "")):
         return False
-    return contacts_format.number_key(name, region) in keys
+    return bool(set(contacts_format.number_keys(name, regions).values()) & keys)
 
 
-def contacts_import(owner: int, incoming, region: str = "") -> dict:
+def contacts_import(owner: int, incoming, regions=()) -> dict:
     """Add contacts, folding one into an existing entry only when it is the same person.
 
     A re-import of the same export must not double the address book, so an incoming contact
@@ -2817,21 +2886,17 @@ def contacts_import(owner: int, incoming, region: str = "") -> dict:
         count = int(c.execute("SELECT COUNT(*) FROM contacts WHERE owner=?",
                               (int(owner),)).fetchone()[0])
         for contact in incoming:
-            clean = contacts_format.normalize_contact(contact, region)
-            keys = {contacts_format.number_key(item["number"], region)
-                    for item in clean["numbers"]}
-            placeholders = ",".join("?" for _ in keys)
-            candidates = c.execute(
-                f"SELECT DISTINCT contacts.id AS id, contacts.name AS name FROM contact_numbers "
-                f"JOIN contacts ON contacts.id = contact_numbers.contact_id "
-                f"WHERE contacts.owner=? AND contact_numbers.match_key IN ({placeholders}) "
-                f"ORDER BY contacts.name COLLATE NOCASE, contacts.id",
-                (int(owner), *sorted(keys))).fetchall()
-            numbers = _contact_numbers(c, [int(r["id"]) for r in candidates])
-            have = {int(r["id"]): {contacts_format.number_key(item["number"], region)
-                                   for item in numbers.get(int(r["id"]), [])}
-                    for r in candidates}
-            unnamed = _name_is_a_number(clean["name"], keys, region)
+            clean = contacts_format.normalize_contact(contact, regions)
+            keys = _all_keys(clean["numbers"], regions)
+            candidates, seen = [], set()
+            for row in _contacts_by_key(c, owner, keys, None):
+                if int(row["id"]) not in seen:
+                    seen.add(int(row["id"]))
+                    candidates.append(row)
+            numbers = _contact_numbers(c, list(seen))
+            have = {contact_id: _all_keys(numbers.get(contact_id, []), regions)
+                    for contact_id in seen}
+            unnamed = _name_is_a_number(clean["name"], keys, regions)
             target = rename = None
             for row in candidates:
                 if row["name"].casefold() == clean["name"].casefold() or unnamed:
@@ -2839,18 +2904,17 @@ def contacts_import(owner: int, incoming, region: str = "") -> dict:
                     break
             if target is None and not unnamed:
                 target = next((row for row in candidates
-                               if _name_is_a_number(row["name"], have[int(row["id"])], region)),
+                               if _name_is_a_number(row["name"], have[int(row["id"])], regions)),
                               None)
                 rename = target
             if target is not None:
                 existing = int(target["id"])
                 fresh = [item for item in clean["numbers"]
-                         if contacts_format.number_key(item["number"], region)
-                         not in have[existing]]
+                         if not _all_keys([item], regions) & have[existing]]
                 if not fresh and rename is None:
                     skipped += 1
                     continue
-                _add_numbers(c, existing, fresh, region)
+                _add_numbers(c, existing, fresh, regions)
                 if rename is not None:
                     c.execute("UPDATE contacts SET name=? WHERE id=?", (clean["name"], existing))
                 c.execute("UPDATE contacts SET updated_ts=? WHERE id=?", (now, existing))
@@ -2861,7 +2925,7 @@ def contacts_import(owner: int, incoming, region: str = "") -> dict:
             cur = c.execute("INSERT INTO contacts(owner,name,company,note,created_ts,updated_ts) "
                             "VALUES(?,?,?,?,?,?)",
                             (int(owner), clean["name"], clean["company"], clean["note"], now, now))
-            _write_numbers(c, int(cur.lastrowid), clean["numbers"], region)
+            _write_numbers(c, int(cur.lastrowid), clean["numbers"], regions)
             count += 1
             added += 1
     return {"added": added, "merged": merged, "skipped": skipped}

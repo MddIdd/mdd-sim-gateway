@@ -288,8 +288,8 @@ class StoreTests(_BookTest):
                                  "numbers": [{"number": UK}]})
         for query in ("alice", "Example", "900123", UK_NATIONAL):
             with self.subTest(query=query):
-                self.assertEqual(len(store.contacts_list(2, query, region=GB)), 1, query)
-        self.assertEqual(store.contacts_list(2, "bob", region=GB), [])
+                self.assertEqual(len(store.contacts_list(2, query, regions=GB)), 1, query)
+        self.assertEqual(store.contacts_list(2, "bob", regions=GB), [])
 
     def test_editing_replaces_the_numbers_and_deleting_takes_them_with_it(self):
         created = store.contact_create(2, {"name": "Alice", "numbers": [UK]}, GB)
@@ -364,7 +364,7 @@ class StoreTests(_BookTest):
         self.assertEqual(store.contacts_resolve(2, ["+44 20 8765 4321"], "gb"), {})
 
     def test_without_a_country_a_national_spelling_matches_only_itself(self):
-        # What a gateway whose lines disagree on their country gets: no guess in any direction.
+        # What a gateway that does not know its country yet gets: no guess in any direction.
         store.contact_create(2, {"name": "Alice", "numbers": ["020 87654321"]}, "")
         self.assertEqual(store.contacts_resolve(2, ["020 87654321"], "")["020 87654321"]["name"],
                          "Alice")
@@ -373,18 +373,45 @@ class StoreTests(_BookTest):
     def test_a_book_typed_before_the_country_was_known_is_rekeyed_once_it_is(self):
         # Imported before any SIM said where the gateway is: the national spelling is kept as
         # written, and an arriving international number cannot find it.
-        store.contact_create(2, {"name": "Alice", "numbers": [UK_NATIONAL]}, "")
-        store.contact_create(2, {"name": "Bob", "numbers": [US]}, "")
+        store.contact_create(2, {"name": "Alice", "numbers": [UK_NATIONAL]}, ())
+        store.contact_create(2, {"name": "Bob", "numbers": [US]}, ())
         self.assertEqual(store.contacts_resolve(2, [UK], GB), {})
-        # Once the country is known the key is worked out again from the number as typed;
+        # Once the country is known the keys are worked out again from the number as typed;
         # the international number did not depend on it and is left alone.
-        self.assertEqual(store.contacts_rekey(GB), 1)
+        self.assertEqual(store.contacts_rekey([GB]), 1)
         self.assertEqual(store.contacts_resolve(2, [UK], GB)[UK]["name"], "Alice")
-        self.assertEqual(store.contacts_rekey(GB), 0)
-        # And back: a second line in another country leaves no answer, and no guess.
-        self.assertEqual(store.contacts_rekey(""), 1)
+        self.assertEqual(store.contacts_rekey([GB]), 0)
+        # A second country adds its own keys and leaves the first country's working.
+        store.contacts_rekey(["cn", GB])
+        self.assertEqual(store.contacts_resolve(2, [UK], GB)[UK]["name"], "Alice")
+        self.assertEqual(store.contacts_resolve(2, [US], "cn")[US]["name"], "Bob")
+        # And with no line left in that country, the national spelling matches only itself.
+        store.contacts_rekey(["cn"])
         self.assertEqual(store.contacts_resolve(2, [UK], GB), {})
-        self.assertEqual(store.contacts_resolve(2, [US], GB)[US]["name"], "Bob")
+
+    def test_with_lines_in_several_countries_each_line_reads_the_book_as_its_own(self):
+        # A British and a Chinese SIM in one gateway, and a book typed in national form, as a
+        # phone exports it. Each line names callers the way a phone holding that SIM would.
+        regions = ("cn", GB)
+        store.contact_create(2, {"name": "Alice", "numbers": [UK_NATIONAL]}, regions)
+        store.contact_create(2, {"name": "妈妈", "numbers": ["138 0013 8000"]}, regions)
+        store.contact_create(2, {"name": "广州办公室", "numbers": ["020 8765 4321"]}, regions)
+        self.assertEqual(store.contacts_resolve(2, [UK], GB)[UK]["name"], "Alice")
+        self.assertEqual(store.contacts_resolve(2, ["+86 138 0013 8000"], "cn")
+                         ["+86 138 0013 8000"]["name"], "妈妈")
+        self.assertEqual(store.contacts_resolve(2, ["+86 20 8765 4321"], "cn")
+                         ["+86 20 8765 4321"]["name"], "广州办公室")
+        # A British number is not somebody in China because the digits happen to fit there,
+        # and the other way round.
+        self.assertEqual(store.contacts_resolve(2, ["+44 20 8765 4321"], "cn"), {})
+        self.assertEqual(store.contacts_resolve(2, [UK], "cn"), {})
+        self.assertEqual(store.contacts_resolve(2, ["+86 138 0013 8000"], GB), {})
+        # Searching finds a contact through any of the gateway's countries.
+        self.assertEqual([c["name"] for c in store.contacts_list(2, UK, regions=regions)],
+                         ["Alice"])
+        # One number written two ways in one card is still one number.
+        clean = contacts.normalize_contact({"name": "A", "numbers": [UK, UK_NATIONAL]}, regions)
+        self.assertEqual(len(clean["numbers"]), 1)
 
     def test_an_import_folds_into_the_same_contact_every_time(self):
         # Two entries may share a number, as they may on a phone; the one an import folds into
@@ -431,13 +458,22 @@ class ApiTests(_BookTest):
                  "state": {"admin_session": {"user": "admin"}}}
         return self.main.Request(scope, receive), sent
 
-    def test_the_keys_are_worked_out_again_only_when_the_country_changes(self):
-        answers = iter(["", "gb", "gb", ""])
-        with patch.object(self.main, "_contact_region", lambda: next(answers)), \
+    def test_the_keys_are_worked_out_again_only_when_the_countries_change(self):
+        answers = iter([(), ("gb",), ("gb",), ("cn", "gb")])
+        with patch.object(self.main, "_contact_regions", lambda: next(answers)), \
                 patch.object(store, "contacts_rekey") as rekey:
             for _ in range(4):
-                self.main._contact_region_current()
-        self.assertEqual([c.args for c in rekey.call_args_list], [("",), ("gb",), ("",)])
+                self.main._contact_regions_current()
+        self.assertEqual([c.args for c in rekey.call_args_list],
+                         [((),), (("gb",),), (("cn", "gb"),)])
+
+    def test_a_line_is_in_its_sim_s_country_wherever_its_traffic_leaves(self):
+        # 234 is the United Kingdom; the exit is only where the tunnel comes out.
+        self.assertEqual(self.main._line_country({"mcc": "234", "proxy_country": "us"}), "gb")
+        self.assertEqual(self.main._line_country({"mcc": "", "proxy_country": "us"}), "us")
+        # A resolve without a line borrows the gateway's country only when there is one.
+        self.assertEqual(self.main._line_region("", ("gb",)), "gb")
+        self.assertEqual(self.main._line_region("", ("cn", "gb")), "")
 
     def test_an_import_without_a_content_length_is_read(self):
         card = ("BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Alice\r\nTEL:" + UK +
@@ -445,7 +481,7 @@ class ApiTests(_BookTest):
         body = (b"--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.vcf\"\r\n"
                 b"Content-Type: text/vcard\r\n\r\n" + card + b"\r\n--b--\r\n")
         request, _ = self.request(body, "multipart/form-data; boundary=b")
-        with patch.object(self.main, "_contact_region", lambda: GB):
+        with patch.object(self.main, "_contact_regions", lambda: (GB,)):
             result = asyncio.run(self.main.api_contacts_import(request))
         self.assertEqual((result["read"], result["added"]), (1, 1))
 
@@ -471,7 +507,7 @@ class ApiTests(_BookTest):
                  (b'{"text": ' + json.dumps(field.decode()).encode() + b'}', "application/json")]
         for body, content_type in cases:
             request, _ = self.request(body, content_type)
-            with patch.object(self.main, "_contact_region", lambda: GB), \
+            with patch.object(self.main, "_contact_regions", lambda: (GB,)), \
                     self.assertRaises(self.main.HTTPException) as refused:
                 asyncio.run(self.main.api_contacts_import(request))
             self.assertEqual(refused.exception.status_code, 400, body[:20])
@@ -488,7 +524,7 @@ class ApiTests(_BookTest):
             threads.append(threading.get_ident())
             return await self.main.api_contacts_import(request)
 
-        with patch.object(self.main, "_contact_region", lambda: GB), \
+        with patch.object(self.main, "_contact_regions", lambda: (GB,)), \
                 patch.object(self.main, "_contact_file", read):
             self.assertEqual(asyncio.run(run())["added"], 1)
         self.assertEqual(len(threads), 2)

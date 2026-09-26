@@ -5695,31 +5695,29 @@ def _owner(request: Request) -> int:
     return store.ADMIN_OWNER
 
 
-def _contact_region() -> str:
-    """The country a number typed into the address book is national to.
+def _line_country(inst: dict) -> str:
+    """The country a number arriving on this line is written for.
 
-    egress.line_country is the gateway's existing answer to which country a line is in -- the
-    operator's country-exit choice first, the SIM's own MCC otherwise -- and this is that
-    answer when the lines agree on it.
-
-    When they do not, there is no answer: the same national spelling names a different
-    destination in each country, and guessing all of them would announce a London number under
-    a Guangzhou contact's name. Such an entry is left as written, exactly as a number that
-    only means something locally is, and matches only the same spelling. Typed with a "+" it
-    works from every line.
+    The SIM's own country first: a VoWiFi line reaches its home network wherever the gateway's
+    traffic leaves the internet, and the home network writes a caller's number, and reads a
+    dialled one, by its own numbering plan. The operator's country-exit choice
+    (egress.line_country) answers only while the SIM has not said where it is from.
     """
-    found = {egress.line_country(inst) for inst in cfg.list_instances()}
-    found.discard("")
-    return found.pop() if len(found) == 1 else ""
+    return egress.country_for_mcc(inst.get("mcc")) or egress.line_country(inst)
 
 
-# The country the stored match keys were last worked out for; None until the first address-book
-# request of this process has checked them.
-_contact_keys_for: str | None = None
+def _contact_regions() -> tuple[str, ...]:
+    """The countries the gateway has lines in: those a number typed nationally is keyed for."""
+    return contacts.as_regions(_line_country(inst) for inst in cfg.list_instances())
 
 
-def _contact_region_current() -> str:
-    """_contact_region(), with the stored match keys brought up to date for it first.
+# The countries the stored per-country keys were last built for; None until the first
+# address-book request of this process has checked them.
+_contact_keys_for: tuple[str, ...] | None = None
+
+
+def _contact_regions_current() -> tuple[str, ...]:
+    """_contact_regions(), with the stored keys brought up to date for them first.
 
     The answer changes as lines are added and as a SIM reports where it is, and a number typed
     in national form was keyed for whatever the answer was then (store.contacts_rekey). It is
@@ -5727,11 +5725,11 @@ def _contact_region_current() -> str:
     one comparison, and nothing outside the address book needs to know it exists.
     """
     global _contact_keys_for
-    region = _contact_region()
-    if region != _contact_keys_for:
-        store.contacts_rekey(region)
-        _contact_keys_for = region
-    return region
+    regions = _contact_regions()
+    if regions != _contact_keys_for:
+        store.contacts_rekey(regions)
+        _contact_keys_for = regions
+    return regions
 
 
 class _ContactUploadTooLarge(Exception):
@@ -5769,17 +5767,22 @@ def _contact_upload(request: Request) -> Request:
     return Request(request.scope, receive)
 
 
-def _line_region(iid: str) -> str:
-    """The country a number arriving on this line is national to, or "" when unknown."""
-    return egress.line_country(cfg.get_instance(str(iid)) or {}) if iid else ""
+def _line_region(iid: str, regions: tuple[str, ...]) -> str:
+    """The country a number arriving on this line is national to, or "" when unknown.
+
+    Without a line there is still an answer when the gateway is in one country only.
+    """
+    if iid:
+        return _line_country(cfg.get_instance(str(iid)) or {})
+    return regions[0] if len(regions) == 1 else ""
 
 
 @app.get("/api/contacts")
 async def api_contacts(request: Request, query: str = "", limit: int = 1000):
     owner = _owner(request)
-    region = await asyncio.to_thread(_contact_region_current)
+    regions = await asyncio.to_thread(_contact_regions_current)
     items = await asyncio.to_thread(store.contacts_list, owner, query,
-                                    max(1, min(int(limit), 2000)), region)
+                                    max(1, min(int(limit), 2000)), regions)
     return {"contacts": items, "total": await asyncio.to_thread(store.contacts_count, owner)}
 
 
@@ -5787,8 +5790,8 @@ async def api_contacts(request: Request, query: str = "", limit: int = 1000):
 async def api_contact_create(body: dict, request: Request):
     try:
         owner = _owner(request)
-        region = await asyncio.to_thread(_contact_region_current)
-        return {"contact": await asyncio.to_thread(store.contact_create, owner, body, region)}
+        regions = await asyncio.to_thread(_contact_regions_current)
+        return {"contact": await asyncio.to_thread(store.contact_create, owner, body, regions)}
     except contacts.ContactError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -5797,9 +5800,9 @@ async def api_contact_create(body: dict, request: Request):
 async def api_contact_update(contact_id: int, body: dict, request: Request):
     try:
         owner = _owner(request)
-        region = await asyncio.to_thread(_contact_region_current)
+        regions = await asyncio.to_thread(_contact_regions_current)
         updated = await asyncio.to_thread(store.contact_update, owner, int(contact_id), body,
-                                          region)
+                                          regions)
     except contacts.ContactError as exc:
         raise HTTPException(400, str(exc)) from exc
     if updated is None:
@@ -5819,13 +5822,13 @@ async def api_contacts_resolve(body: dict, request: Request):
     """Name the numbers on one screen at once, so a conversation list is one extra request.
 
     `line` says which line they arrived on, because a number written in national form is
-    national to that line's country and to no other. Without it only an international
-    spelling can be recognised.
+    national to that line's country and to no other. Without it the gateway's country stands in
+    when it has lines in only one; otherwise only an international spelling can be recognised.
     """
     owner = _owner(request)
     numbers = [str(n) for n in (body.get("numbers") or [])][:CONTACT_RESOLVE_LIMIT]
-    await asyncio.to_thread(_contact_region_current)     # the stored keys, before comparing
-    region = await asyncio.to_thread(_line_region, str(body.get("line") or ""))
+    regions = await asyncio.to_thread(_contact_regions_current)   # keys current first
+    region = await asyncio.to_thread(_line_region, str(body.get("line") or ""), regions)
     return {"contacts": await asyncio.to_thread(store.contacts_resolve, owner, numbers, region)}
 
 
@@ -5877,8 +5880,8 @@ async def api_contacts_import(request: Request):
         # Reading a file of this size takes long enough that it must not hold up the event loop,
         # which carries every call and message on the gateway.
         parsed, problems = await asyncio.to_thread(_contact_file, raw, filename)
-        region = await asyncio.to_thread(_contact_region_current)
-        result = await asyncio.to_thread(store.contacts_import, owner, parsed, region)
+        regions = await asyncio.to_thread(_contact_regions_current)
+        result = await asyncio.to_thread(store.contacts_import, owner, parsed, regions)
     except contacts.ContactError as exc:
         raise HTTPException(400, str(exc)) from exc
     return {**result, "read": len(parsed), "problems": problems[:50]}

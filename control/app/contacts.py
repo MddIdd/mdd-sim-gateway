@@ -8,8 +8,12 @@ hand is no tidier. Two spellings are compared by reducing each to E.164, which i
 that names one destination from anywhere.
 
 Reducing a national spelling to E.164 needs to know which country it is national to, and the
-gateway does know: ``egress.line_country`` answers it per line -- the operator's country-exit
-choice first, the SIM's own MCC otherwise. Callers pass it as `region`.
+answer is the line's: a number arriving on a line is written the way that SIM's home network
+writes it. So a number typed in national form is keyed once for each country the gateway has a
+line in (`number_keys`), and an arriving number is compared only against the key for the
+country of the line it arrived on. That is what a phone holding that SIM and this address book
+would do. Callers pass the arriving line's country as `region`, and the gateway's countries as
+`regions`.
 
 Comparing trailing digits instead, as handsets do, is tempting and wrong here. It has to take
 the tail of the full international digit string, so as soon as the subscriber number is short
@@ -77,6 +81,28 @@ def number_key(number: str, region: str | None = None) -> str:
     return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
 
 
+def as_regions(regions) -> tuple[str, ...]:
+    """The gateway's countries as sorted lower-case codes; one country may be given as a string."""
+    if isinstance(regions, str):
+        regions = [regions]
+    return tuple(sorted({str(r).strip().lower() for r in regions or () if str(r or "").strip()}))
+
+
+def number_keys(number: str, regions=()) -> dict[str, str]:
+    """Every key a stored number is found by: region -> key.
+
+    "" holds the key that needs no country: E.164 for an international spelling, the digits for
+    anything else. Each country in `regions` adds the key the number has when it is read as
+    national to that country, where that differs. A lookup uses "" and the arriving line's own
+    country, never the others -- "020 8765 4321" is a London number to a British line and a
+    Guangzhou one to a Chinese line, and neither line should be told about the other's.
+    """
+    keys = {"": number_key(number)}
+    for region in as_regions(regions):
+        key = number_key(number, region)
+        if key and key != keys[""]:
+            keys[region] = key
+    return keys
 
 
 def clean_number(number: str) -> str:
@@ -92,11 +118,11 @@ class ContactError(ValueError):
     """A refused address-book operation whose message is safe to show the caller."""
 
 
-def normalize_contact(contact: dict, region: str = "") -> dict:
+def normalize_contact(contact: dict, regions=()) -> dict:
     """Bound and tidy one contact, refusing the two things that make an entry meaningless."""
     name = clean_name(contact.get("name"))
     numbers = []
-    seen = set()
+    seen: set[str] = set()
     for item in (contact.get("numbers") or [])[:MAX_NUMBERS_PER_CONTACT]:
         if isinstance(item, str):
             item = {"number": item}
@@ -105,10 +131,10 @@ def normalize_contact(contact: dict, region: str = "") -> dict:
             continue
         # Deduplicated on what matching compares, not on the exact digits: an export that
         # lists a number in both national and international form is one number.
-        key = number_key(number, region)
-        if key in seen:
+        keys = set(number_keys(number, regions).values())
+        if keys & seen:
             continue
-        seen.add(key)
+        seen |= keys
         numbers.append({"label": str((item or {}).get("label") or "").strip()[:LABEL_MAX],
                         "number": number})
     if not name and numbers:

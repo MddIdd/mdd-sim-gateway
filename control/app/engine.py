@@ -44,6 +44,8 @@ LIFECYCLE_EVENTS = {
     # reason_code carries the closed code (no_card / pin_required / pin_invalid /
     # card_mismatch / card_unreadable); the ICCID itself never enters this public record.
     "preflight_blocked",
+    # Rebuilt because the gateway's media mode changed; reason_code is the new mode.
+    "media_mode_rebuild",
 }
 _LIFECYCLE_REASON = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _LIFECYCLE_INSTANCE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -634,6 +636,19 @@ def container_runtime(iid: str) -> dict:
     except docker.errors.NotFound:
         return {"running": False, "ip": None, "container_id": None,
                 "restart_count": 0, "started_at": ""}
+
+
+def media_mode_of(iid: str) -> str | None:
+    """The media mode a running engine was created in, or None when it is not running.
+    Containers from before relay mode existed carry no label and run in direct mode."""
+    try:
+        c = _client().containers.get(container_name(iid))
+    except docker.errors.NotFound:
+        return None
+    if c.status != "running":
+        return None
+    labels = (c.attrs.get("Config") or {}).get("Labels") or {}
+    return labels.get(media.MODE_LABEL) or media.DIRECT
 
 
 def last_engine_exit(iid: str) -> dict:

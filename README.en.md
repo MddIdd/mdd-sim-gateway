@@ -36,7 +36,7 @@ There are two ways to deploy. Both provide the same features; choose by host:
 | Resident containers | One Engine per line | Control, Hardware and Egress, plus one Engine per line |
 | Country exits | A TUN and ePDG routes per country | A SOCKS5 listener per country; the host routing table and DNS are untouched |
 | Console | `https://<gateway-address>:8443` | `https://<host-address>:10443` |
-| Status | Stable | Release candidate (v1.12.0-rc), validated on a Synology DS1621+ |
+| Status | Stable | Stable, validated on a Synology DS1621+ and a Raspberry Pi |
 
 ### Option 1: host install
 

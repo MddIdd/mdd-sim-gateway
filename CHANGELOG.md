@@ -2,6 +2,30 @@
 
 All notable changes follow Keep a Changelog and Semantic Versioning.
 
+## [1.12.0] - 2026-09-26
+
+First release with the full-container deployment. It rolls up 1.12.0-rc1 to rc11, listed below.
+The automatic update channel stays on 1.9.5.
+
+### Added
+
+- Full-container deployment on any Linux host with Docker Compose, including Synology NAS: three
+  base containers plus one Engine per line, one-click update with whole-stack rollback, amd64 and
+  arm64 images, a version-pinned Compose file, and a Synology DS1621+ driver pack. Validated on a
+  DS1621+ and a Raspberry Pi.
+- Modem VoLTE / IMS switch; detection of carriers without Wi-Fi Calling; cellular call audio
+  detection.
+
+### Changed
+
+- Separate 4G and VoWiFi badges in the device list; lower idle CPU on a Raspberry Pi.
+
+### Fixed
+
+- SIMs that grant a single logical channel; modems ModemManager gave up on; modem readers under an
+  unprivileged pcscd; MMS uploads cut short; Messages on a phone; a stale WebUI after an upgrade;
+  SIM fields missed on the first read.
+
 ## [1.12.0-rc11] - 2026-09-26
 
 Eleventh release candidate. The automatic update channel stays on 1.9.5.

@@ -34,7 +34,7 @@ from . import (store, engine, status as status_mod, sim, card, notify_push, lpa,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
                sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd, mms,
                mms_media, mms_transport, softphone_ws, modem_ims, vowifi_support, modem_voice,
-               gate, line_offline)
+               gate, line_offline, contacts)
 from .version import VERSION
 from .ami import AmiClient
 from .runtime import RuntimeRegistry
@@ -5754,6 +5754,236 @@ def _read_instance_text(iid, folder, name, tail):
 @app.post("/api/instances/{iid}/register")
 async def api_instance_register(iid: str):
     return {"output": engine.exec_cli(iid, "pjsip send register volte_ims")}
+
+
+# ----------------------------- address book -----------------------------
+# What one screen of conversations can ask about at once. A larger request is a mistake, or an
+# attempt to read the whole book out through the resolver.
+CONTACT_RESOLVE_LIMIT = 500
+# A 5000-contact vCard export with notes is well under this; it is a ceiling on one request,
+# not a target.
+CONTACT_IMPORT_LIMIT = 4 * 1024 * 1024
+# The fields that travel beside the file. This is all starlette's max_part_size bounds -- a
+# file part is streamed to a spooled temporary file with no limit of its own -- so the file
+# itself is held to the declared body length instead, which is known before anything is read.
+CONTACT_FIELD_LIMIT = 64 * 1024
+
+
+def _owner(request: Request) -> int:
+    """Whose address book this request is about.
+
+    An address book belongs to whoever keeps it, not to the gateway, so the rows carry an
+    owner and every query names one instead of assuming it. This gateway has a single
+    administrator, so that is the answer for every request that gets this far.
+    """
+    if gate.current(request).kind != "admin":
+        raise HTTPException(401, "authentication required")
+    return store.ADMIN_OWNER
+
+
+def _line_country(inst: dict) -> str:
+    """The country a number arriving on this line is written for.
+
+    The SIM's own country first: a VoWiFi line reaches its home network wherever the gateway's
+    traffic leaves the internet, and the home network writes a caller's number, and reads a
+    dialled one, by its own numbering plan. The operator's country-exit choice
+    (egress.line_country) answers only while the SIM has not said where it is from.
+    """
+    return egress.country_for_mcc(inst.get("mcc")) or egress.line_country(inst)
+
+
+def _contact_regions() -> tuple[str, ...]:
+    """The countries the gateway has lines in: those a number typed nationally is keyed for."""
+    return contacts.as_regions(_line_country(inst) for inst in cfg.list_instances())
+
+
+# The countries the stored per-country keys were last built for; None until the first
+# address-book request of this process has checked them.
+_contact_keys_for: tuple[str, ...] | None = None
+
+
+def _contact_regions_current() -> tuple[str, ...]:
+    """_contact_regions(), with the stored keys brought up to date for them first.
+
+    The answer changes as lines are added and as a SIM reports where it is, and a number typed
+    in national form was keyed for whatever the answer was then (store.contacts_rekey). It is
+    checked on every address-book request rather than on each configuration change: that costs
+    one comparison, and nothing outside the address book needs to know it exists.
+    """
+    global _contact_keys_for
+    regions = _contact_regions()
+    if regions != _contact_keys_for:
+        store.contacts_rekey(regions)
+        _contact_keys_for = regions
+    return regions
+
+
+class _ContactUploadTooLarge(Exception):
+    pass
+
+
+def _contact_upload(request: Request) -> Request:
+    """The request with its body held to one import's worth of bytes as it is read.
+
+    A declared Content-Length is only an early refusal: a chunked or HTTP/2 upload through a
+    reverse proxy may carry none, and nothing obliges the body to match it. So the bytes are
+    counted as they come off the connection, and reading stops at the first chunk past the
+    limit; starlette closes any temporary file it had begun.
+    """
+    limit = CONTACT_IMPORT_LIMIT + CONTACT_FIELD_LIMIT
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            length = int(declared)
+        except ValueError:
+            raise HTTPException(400, "unreadable Content-Length") from None
+        if length > limit:
+            raise _ContactUploadTooLarge
+    received = 0
+
+    async def receive():
+        nonlocal received
+        message = await request.receive()
+        if message["type"] == "http.request":
+            received += len(message.get("body", b""))
+            if received > limit:
+                raise _ContactUploadTooLarge
+        return message
+
+    return Request(request.scope, receive)
+
+
+def _line_region(iid: str, regions: tuple[str, ...]) -> str:
+    """The country a number arriving on this line is national to, or "" when unknown.
+
+    Without a line there is still an answer when the gateway is in one country only.
+    """
+    if iid:
+        return _line_country(cfg.get_instance(str(iid)) or {})
+    return regions[0] if len(regions) == 1 else ""
+
+
+@app.get("/api/contacts")
+async def api_contacts(request: Request, query: str = "", limit: int = 1000):
+    owner = _owner(request)
+    regions = await asyncio.to_thread(_contact_regions_current)
+    items = await asyncio.to_thread(store.contacts_list, owner, query,
+                                    max(1, min(int(limit), 2000)), regions)
+    return {"contacts": items, "total": await asyncio.to_thread(store.contacts_count, owner)}
+
+
+@app.post("/api/contacts")
+async def api_contact_create(body: dict, request: Request):
+    try:
+        owner = _owner(request)
+        regions = await asyncio.to_thread(_contact_regions_current)
+        return {"contact": await asyncio.to_thread(store.contact_create, owner, body, regions)}
+    except contacts.ContactError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.put("/api/contacts/{contact_id}")
+async def api_contact_update(contact_id: int, body: dict, request: Request):
+    try:
+        owner = _owner(request)
+        regions = await asyncio.to_thread(_contact_regions_current)
+        updated = await asyncio.to_thread(store.contact_update, owner, int(contact_id), body,
+                                          regions)
+    except contacts.ContactError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if updated is None:
+        raise HTTPException(404, "no such contact")
+    return {"contact": updated}
+
+
+@app.delete("/api/contacts/{contact_id}")
+async def api_contact_delete(contact_id: int, request: Request):
+    if not await asyncio.to_thread(store.contact_delete, _owner(request), int(contact_id)):
+        raise HTTPException(404, "no such contact")
+    return {"ok": True}
+
+
+@app.post("/api/contacts/resolve")
+async def api_contacts_resolve(body: dict, request: Request):
+    """Name the numbers on one screen at once, so a conversation list is one extra request.
+
+    `line` says which line they arrived on, because a number written in national form is
+    national to that line's country and to no other. Without it the gateway's country stands in
+    when it has lines in only one; otherwise only an international spelling can be recognised.
+    """
+    owner = _owner(request)
+    numbers = [str(n) for n in (body.get("numbers") or [])][:CONTACT_RESOLVE_LIMIT]
+    regions = await asyncio.to_thread(_contact_regions_current)   # keys current first
+    region = await asyncio.to_thread(_line_region, str(body.get("line") or ""), regions)
+    return {"contacts": await asyncio.to_thread(store.contacts_resolve, owner, numbers, region)}
+
+
+def _contact_file(raw: bytes, filename: str) -> tuple[list[dict], list[str]]:
+    # Phone exports are UTF-8 or a local code page; a byte that fits neither is replaced rather
+    # than failing the whole import, so one bad character cannot cost three hundred contacts.
+    return contacts.parse(raw.decode("utf-8", errors="replace"), filename)
+
+
+@app.post("/api/contacts/import")
+async def api_contacts_import(request: Request):
+    """Import a vCard or CSV export (multipart field "file", or a JSON body with "text")."""
+    owner = _owner(request)
+    too_large = HTTPException(413, f"the file is larger than {CONTACT_IMPORT_LIMIT // 1024} KB")
+    filename, raw = "", b""
+    try:
+        counted = _contact_upload(request)
+        if "multipart/form-data" in (request.headers.get("content-type") or ""):
+            try:
+                form = await counted.form(max_files=1, max_fields=8,
+                                          max_part_size=CONTACT_FIELD_LIMIT)
+            except _ContactUploadTooLarge:
+                raise
+            except Exception as exc:  # noqa
+                raise HTTPException(422, f"unreadable upload: {exc}") from None
+            try:
+                upload = form.get("file")
+                if not hasattr(upload, "read"):
+                    raise HTTPException(422, "no file")
+                filename = upload.filename or ""
+                raw = await upload.read(CONTACT_IMPORT_LIMIT + 1)
+            finally:
+                # A form parsed here rather than by FastAPI is not closed for us.
+                await form.close()
+        else:
+            try:
+                body = await counted.json()
+            except ValueError:
+                raise HTTPException(400, "the body is not JSON") from None
+            if not isinstance(body, dict):
+                raise HTTPException(400, "the body must be a JSON object")
+            filename = str(body.get("filename") or "")
+            raw = str(body.get("text") or "").encode("utf-8")
+    except _ContactUploadTooLarge:
+        raise too_large from None
+    if len(raw) > CONTACT_IMPORT_LIMIT:
+        raise too_large
+    try:
+        # Reading a file of this size takes long enough that it must not hold up the event loop,
+        # which carries every call and message on the gateway.
+        parsed, problems = await asyncio.to_thread(_contact_file, raw, filename)
+        regions = await asyncio.to_thread(_contact_regions_current)
+        result = await asyncio.to_thread(store.contacts_import, owner, parsed, regions)
+    except contacts.ContactError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {**result, "read": len(parsed), "problems": problems[:50]}
+
+
+@app.get("/api/contacts/export")
+async def api_contacts_export(request: Request, format: str = "vcf"):
+    owner = _owner(request)
+    items = await asyncio.to_thread(store.contacts_list, owner, "",
+                                    contacts.MAX_CONTACTS_PER_OWNER)
+    if str(format).lower() in ("csv", "text/csv"):
+        body, media, name = contacts.to_csv(items), "text/csv; charset=utf-8", "contacts.csv"
+    else:
+        body, media, name = contacts.to_vcard(items), "text/vcard; charset=utf-8", "contacts.vcf"
+    return Response(content=body.encode("utf-8"), media_type=media,
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 # ----------------------------- SMS -----------------------------

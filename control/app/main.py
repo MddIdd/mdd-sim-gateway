@@ -34,7 +34,7 @@ from . import (store, engine, status as status_mod, sim, card, notify_push, lpa,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
                sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd, mms,
                mms_media, mms_transport, softphone_ws, modem_ims, vowifi_support, modem_voice,
-               gate, line_offline)
+               gate, line_offline, media)
 from .version import VERSION
 from .ami import AmiClient
 from .runtime import RuntimeRegistry
@@ -1618,6 +1618,58 @@ def _status_poll_delay(instances: list[dict]) -> float:
             else STATUS_POLL_HEALTHY_SECONDS)
 
 
+MEDIA_SUPERVISE_SECONDS = 30
+MEDIA_CONVERGE_SECONDS = 15
+
+
+async def _media_converge_once() -> bool:
+    """Rebuild one running line whose container was made for the other media mode. One per
+    pass, so the lines re-register one after another instead of all at once. True if a line
+    was rebuilt."""
+    wanted = media.mode()
+    for inst in cfg.list_instances():
+        iid = str(inst.get("id") or "")
+        if not iid:
+            continue
+        current = await asyncio.to_thread(engine.media_mode_of, iid)
+        if current is None or current == wanted:
+            continue
+        log.info("line %s: rebuilding for %s media mode", iid, wanted)
+        _record_lifecycle(iid, "media_mode_rebuild", reason_code=wanted)
+        try:
+            await hub.drop_ami(iid)
+            await asyncio.to_thread(_start_engine_checked, cfg.get_instance(iid) or inst,
+                                    cfg.get_settings(),
+                                    os.environ.get("MDD_DEV_MOUNTS", "") == "1", "media_mode")
+            hub.reset_health(iid, "configuration_restart")
+        except Exception as exc:  # noqa: BLE001 - retried on the next pass
+            log.warning("line %s: media mode rebuild failed: %s", iid, exc)
+        return True
+    return False
+
+
+async def media_supervisor():
+    """Keep the relay running in relay mode and move running lines to the recorded mode.
+
+    The mode is switched outside this process (python -m app.media), so it is read from its
+    file on every pass rather than cached."""
+    last_supervise = 0.0
+    while True:
+        try:
+            if time.monotonic() - last_supervise >= MEDIA_SUPERVISE_SECONDS:
+                last_supervise = time.monotonic()
+                await asyncio.to_thread(media.supervise)
+            await _media_converge_once()
+        except Exception as exc:  # noqa: BLE001 - supervision must never stop
+            log.warning("media supervision failed: %s", exc)
+        await asyncio.sleep(MEDIA_CONVERGE_SECONDS)
+
+
+def _line_media_state(iid: str) -> str:
+    """The engine's own report on its media interface (engine/entrypoint.sh), relay mode."""
+    return str((engine.read_run_json(iid, "media.json") or {}).get("state") or "starting")
+
+
 async def status_poller():
     last_prune = 0.0
     while True:
@@ -2896,6 +2948,7 @@ async def lifespan(app: FastAPI):
     segment_reaper = asyncio.create_task(sms_segment_reaper())
     mms_runner = asyncio.create_task(mms_worker())
     update_poller = asyncio.create_task(update_automation_poller())
+    media_task = asyncio.create_task(media_supervisor())
     for iid in recovered_modem_lines:
         asyncio.create_task(_auto_start_hotplugged_line(iid))
     yield
@@ -2906,10 +2959,12 @@ async def lifespan(app: FastAPI):
     segment_reaper.cancel()
     mms_runner.cancel()
     update_poller.cancel()
+    media_task.cancel()
     # Reap the cancelled tasks (the monitor may be parked in a to_thread wait for up to
     # its timeout; awaiting keeps shutdown deterministic instead of leaking the error).
     await asyncio.gather(poller, monitor, sms_poller, host_poller,
-                         segment_reaper, mms_runner, update_poller, return_exceptions=True)
+                         segment_reaper, mms_runner, update_poller, media_task,
+                         return_exceptions=True)
     await hub.runtime.close()
     for c in hub.ami.values():
         await c.close()
@@ -6869,6 +6924,13 @@ def api_softphone(iid: str, request: Request):
     sip = inst.get("sip", {}) or {}
     wr = sip.get("webrtc", {}) or {}
     host = (request.headers.get("host") or "").split(":")[0] or request.url.hostname
+    # Media: nothing in direct mode (the engine's published RTP ports); in relay mode the TURN
+    # relay with fresh credentials, which clients re-read before every call. The relay is
+    # named by the host the client reached this API by, unless the operator set another.
+    media_prov = media.provisioning(str(iid), request.url.hostname or host)
+    if media_prov["media_mode"] == media.RELAY:
+        media_prov["relay_ready"] = bool(media_prov["relay_ready"]) and \
+            _line_media_state(str(iid)) == "ready"
     return {
         "enabled": bool(wr.get("enable", True)),
         "username": wr.get("username", "webrtc"),
@@ -6877,7 +6939,27 @@ def api_softphone(iid: str, request: Request):
         "ws_path": softphone_ws.path(iid),
         "host": host,
         "realm": cfg.ims_realm(inst["mcc"], inst["mnc"]),
+        **media_prov,
     }
+
+
+@app.get("/api/media")
+def api_media():
+    """The media mode and the relay's state, for display. The mode is switched by the
+    installer (install.sh media), since it rebuilds every line."""
+    state = media.load_state()
+    current = media.mode(state)
+    result = {"mode": current, "relay": media.relay_status()}
+    if current == media.RELAY:
+        result.update({
+            "port": state.get("port"),
+            "public_host": state.get("public_host") or "",
+            "public_port": state.get("public_port"),
+            "lines": {str(inst["id"]): _line_media_state(str(inst["id"]))
+                      for inst in cfg.list_instances()
+                      if engine.media_mode_of(str(inst["id"])) == media.RELAY},
+        })
+    return result
 
 
 @app.websocket("/api/instances/{iid}/softphone/ws")

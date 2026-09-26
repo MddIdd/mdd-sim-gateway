@@ -12,6 +12,16 @@ try { JsSIP.debug.enable('JsSIP:*') } catch {}
 // showed only NotFoundError. Name the real reason instead, before the call is attempted.
 export const MEDIA_FAIL_CAUSE = 'User Denied Media Access'
 
+// Relay media mode only (provisioning media_mode 'relay'): call media goes through the gateway's
+// TURN relay and nowhere else. The i18n keys shown when that cannot work.
+export const RELAY_UNAVAILABLE =
+  'The media relay is not ready, so calls would have no audio. Check the gateway, then try again.'
+export const RELAY_UNREACHABLE =
+  'This browser cannot reach the media relay. Check that its port is forwarded to the gateway, then try again.'
+// How long to wait for a relay candidate once ICE gathering starts. A reachable relay answers
+// within a round trip or two; an unreachable one would otherwise be retried for tens of seconds.
+const RELAY_GATHER_TIMEOUT_MS = 8000
+
 // Does this browser have a microphone at all? enumerateDevices() needs no permission and does
 // not open the device, and Chromium-family browsers still list one entry per AVAILABLE kind
 // before permission is granted — so a non-empty list with no 'audioinput' is proof there is no
@@ -77,8 +87,12 @@ export class Softphone {
   // stable, DOM-attached element (instead of a per-call `new Audio()`) is what makes remote
   // audio reliable under Chrome/Edge autoplay policy: the element is primed once inside a user
   // gesture (unlockAudio) and then every later srcObject swap plays without a NotAllowedError.
-  constructor(onEvent, audioEl) {
+  // provision: () => Promise<prov>. In relay mode it is re-read before every call, since the
+  // relay's credentials expire.
+  constructor(onEvent, audioEl, provision) {
     this.onEvent = onEvent            // (type, data) => void
+    this._provision = provision || null
+    this.prov = null
     this.ua = null
     this.session = null
     this.remoteAudio = audioEl || null
@@ -151,6 +165,7 @@ export class Softphone {
   // control/engine pair is being upgraded from the old directly-published WSS transport.
   start(prov, host) {
     if (this.ua) this.stop()
+    this.prov = prov
     // Prefer the same-origin relay. The fallback keeps the page usable during a rolling update
     // in which an older control plane still returns ws_port. Invalid/mixed provisioning must
     // report a failed registration rather than throw from a React effect and blank the page.
@@ -214,6 +229,7 @@ export class Softphone {
     // fires the session's 'failed' BEFORE this event — so 'failed' on its own can never say
     // why a call died in milliseconds. Pass the DOMException name up so the UI can name it.
     session.on('getusermediafailed', (err) => this.emit('mediafail', (err && err.name) || 'MediaError'))
+    if (this._relayMode()) this._watchRelay(session)
     const dir = session.direction  // 'incoming' | 'outgoing'
     if (dir === 'incoming') {
       const from = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'Unknown'
@@ -304,10 +320,75 @@ export class Softphone {
     try { local.ctx?.close() } catch {}
   }
 
+  _relayMode() { return this.prov?.media_mode === 'relay' }
+
+  // Media may only use the relay (iceTransportPolicy 'relay'), so the first relay candidate is
+  // all the offer or answer needs. Otherwise JsSIP waits for gathering to finish, i.e. for the
+  // slowest TURN transport: a relay port forwarded for UDP only would hold every call until the
+  // TCP attempt times out. No relay candidate at all means this browser cannot reach the relay's
+  // port, and the call would simply never ring; give up early and say why. The clock starts when
+  // gathering does, which for an incoming call is on answer, not while it rings.
+  _watchRelay(session) {
+    let relayCandidate = false
+    let relayTimer = null
+    session.on('icecandidate', (event) => {
+      if (relayCandidate || !event.candidate || event.candidate.type !== 'relay') return
+      relayCandidate = true
+      clearTimeout(relayTimer)
+      event.ready()
+    })
+    const unreachable = () => {
+      clearTimeout(relayTimer)
+      if (relayCandidate || this.session !== session) return
+      this.emit('relayunreachable')
+      try { session.terminate() } catch {}
+    }
+    const watchGathering = (pc) => {
+      if (!pc || pc.__relayWatched) return
+      pc.__relayWatched = true
+      const check = () => {
+        const state = pc.iceGatheringState
+        if (state === 'gathering' && !relayTimer) relayTimer = setTimeout(unreachable, RELAY_GATHER_TIMEOUT_MS)
+        else if (state === 'complete') unreachable()
+      }
+      pc.addEventListener('icegatheringstatechange', check)
+      check()
+    }
+    // An outgoing call's RTCPeerConnection already exists (JsSIP creates it inside ua.call(),
+    // before 'peerconnection' could be heard here); an incoming one's is created on answer.
+    watchGathering(session.connection)
+    session.on('peerconnection', ({ peerconnection }) => watchGathering(peerconnection))
+    session.on('ended', () => clearTimeout(relayTimer))
+    session.on('failed', () => clearTimeout(relayTimer))
+  }
+
+  // Direct mode: the engine's published RTP ports, no ICE servers, as always. Relay mode: fresh
+  // provisioning for fresh TURN credentials, and relay candidates only.
+  async _pcConfig() {
+    if (!this._relayMode()) return { rtcpMuxPolicy: 'require', iceServers: [] }
+    if (this._provision) {
+      try { this.prov = (await this._provision()) || this.prov } catch {}
+    }
+    return {
+      rtcpMuxPolicy: 'require',
+      iceServers: this.prov?.ice_servers || [],
+      iceTransportPolicy: this.prov?.ice_transport_policy || 'relay',
+    }
+  }
+
   async call(number) {
     if (!this.ua) return
     const domain = this.ua.configuration.uri.host
     this.emit('calling', { to: number })
+    const pcConfig = await this._pcConfig()
+    if (this._dead || !this.ua) return
+    // A call placed without a working relay connects and then carries no audio in either
+    // direction, which reads as a carrier fault. Refuse it up front and say why.
+    if (this._relayMode() && this.prov?.relay_ready === false) {
+      this.emit('relayunavailable')
+      this.emit('failed', { cause: 'Media relay unavailable' })
+      return
+    }
     const local = await this._acquireLocal()
     // stop() can land while getUserMedia is still deciding (the user switched lines, or the
     // page navigated away). Do not raise a call on a torn-down UA.
@@ -316,7 +397,7 @@ export class Softphone {
     const opts = {
       mediaConstraints: { audio: true, video: false },
       mediaStream: local.stream || undefined,
-      pcConfig: { rtcpMuxPolicy: 'require', iceServers: [] },
+      pcConfig,
     }
     // '#' is not a legal SIP URI user character (RFC 3261 25.1), and JsSIP rejects the whole
     // URI rather than escaping it, so service codes like #225# would never leave the browser.
@@ -339,12 +420,16 @@ export class Softphone {
   async answer() {
     const session = this.session
     if (!session) return
+    const pcConfig = await this._pcConfig()
+    // Answer anyway: the carrier leg is up either way, and the user sees why there is no audio.
+    if (this._relayMode() && this.prov?.relay_ready === false) this.emit('relayunavailable')
     const local = await this._acquireLocal()
     if (this._dead || this.session !== session) { this._releaseLocal(); return }
     if (local.silent) this.emit('mediafallback', local.reason)
     try {
       session.answer({ mediaConstraints: { audio: true, video: false },
-                       mediaStream: local.stream || undefined, pcConfig: { iceServers: [] } })
+                       mediaStream: local.stream || undefined,
+                       pcConfig: this._relayMode() ? pcConfig : { iceServers: [] } })
     } catch (err) {
       // answer() throws synchronously on a session that is no longer answerable. Awaiting the
       // media above means that throw would otherwise surface as an unhandled rejection and

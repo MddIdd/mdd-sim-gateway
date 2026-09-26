@@ -164,6 +164,28 @@ https://NAS_LAN_IP:10443/
 `30000` 开始动态分配；若跨 VLAN 或经过防火墙使用通话功能，需要允许客户端与 NAS 之间的
 对应 UDP 流量。
 
+### 通话媒体模式
+
+通话音频默认使用 direct 模式：每条线路各自发布 RTP 端口（见上文）。也可以切换到 relay
+模式，改由一个 coturn 中继容器统一转发媒体，此时不再有任何 Engine 发布端口。中继容器
+（`mdd-sim-gateway-relay`）和它使用的内部媒体网络（`mdd-sim-gateway-media`）都由 Control
+按需创建和管理，**不在 Compose 文件中**，`docker compose down`/`up` 不会影响它们。
+
+通过 SSH 在 Control 容器内切换：
+
+```sh
+sudo docker exec -w /app/control mdd-sim-gateway-control python -m app.media status
+sudo docker exec -w /app/control mdd-sim-gateway-control python -m app.media direct
+sudo docker exec -w /app/control mdd-sim-gateway-control python -m app.media relay \
+    [--port N] [--bind ADDR] [--public-host HOST] [--public-port N]
+```
+
+启用 relay 会先拉取本版本对应的中继镜像（`ghcr.io/mddidd/mdd-sim-gateway-relay:vX.Y.Z`），
+创建媒体网络，在临时 Engine 容器中确认内核支持所需的 nftables 规则，并等待中继应答 STUN
+请求；任一步失败都会回滚且不修改当前模式。切换会依次重建所有运行中的线路。启用后需要在
+NAS 前端的路由器/防火墙放行中继端口的 UDP 和 TCP；经反向代理部署时该端口不是 HTTP，需要
+单独做 TCP/UDP 转发。
+
 ## 6. 数据、备份和证书
 
 所有持久数据位于配置的数据目录，包括设置、数据库、线路状态、证书、通知凭据和更新状态。

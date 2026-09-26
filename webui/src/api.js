@@ -202,6 +202,8 @@ export const api = {
   cellularCallStatus: (id) => j('GET', `/api/instances/${id}/cellular-call/status`),
   cellularCallHangup: (id) => j('POST', `/api/instances/${id}/cellular-call/hangup`, {}),
   softphone: (id) => j('GET', `/api/instances/${id}/softphone`),
+  // Call media mode and the relay's state; read-only, switched by the installer.
+  media: () => j('GET', '/api/media'),
 
   // eSIM / LPA (lpac) — first arg is usually the PC/SC reader NAME (string).
   // Optional se_id / aid target a specific Secure Element on dual-SE cards.

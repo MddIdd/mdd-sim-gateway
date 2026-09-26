@@ -1,7 +1,15 @@
 [general]
 rtpstart={{ rtp_start }}
 rtpend={{ rtp_end }}
-{% if webrtc_enable and ice_advertise_addr %}
+{% if webrtc_enable and media_relay %}
+; WebRTC needs ICE (an RTP-level feature — lives here, not in pjsip.conf). webrtc=yes turns on
+; ice_support at the endpoint, but the ICE agent only gathers candidates when icesupport=yes.
+; Relay media mode: the browser leg's RTP binds to this line's media network address
+; (pjsip.conf media_address), so that is its only host candidate. The browser reaches it through
+; the TURN relay on the same internal network; nothing is published, so there is no host address
+; to rewrite it to.
+icesupport=yes
+{% elif webrtc_enable and ice_advertise_addr %}
 ; WebRTC needs ICE (an RTP-level feature — lives here, not in pjsip.conf). webrtc=yes turns on
 ; ice_support at the endpoint, but the ICE agent only gathers candidates when icesupport=yes.
 icesupport=yes

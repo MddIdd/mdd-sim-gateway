@@ -150,7 +150,9 @@ jobs:
           python tools/container-runtime/prepare_egress_assets.py --arch "${{ matrix.arch }}"
           owner=$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
           printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          for component in hardware egress; do
+          # relay: the optional media relay (relay media mode, control/app/media.py). Published
+          # to the registry only; a gateway fetches it when the relay is switched on.
+          for component in hardware egress relay; do
             registry_image="ghcr.io/$owner/mdd-sim-gateway-$component"
             architecture_image="$registry_image:${GITHUB_REF_NAME}-${{ matrix.arch }}"
             local_image="mdd-sim-gateway/$component"
@@ -161,6 +163,11 @@ jobs:
                 -f runtime/Dockerfile.hardware \
                 -t "$local_image" -t "$local_image:${GITHUB_REF_NAME}" \
                 -t "$architecture_image" .
+            elif [ "$component" = relay ]; then
+              docker build --no-cache \
+                --build-arg "MDD_VERSION=$(cat VERSION)" \
+                -t "$local_image" -t "$local_image:${GITHUB_REF_NAME}" \
+                -t "$architecture_image" relay
             else
               docker build --no-cache \
                 --build-arg "MDD_VERSION=$(cat VERSION)" \
@@ -173,6 +180,7 @@ jobs:
               '{{.Architecture}}|{{index .Config.Labels "io.mdd-sim-gateway.component"}}|{{index .Config.Labels "io.mdd-sim-gateway.managed"}}|{{index .Config.Labels "org.opencontainers.image.version"}}')
             test "$identity" = "${{ matrix.arch }}|$component|true|$(cat VERSION)"
             docker push "$architecture_image"
+            [ "$component" = relay ] && continue
             image_tar="mdd-sim-gateway-$component-${GITHUB_REF_NAME}-${{ matrix.arch }}.tar"
             docker save --output "$image_tar" "$local_image" "$local_image:${GITHUB_REF_NAME}"
             gzip -1 "$image_tar"
@@ -229,7 +237,7 @@ jobs:
           python -m pip install -r control/requirements.txt
           python -m py_compile control/app/*.py engine/*.py host/*.py
           python -m unittest discover -s tests -v
-          sh -n install.sh engine/entrypoint.sh tools/engine-fingerprint.sh
+          sh -n install.sh engine/entrypoint.sh relay/entrypoint.sh tools/engine-fingerprint.sh
           cd webui
           npm ci
           npm audit --audit-level=high
@@ -263,7 +271,7 @@ jobs:
           set -eu
           owner=$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
           printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          for component in engine control hardware egress; do
+          for component in engine control hardware egress relay; do
             registry_image="ghcr.io/$owner/mdd-sim-gateway-$component"
             docker buildx imagetools create \
               --tag "$registry_image:${GITHUB_REF_NAME}" \

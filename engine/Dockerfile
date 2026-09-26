@@ -168,7 +168,7 @@ RUN set -eu; \
     { \
       printf '%s\n' \
         bash coreutils grep hostname iproute net-tools procps-ng \
-        tcpdump bind-utils iputils ca-certificates \
+        tcpdump bind-utils iputils ca-certificates nftables \
         python3 python3-jinja2 python3-pyscard python3-pysocks python3-requests; \
       { printf '%s\n' /usr/sbin/asterisk; find /usr/lib/asterisk/modules -type f -name '*.so'; } | \
         while IFS= read -r binary; do \

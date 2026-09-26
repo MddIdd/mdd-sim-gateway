@@ -1127,6 +1127,19 @@ def _engine_manager_url(settings: dict) -> str:
 
 def render_instance_json(inst: dict, settings: dict) -> dict:
     """Convert a stored instance into the engine /config/instance.json contract."""
+    rendered = _render_instance_json(inst, settings)
+    # Relay media mode (media.engine_attachment, one-run copy like "epdg"): every engine uses
+    # the same RTP range on its own media address, so the line's own block is not used, and
+    # stays saved for a return to direct mode. Absent in direct mode.
+    relay = inst.get("media")
+    if relay:
+        rendered["media"] = dict(relay)
+        rendered["rtp_start"] = relay["rtp_start"]
+        rendered["rtp_end"] = relay["rtp_end"]
+    return rendered
+
+
+def _render_instance_json(inst: dict, settings: dict) -> dict:
     ports = inst.get("ports", _alloc_ports(inst.get("index", 0)))
     sip = merge_carrier_sip_defaults(
         inst.get("mcc", ""), inst.get("mnc", ""),

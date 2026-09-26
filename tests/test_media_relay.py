@@ -28,7 +28,10 @@ def media_module():
     with patch.dict(sys.modules, {"docker": _docker()}):
         for name in ("control.app.media", "control.app.engine"):
             sys.modules.pop(name, None)
-        return importlib.import_module("control.app.media")
+        media = importlib.import_module("control.app.media")
+        # patch.dict drops both modules again on exit; keep the engine the media module saw.
+        media._test_engine = importlib.import_module("control.app.engine")
+        return media
 
 
 class _Network:
@@ -214,9 +217,33 @@ class MediaRelayTests(unittest.TestCase):
         self.assertTrue(kwargs["internal"])
         self.assertNotIn("ipam", kwargs)
 
+    def test_a_host_that_cannot_filter_engine_media_is_refused_before_anything_moves(self):
+        client = _Client(self.media)
+        with patch.object(self.media, "probe_engine_firewall",
+                          side_effect=self.media.MediaError("no socket match")):
+            with self.assertRaisesRegex(self.media.MediaError, "no socket match"):
+                self.media.enable(client, port=8478, image="relay:test")
+        self.assertEqual(self.media.load_state(), {})
+        self.assertEqual(client.created, [])
+        self.assertTrue(client.network.removed)
+
+    def test_the_probe_loads_the_engine_ruleset_in_a_throwaway_engine(self):
+        client = _Client(self.media, network=_Network())
+        client.containers.run = Mock()
+        engine = self.media._test_engine
+        with patch.dict(sys.modules, {"control.app.engine": engine}), \
+                patch.object(engine, "ensure_image", return_value=SimpleNamespace(id="sha256:eng")):
+            self.media.probe_engine_firewall(client, SimpleNamespace(name="media-net"))
+        args, kwargs = client.containers.run.call_args
+        self.assertEqual(args[0], "sha256:eng")
+        self.assertTrue(kwargs["remove"])
+        self.assertEqual(kwargs["network"], "media-net")
+        self.assertIn("socket wildcard 0 accept", kwargs["environment"]["RULES"])
+
     def test_a_relay_that_never_answers_leaves_direct_mode_and_nothing_behind(self):
         client = _Client(self.media)
-        with patch.object(self.media, "wait_ready", return_value=(False, "relay_not_answering")):
+        with patch.object(self.media, "probe_engine_firewall"), \
+                patch.object(self.media, "wait_ready", return_value=(False, "relay_not_answering")):
             with self.assertRaisesRegex(self.media.MediaError, "did not become ready"):
                 self.media.enable(client, port=8478, image="relay:test")
         self.assertEqual(self.media.mode(), "direct")
@@ -226,6 +253,9 @@ class MediaRelayTests(unittest.TestCase):
 
     def test_enabling_records_relay_mode_only_after_the_relay_answers(self):
         client = _Client(self.media)
+        probe = patch.object(self.media, "probe_engine_firewall")
+        probe.start()
+        self.addCleanup(probe.stop)
         with patch.object(self.media, "wait_ready", return_value=(True, "")):
             state = self.media.enable(client, port=8478, image="relay:test")
         self.assertEqual(self.media.mode(), "relay")

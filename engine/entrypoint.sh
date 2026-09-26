@@ -89,6 +89,24 @@ export PIN_USIM_READER
 export SWU_SOURCE SWU_EPDG SWU_APN SWU_MCC SWU_MNC SWU_IMEI SWU_IMEISV SWU_CHILD_REKEY_MINUTES SWU_IDR_MODE SWU_CP_MODE SWU_CP_MODE_ORDER
 export SWU_ACCEPT_EPDG_ESP_REKEY
 
+# --- 1b. Relay media mode: the media interface accepts call media only ------------
+# The relay can reach this container's media address, and AMI, SIP and the softphone WebSocket
+# listen on every address. render.py wrote the ruleset that admits only UDP to the RTP range
+# there. If it cannot be loaded, the interface goes down instead: browser calls lose audio,
+# registration and SMS carry on, and nothing else is left reachable.
+if [ "${MDD_MEDIA_MODE:-direct}" = relay ]; then
+  if [ -z "${MDD_MEDIA_IF:-}" ]; then
+    media_state=no_media_address
+  elif nft -f "$MDD_RUNDIR/media.nft"; then
+    media_state=ready
+  else
+    ip link set dev "$MDD_MEDIA_IF" down || true
+    media_state=firewall_failed
+  fi
+  log "relay media: $media_state"
+  printf '{"mode": "relay", "state": "%s"}\n' "$media_state" > "$MDD_RUNDIR/media.json"
+fi
+
 # --- 2. Start PIN keeper and wait for the SIM to be usable ------------------------
 # pin_keeper holds CHV1 verified for ami_usim's SIP IMS-AKA. swu_ike verifies the PIN itself
 # in its own connection for EAP-AKA, so both auth paths work on PIN-enabled SIMs.

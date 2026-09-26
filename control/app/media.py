@@ -452,6 +452,42 @@ def engine_attachment(client) -> dict | None:
 
 
 # ------------------------------------------------------------------ switching
+# What engine/render.py's media_ruleset relies on, tried once in a throwaway engine container
+# before any line is moved: nf_tables, and its socket match on the input hook. A kernel without
+# them would leave every line's media interface down.
+PROBE_RULESET = (
+    "table inet mdd_media_probe {\n"
+    "  chain input {\n"
+    "    type filter hook input priority filter; policy accept;\n"
+    f"    udp dport {RTP_PORTS[0]}-{RTP_PORTS[1]} socket wildcard 0 accept\n"
+    "  }\n"
+    "}\n")
+
+
+def probe_engine_firewall(client, network) -> None:
+    from . import engine
+    try:
+        image = engine.ensure_image(client)
+    except Exception as exc:  # noqa: BLE001
+        raise MediaError(f"engine image unavailable: {exc}") from exc
+    try:
+        client.containers.run(
+            image.id,
+            entrypoint=["sh", "-c", 'printf "%s" "$RULES" | nft -f -'],
+            environment={"RULES": PROBE_RULESET},
+            network=network.name,
+            cap_add=["NET_ADMIN"],
+            labels={MANAGED_LABEL: "true", COMPONENT_LABEL: "media-probe"},
+            remove=True, stdout=True, stderr=True)
+    except Exception as exc:  # noqa: BLE001 - ContainerError carries nft's own message
+        detail = getattr(exc, "stderr", b"") or str(exc)
+        if isinstance(detail, bytes):
+            detail = detail.decode(errors="replace")
+        raise MediaError("engines cannot filter the media network on this host (the engine "
+                         "image needs nftables, the kernel nf_tables with its socket match): "
+                         f"{detail.strip()}") from exc
+
+
 def enable(client, *, port: int, bind: str = "", public_host: str = "",
            public_port: int | None = None, image: str = "") -> dict:
     """Prepare and verify the relay, then record relay mode. On any failure everything this
@@ -473,6 +509,7 @@ def enable(client, *, port: int, bind: str = "", public_host: str = "",
     }
     try:
         network = ensure_network(client)
+        probe_engine_firewall(client, network)
         ensure_relay(client, state, network)
         ready, reason = wait_ready(client)
         if not ready:

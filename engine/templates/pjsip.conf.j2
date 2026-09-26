@@ -119,7 +119,9 @@ type=transport
 protocol=ws
 bind=0.0.0.0
 {% if local_ext %}
+{% if not media_relay %}
 external_media_address={{ local_ext }}
+{% endif %}
 external_signaling_address={{ local_ext }}
 {% endif %}
 {% endif %}
@@ -174,6 +176,13 @@ auth=auth-{{ webrtc_user }}
 aors={{ webrtc_user }}
 transport=transport-ws
 webrtc=yes
+{% if media_relay and media_addr %}
+; Relay media mode: RTP binds to the media network address, which only the relay reaches and
+; where the engine admits nothing but this RTP range. The IMS leg is not affected: it keeps
+; its own transport inside the tunnel.
+media_address={{ media_addr }}
+bind_rtp_to_media_address=yes
+{% endif %}
 dtls_auto_generate_cert=yes
 [auth-{{ webrtc_user }}](auth-local)
 username={{ webrtc_user }}

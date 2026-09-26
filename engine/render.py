@@ -93,6 +93,52 @@ def container_ipv4():
         s.close()
 
 
+def media_interface(subnet: str) -> tuple[str, str]:
+    """(interface, IPv4 address) this container holds on the media network, or ("", "") when
+    it is not attached. Relay media mode only; see control/app/media.py."""
+    try:
+        network = ipaddress.ip_network(subnet)
+        out = subprocess.check_output(["ip", "-o", "-4", "addr", "show"], text=True,
+                                      stderr=subprocess.DEVNULL)
+    except Exception:
+        return "", ""
+    for line in out.splitlines():
+        fields = line.split()
+        if "inet" not in fields:
+            continue
+        address = fields[fields.index("inet") + 1].split("/")[0]
+        try:
+            if ipaddress.ip_address(address) in network:
+                return fields[1].split("@")[0], address
+        except ValueError:
+            continue
+    return "", ""
+
+
+def media_ruleset(interface: str, rtp_start: int, rtp_end: int) -> str:
+    """The media interface accepts the browser leg's RTP and nothing else.
+
+    The relay can reach every engine address on the media network, and Asterisk's other
+    listeners (AMI, SIP on 5060, the softphone WebSocket, pjsip's resolver sockets) bind the
+    wildcard address, so the boundary is drawn here rather than in each of them. The port range
+    alone is not enough: the IMS leg shares it, and for an IPv4 PDN its RTP socket is bound to
+    the wildcard address too. Only the browser leg binds to the media address
+    (bind_rtp_to_media_address), so a packet is admitted only when it lands on a socket bound
+    to a specific address. inet covers IPv6 link-local too. control/app/media.py checks that
+    the kernel supports this before relay mode can be switched on."""
+    return (
+        "table inet mdd_media\n"
+        "delete table inet mdd_media\n"
+        "table inet mdd_media {\n"
+        "  chain input {\n"
+        "    type filter hook input priority filter; policy accept;\n"
+        f'    iifname "{interface}" udp dport {int(rtp_start)}-{int(rtp_end)} '
+        "socket wildcard 0 accept\n"
+        f'    iifname "{interface}" drop\n'
+        "  }\n"
+        "}\n")
+
+
 def imeisv_from_imei(imei, imeisv="", svn="00"):
     """Return a 16-digit IMEISV for the ePDG DEVICE_IDENTITY response.
 
@@ -151,6 +197,9 @@ def build_context(cfg):
         raise ValueError("AMI credential is missing from instance configuration")
     if webrtc.get("enable", True) and not webrtc_password:
         raise ValueError("WebRTC credential is missing from instance configuration")
+    media = cfg.get("media") or {}
+    media_if, media_addr = (media_interface(media.get("subnet") or "")
+                            if media.get("mode") == "relay" else ("", ""))
     ike = cfg.get("ike", {}) or {}
     default_ike = ("aes256-sha256-prfsha256-modp2048,aes128-sha256-prfsha256-modp2048,"
                    "aes256-sha1-prfsha1-modp2048,aes128-sha1-prfsha1-modp2048,"
@@ -227,6 +276,11 @@ def build_context(cfg):
         "rtp_bind_addr": cfg.get("local_addr") or container_ipv4(),
         "rtp_start": cfg.get("rtp_start", 10000),
         "rtp_end": cfg.get("rtp_end", 11000),
+        # Relay media mode: the browser leg's RTP binds to this line's media network address
+        # and is reached only through the relay. Empty in direct mode.
+        "media_relay": media.get("mode") == "relay",
+        "media_if": media_if,
+        "media_addr": media_addr,
         "debug_asterisk": cfg.get("debug", {}).get("asterisk", False),
         "debug_charon": cfg.get("debug", {}).get("charon", False),
     }
@@ -289,6 +343,13 @@ def main():
     # Export env for keeper / ami_usim / swu_ike
     env_path = os.environ.get("MDD_ENV", "/run/mdd-sim-gateway/engine.env")
     os.makedirs(os.path.dirname(env_path), exist_ok=True)
+    # Relay media mode: the entrypoint loads this before Asterisk starts (see media_ruleset).
+    ruleset_path = os.path.join(os.path.dirname(env_path), "media.nft")
+    if ctx["media_addr"]:
+        with open(ruleset_path, "w") as f:
+            f.write(media_ruleset(ctx["media_if"], ctx["rtp_start"], ctx["rtp_end"]))
+    elif os.path.exists(ruleset_path):
+        os.unlink(ruleset_path)
     with open(env_path, "w") as f:
         # This file is sourced by entrypoint.sh. Reader names routinely contain spaces and
         # parentheses; writing raw values makes the shell execute the second word as a command
@@ -303,6 +364,9 @@ def main():
         put("MDD_ID", ctx["id"])
         put("MANAGER_URL", ctx["manager_url"])
         put("MANAGER_EVENT_TOKEN", cfg.get("manager_event_token", ""))
+        if ctx["media_relay"]:
+            put("MDD_MEDIA_MODE", "relay")
+            put("MDD_MEDIA_IF", ctx["media_if"])
         # SWu (python IKEv2/IPsec) launch params — consumed by entrypoint.sh to start
         # swu_ike.py. Reader is addressed by index for swu_ike's smartcard path; source is the
         # container IP; ePDG FQDN is resolved by swu_ike.

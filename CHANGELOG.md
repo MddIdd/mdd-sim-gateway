@@ -38,6 +38,13 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   Conversations, the call log and the incoming-call overlay show the name instead of the
   number once it is known.
 
+### Fixed
+
+- In the installer's docker mode, `SWU_TUN_MTU` now reaches the control container, and a reload
+  or update keeps the value the running container had. Before, the container was recreated
+  without it, so the engines fell back to the default MTU and a carrier that drops fragments
+  never answered registration.
+
 ### Security
 
 - WebSocket handshakes pass the same authentication as the API, in one middleware, so a socket

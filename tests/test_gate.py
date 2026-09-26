@@ -248,6 +248,31 @@ class WebSocketTests(GateTestCase):
         self.assertEqual(result.close_code, gate.WS_UNAUTHENTICATED)
 
 
+class SourceTableTests(unittest.TestCase):
+    # One representative request per credential source; the tests above exercise each of them.
+    EXAMPLES = {
+        "static": http("/assets/index.js", cookie=None),
+        "public": http("/api/auth/login", "POST", cookie=None),
+        "engine": http(gate.ENGINE_EVENT_PATH, "POST", cookie=None),
+        "session": http("/api/instances"),
+        "socket": websocket(),
+    }
+
+    def test_every_source_is_exercised(self):
+        # A row added to the table without an example here -- and tests above -- fails.
+        self.assertEqual(set(self.EXAMPLES), {source.name for source in gate.SOURCES})
+        for name, scope in self.EXAMPLES.items():
+            with self.subTest(name=name):
+                self.assertEqual(gate.source_for(scope).name, name)
+
+    def test_source_names_are_unique(self):
+        names = [source.name for source in gate.SOURCES]
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_other_asgi_traffic_is_passed_through(self):
+        self.assertIsNone(gate.source_for({"type": "lifespan"}))
+
+
 class WiringTests(unittest.TestCase):
     def test_the_application_is_behind_the_gate(self):
         self.assertIn(gate.Gate, [item.cls for item in main.app.user_middleware])

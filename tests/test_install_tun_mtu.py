@@ -63,6 +63,17 @@ class InstallTunMtuTests(unittest.TestCase):
         self.assertEqual(out.stdout, "")
         self.assertIn("not a number", out.stderr)
 
+    def test_default_drops_a_carried_over_value(self):
+        out = self.tun_mtu("SWU_TUN_MTU=1280", SWU_TUN_MTU="default")
+        self.assertEqual(out.stdout, "")
+
+    def test_a_value_outside_the_usable_range_is_ignored(self):
+        for value in ("0", "1279", "1501", "09999", "123456789012345678901234567890"):
+            out = self.tun_mtu(None, SWU_TUN_MTU=value)
+            self.assertEqual(out.stdout, "", value)
+            self.assertIn("outside 1280-1500", out.stderr, value)
+        self.assertEqual(self.tun_mtu(None, SWU_TUN_MTU="1500").stdout, "1500")
+
     def test_docker_mode_passes_it_only_when_there_is_one(self):
         run_control = shell_function("run_control")
         self.assertIn("${TUN_MTU:+-e SWU_TUN_MTU=$TUN_MTU}", run_control)

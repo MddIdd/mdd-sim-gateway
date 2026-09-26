@@ -43,7 +43,8 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 - In the installer's docker mode, `SWU_TUN_MTU` now reaches the control container, and a reload
   or update keeps the value the running container had. Before, the container was recreated
   without it, so the engines fell back to the default MTU and a carrier that drops fragments
-  never answered registration.
+  never answered registration. `SWU_TUN_MTU=default ./install.sh reload` drops a carried-over
+  value, and a value outside 1280–1500 is ignored with a warning.
 
 ### Security
 

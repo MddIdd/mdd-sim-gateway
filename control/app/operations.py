@@ -401,7 +401,8 @@ def create_local_backup(system_name: str = "gateway") -> dict:
 
 def _referenced_parts(database: Path) -> list[str]:
     """"<message id>/<file>" of every attachment the history snapshot refers to."""
-    with store._sqlite_conn(database) as check:
+    import sqlite3
+    with sqlite3.connect(database) as check:
         if not check.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
                              "AND name='mms_parts'").fetchone():
             return []

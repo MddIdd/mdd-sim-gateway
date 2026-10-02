@@ -2252,9 +2252,10 @@ class swu():
     def encode_payload_type_tsr(self):
         return self.encode_payload_type_ts(TSR)
         
-    def encode_payload_type_ts(self,type):
-        if type == TSI: ts_list = self.ts_list_initiator
-        if type == TSR: ts_list = self.ts_list_responder
+    def encode_payload_type_ts(self,type, ts_list=None):
+        if ts_list is None:
+            if type == TSI: ts_list = self.ts_list_initiator
+            if type == TSR: ts_list = self.ts_list_responder
         
         payload_ts = bytes([len(ts_list)]) + b'\x00\x00\x00'
         
@@ -4201,7 +4202,7 @@ class swu():
         rekey (see render.py default_esp note)."""
         return self._child_sa_list_with_dh(MODP_2048_bit)
 
-    def answer_CREATE_CHILD_SA_rekey(self, sa_list, with_ke):
+    def answer_CREATE_CHILD_SA_rekey(self, sa_list, with_ke, tsi, tsr):
         """Responder side of an ePDG-initiated ESP CHILD_SA rekey: SA, Nr, [KEr], TSi, TSr.
 
         encode_payload_type_sa allocates the SPI we advertise, which becomes OUR new inbound
@@ -4218,8 +4219,8 @@ class swu():
                                                       self.encode_payload_type_ninr())
         if with_ke:
             payload += self.encode_generic_payload_header(TSI, 0, self.encode_payload_type_ke())
-        payload += self.encode_generic_payload_header(TSR, 0, self.encode_payload_type_tsi())
-        payload += self.encode_generic_payload_header(NONE, 0, self.encode_payload_type_tsr())
+        payload += self.encode_generic_payload_header(TSR, 0, self.encode_payload_type_ts(TSI, tsi))
+        payload += self.encode_generic_payload_header(NONE, 0, self.encode_payload_type_ts(TSR, tsr))
         packet = self.set_ike_packet_length(header + payload)
         return self.encode_payload_type_sk(packet)
 
@@ -4755,8 +4756,13 @@ class swu():
                     else:
                         return MANDATORY_INFORMATION_MISSING,'MANDATORY_INFORMATION_MISSING'
 
+            # The initial offer can be wildcard; the response is the Child SA's real scope.
+            selectors = {i[0]: i[1][1] for i in self.decoded_payload[0][1]
+                         if i[0] in (TSI, TSR)}
+            self._negotiated_child_tsi = selectors.get(TSI)
+            self._negotiated_child_tsr = selectors.get(TSR)
             self.generate_keying_material_child()
-            return OK,''               
+            return OK,''
 
 
     def state_delete(self,initiator,kill = True):
@@ -4926,6 +4932,29 @@ class swu():
                     "(supervised re-establish)" % rekey_spi.hex())
         self.send_data(self.answer_CREATE_CHILD_SA_error(NO_PROPOSAL_CHOSEN))
 
+    @staticmethod
+    def _rekey_ts_covers_scope(proposed, negotiated):
+        """Accept requests whose selectors cover every selector of the old SA."""
+        if not proposed or not negotiated:
+            return False
+        try:
+            def contains(outer, inner):
+                if len(outer) != 6 or len(inner) != 6 or outer[0] != inner[0] or \
+                        outer[0] not in (TS_IPV4_ADDR_RANGE, TS_IPV6_ADDR_RANGE):
+                    return False
+                if outer[1] not in (0, inner[1]):
+                    return False
+                if not (0 <= outer[2] <= inner[2] <= inner[3] <= outer[3] <= 65535):
+                    return False
+                first, last = (ipaddress.ip_address(value) for value in outer[4:6])
+                old_first, old_last = (ipaddress.ip_address(value) for value in inner[4:6])
+                return first.version == old_first.version == old_last.version == last.version and \
+                    first <= old_first <= old_last <= last
+
+            return all(any(contains(offer, old) for offer in proposed) for old in negotiated)
+        except (TypeError, ValueError, IndexError):
+            return False
+
     def _accept_epdg_esp_rekey(self, payloads, rekey_spi):
         """Install a peer-initiated ESP rekey in place. True when the new SA is live.
 
@@ -4938,6 +4967,7 @@ class swu():
         peer_spi = None
         ke_received = False
         peer_nonce = None
+        requested = {}
         for i in payloads:
             if i[0] == SA:
                 if i[1][1] != ESP:
@@ -4954,8 +4984,21 @@ class swu():
                 ke_received = True
             elif i[0] == NINR:
                 peer_nonce = i[1][0]
+            elif i[0] in (TSI, TSR):
+                if i[0] in requested or len(i[1]) != 2 or i[1][0] != len(i[1][1]):
+                    return False
+                requested[i[0]] = i[1][1]
         if not peer_spi or len(peer_spi) != 4 or peer_nonce is None:
             swu_log("ePDG ESP rekey missing a usable SPI or nonce; declining")
+            return False
+        # The ePDG initiates this exchange, so its TSi is our old TSr.
+        # The wildcard offer in ts_list_* is not the negotiated old-SA scope.
+        old_tsi = getattr(self, "_negotiated_child_tsr", None)
+        old_tsr = getattr(self, "_negotiated_child_tsi", None)
+        if rekey_spi != self.spi_resp_child or not \
+                self._rekey_ts_covers_scope(requested.get(TSI), old_tsi) or not \
+                self._rekey_ts_covers_scope(requested.get(TSR), old_tsr):
+            swu_log("ePDG ESP rekey selectors do not cover the negotiated Child SA; declining")
             return False
         # nounce_received is Ni here: the initiator's nonce, which is the peer's.
         self.nounce_received = peer_nonce
@@ -4965,7 +5008,7 @@ class swu():
         # silent mismatch if the ePDG picked a different group.
         sa_list = (self._child_sa_list_with_dh(self.dh_group_num) if ke_received
                    else self.sa_list_negotiated_child)
-        response = self.answer_CREATE_CHILD_SA_rekey(sa_list, ke_received)
+        response = self.answer_CREATE_CHILD_SA_rekey(sa_list, ke_received, old_tsi, old_tsr)
         # encode_payload_type_sa/ninr have now produced the SPI and Nr we are committing to.
         new_inbound_spi = self.sa_spi_list[0]
 
@@ -5172,8 +5215,13 @@ class swu():
                 swu_log("next proactive IKE SA rekey in ~%d min" % int(self.ike_rekey_period / 60))
 
         if isESP == True:
-            print('received CREATE_CHILD_SA response IPSEC')                
-            self.message_id_request += 1    
+            print('received CREATE_CHILD_SA response IPSEC')
+            selectors = {i[0]: i[1][1] for i in self.decoded_payload[0][1]
+                         if i[0] in (TSI, TSR)}
+            # Track the new SA's actual scope for any later peer-initiated rekey.
+            self._negotiated_child_tsi = selectors.get(TSI)
+            self._negotiated_child_tsr = selectors.get(TSR)
+            self.message_id_request += 1
             self.spi_init_child_old = self.spi_init_child
             self.spi_resp_child_old = self.spi_resp_child            
             packet = self.create_INFORMATIONAL_delete(ESP,self.spi_init_child_old)
@@ -5828,6 +5876,8 @@ class swu():
         self.set_cp_list(cp_list)
         self.set_ts_list(TSI, [list(x) for x in _ts])
         self.set_ts_list(TSR, [list(x) for x in _ts])
+        self._negotiated_child_tsi = None
+        self._negotiated_child_tsr = None
         self.cp_mode_current = mode
         # Clear any address/P-CSCF lists from a previous family attempt so _have_pcscf() and the
         # inner-IP selection never see a stale value carried over across the auto ladder.

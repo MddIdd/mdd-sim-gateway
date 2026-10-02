@@ -7,6 +7,7 @@ layer by the caller (main.py).
 """
 from __future__ import annotations
 
+import contextlib
 import glob
 import hashlib
 import json
@@ -45,11 +46,20 @@ LINE_STATE_RETENTION_SECONDS = 3 * 24 * 3600
 LOCAL_MODEM_SMS_CLAIM_SECONDS = 30 * 60
 
 
+@contextlib.contextmanager
+def _sqlite_conn(path):
+    c = sqlite3.connect(path)
+    c.row_factory = sqlite3.Row
+    try:
+        with c:
+            yield c
+    finally:
+        c.close()
+
+
 def _conn():
     os.makedirs(DATA_DIR, exist_ok=True)
-    c = sqlite3.connect(DB_PATH)
-    c.row_factory = sqlite3.Row
-    return c
+    return _sqlite_conn(DB_PATH)
 
 
 def schema_version() -> int | None:
@@ -60,7 +70,7 @@ def schema_version() -> int | None:
     if path is None:
         return None
     try:
-        with sqlite3.connect(path) as c:
+        with _sqlite_conn(path) as c:
             return int(c.execute("PRAGMA user_version").fetchone()[0])
     except sqlite3.Error:
         return None
@@ -88,7 +98,7 @@ def _backup_before_migration() -> str | None:
     """
     if not os.path.exists(DB_PATH):
         return None
-    with sqlite3.connect(DB_PATH) as source:
+    with _sqlite_conn(DB_PATH) as source:
         version = int(source.execute("PRAGMA user_version").fetchone()[0])
         has_history = source.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
                                      "AND name='messages'").fetchone() is not None
@@ -116,14 +126,9 @@ def _backup_before_migration() -> str | None:
     mms_partial = mms_target + ".partial"
     try:
         os.makedirs(backup_dir(), mode=0o700, exist_ok=True)
-        source = sqlite3.connect(DB_PATH)
-        copy = sqlite3.connect(partial)
-        try:
+        with _sqlite_conn(DB_PATH) as source, _sqlite_conn(partial) as copy:
             source.backup(copy)
             expected = source.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
-        finally:
-            copy.close()
-            source.close()
         _verify_backup(partial, version, expected)
         # The attachments the copy refers to go alongside it: the database alone cannot
         # restore an MMS. Hard links cost no space, and part files are never rewritten.
@@ -159,7 +164,7 @@ def snapshot_mms_files(database: str, source_root: str, target_root: str) -> dic
     but that is already gone is counted in "missing" rather than failing the snapshot, so an
     existing inconsistency cannot block a backup. ``missing_parts`` identifies those known
     pre-existing gaps so the archive verifier can distinguish them from a copy defect."""
-    with sqlite3.connect(database) as check:
+    with _sqlite_conn(database) as check:
         has_parts = check.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
                                   "AND name='mms_parts'").fetchone() is not None
         rows = check.execute("SELECT message_id, path, size FROM mms_parts WHERE path!=''"
@@ -200,12 +205,8 @@ def snapshot_history(database_target: str, mms_target: str, *, attempts: int = 3
                 os.remove(leftover)
         shutil.rmtree(mms_target, ignore_errors=True)
         os.makedirs(os.path.dirname(database_target) or ".", exist_ok=True)
-        source, copy = sqlite3.connect(DB_PATH), sqlite3.connect(database_target)
-        try:
+        with _sqlite_conn(DB_PATH) as source, _sqlite_conn(database_target) as copy:
             source.backup(copy)
-        finally:
-            copy.close()
-            source.close()
         result = snapshot_mms_files(database_target, mms_dir(), mms_target)
         if not result["missing"]:
             break
@@ -874,7 +875,7 @@ def migrate_legacy_history(instance_aliases: dict[str, str]) -> dict:
     if not instance_aliases or not os.path.isfile(PREVIOUS_DB_PATH):
         return {"calls": 0, "messages": 0}
     imported = {"calls": 0, "messages": 0}
-    with _lock, sqlite3.connect(PREVIOUS_DB_PATH) as source, _conn() as dest:
+    with _lock, _sqlite_conn(PREVIOUS_DB_PATH) as source, _conn() as dest:
         source.row_factory = sqlite3.Row
         for kind, table in (("call", "calls"), ("message", "messages")):
             try:

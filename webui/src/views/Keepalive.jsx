@@ -30,12 +30,6 @@ function Cell({ tone = '', children, sub }) {
   </div>
 }
 
-const GRID = {
-  display: 'grid',
-  gridTemplateColumns: 'minmax(190px,1.4fr) 110px 1fr .9fr 1fr minmax(180px,1.4fr) 30px',
-  gap: 10, alignItems: 'center', padding: '11px 16px',
-}
-
 function KeepaliveForm({ line, onSaved, showToast }) {
   const { t } = useI18n()
   const [draft, setDraft] = useState(line.keepalive)
@@ -173,7 +167,7 @@ function AbsentLines({ lines, onChanged, showToast }) {
     } catch (error) { showToast?.(error.message) } finally { setBusy('') }
   }
 
-  return <div className="card">
+  return <div className="card" style={{ overflowX: 'auto' }}>
     <button onClick={() => setOpen(o => !o)}
       style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 10, padding: '14px 16px',
         border: 0, background: 'transparent', color: 'var(--text)', cursor: 'pointer', textAlign: 'left' }}>
@@ -187,9 +181,8 @@ function AbsentLines({ lines, onChanged, showToast }) {
       {lines.map(line => {
         const expiry = line.days_to_expiry
         const tone = expiry === null ? '' : expiry <= 3 ? 'crit' : expiry <= 7 ? 'warn' : ''
-        return <div key={line.instance} className="hover-row"
-          style={{ display: 'grid', gridTemplateColumns: 'minmax(180px,1.4fr) 1fr 1fr 1fr auto',
-            gap: 10, alignItems: 'center', padding: '11px 16px', fontSize: 13,
+        return <div key={line.instance} className="hover-row u-keepalive-absent-row"
+          style={{ padding: '11px 16px', fontSize: 13,
             borderBottom: '1px solid var(--border)', opacity: .75 }}>
           <Cell sub={line.msisdn || t('number unknown')}>
             <b style={{ fontSize: 14 }}>{line.name}</b>
@@ -271,8 +264,8 @@ export default function Keepalive({ showToast }) {
       <div className="u-metric"><span>{t('Expiring in 7 days')}</span><strong style={{ color: metrics.expiring ? '#dc2626' : undefined }}>{metrics.expiring}</strong></div>
     </div>
 
-    <div className="card">
-      <div style={{ ...GRID, color: 'var(--text-mute)', fontSize: 11, fontWeight: 700, borderBottom: '1px solid var(--border)' }}>
+    <div className="card" style={{ overflowX: 'auto' }}>
+      <div className="u-keepalive-row u-keepalive-head" style={{ color: 'var(--text-mute)', fontSize: 11, fontWeight: 700, borderBottom: '1px solid var(--border)' }}>
         <div>{t('Line')}</div><div>{t('Network')}</div><div>{t('Last online')}</div>
         <div>{t('Balance')}</div><div>{t('Plan expires')}</div><div>{t('Number keeping')}</div><div />
       </div>
@@ -282,7 +275,7 @@ export default function Keepalive({ showToast }) {
         const expiry = line.days_to_expiry
         const expiryTone = expiry === null ? '' : expiry <= 3 ? 'crit' : expiry <= 7 ? 'warn' : ''
         return <React.Fragment key={line.instance}>
-          <div style={{ ...GRID, borderBottom: '1px solid var(--border)', fontSize: 13, cursor: 'pointer', background: isOpen ? 'var(--hover)' : undefined }}
+          <div className="u-keepalive-row" style={{ borderBottom: '1px solid var(--border)', fontSize: 13, cursor: 'pointer', background: isOpen ? 'var(--hover)' : undefined }}
             onClick={() => setOpen(isOpen ? null : line.instance)}>
             <Cell sub={line.msisdn || t('number unknown')}><b style={{ fontSize: 14 }}>{line.name}</b>
               {line.carrier ? <span style={{ color: 'var(--text-mute)', fontWeight: 400 }}> · {line.carrier}</span> : null}</Cell>
@@ -301,7 +294,7 @@ export default function Keepalive({ showToast }) {
             {statusCell(line)}
             <div style={{ color: 'var(--text-mute)', fontSize: 11, textAlign: 'center' }}>{isOpen ? '▾' : '▸'}</div>
           </div>
-          {isOpen ? <div style={{ borderBottom: '1px solid var(--border)', background: 'var(--hover)', padding: '16px 18px', display: 'grid', gridTemplateColumns: 'minmax(0,1.2fr) minmax(300px,1fr)', gap: 18 }}>
+          {isOpen ? <div style={{ borderBottom: '1px solid var(--border)', background: 'var(--hover)', padding: '16px 18px' }} className="u-keepalive-detail-grid">
             <div>
               <div className="card u-panel">
                 <h4 style={{ margin: '0 0 8px', fontSize: 14 }}>{t('Balance and allowance')}</h4>

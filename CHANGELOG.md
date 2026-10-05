@@ -4,6 +4,10 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.13.2] - 2026-10-05
+
+The automatic update channels remain unchanged.
+
 ### Fixed
 
 - SIM cards in Calls and Messages now show the line name, device, number, and 4G/VoWiFi
@@ -11,6 +15,13 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
   line name or cut off the connection state in the narrow selector.
 - Calls answered from outside the Calls page now offer a keypad for sending DTMF during the
   conversation. The global call overlay previously showed only mute and hang up.
+- Control-plane SQLite connections now close after transactions, backups, and MMS snapshots.
+- ePDG-initiated ESP rekeys validate traffic selectors against the old Child SA and encode
+  accepted selectors in the correct exchange roles.
+- Engine event delivery falls back to Python's standard library when the host interpreter
+  does not have `requests`, so incoming calls and SMS still reach the control plane.
+- Ultra Mobile allowance replies in English now populate the minutes, texts, data, expiry,
+  and wallet balance fields.
 
 ## [1.13.1] - 2026-10-02
 

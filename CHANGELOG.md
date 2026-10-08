@@ -4,6 +4,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- After an eSIM profile switch on a modem, recovery now waits until ModemManager reports the
+  newly enabled SIM. A stale cellular IMSI no longer counts as a successful switch.
+
 ## [1.13.2] - 2026-10-05
 
 The automatic update channels remain unchanged.

@@ -33,6 +33,7 @@ from starlette import formparsers as starlette_formparsers
 
 from . import config as cfg
 from . import (store, engine, status as status_mod, sim, card, notify_push, lpa, auth,
+               esim_identity,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
                sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd, mms,
                mms_media, mms_staging, mms_transport, softphone_ws, modem_ims, vowifi_support,
@@ -46,6 +47,10 @@ STATUS_POLL_FAST_SECONDS = 4.0
 STATUS_POLL_HEALTHY_SECONDS = 15.0
 ESIM_BRIDGE_RESTART_TIMEOUT = float(
     os.environ.get("MDD_ESIM_BRIDGE_RESTART_TIMEOUT", "50"))
+ESIM_MODEM_IDENTITY_ATTEMPTS = int(
+    os.environ.get("MDD_ESIM_MODEM_IDENTITY_ATTEMPTS", "8"))
+ESIM_MODEM_IDENTITY_INTERVAL = float(
+    os.environ.get("MDD_ESIM_MODEM_IDENTITY_INTERVAL", "2"))
 ESIM_CARD_REFRESH_ATTEMPTS = int(
     os.environ.get("MDD_ESIM_CARD_REFRESH_ATTEMPTS", "12"))
 ESIM_CARD_REFRESH_INTERVAL = float(
@@ -3740,6 +3745,78 @@ async def _esim_refresh_modem_readers(
     raise HTTPException(503, f"eSIM profile did not become active on every VPCD slot: {last_error}")
 
 
+def _modemmanager_object_for_hardware(hardware_id: str) -> str:
+    """Return the ModemManager object whose detail names this gateway hardware id."""
+    import subprocess
+    listing = subprocess.run(
+        ["mmcli", "-L"], capture_output=True, text=True, timeout=10, check=False)
+    for obj in cellular_sms.MODEM_PATH_RE.findall(listing.stdout or ""):
+        detail = subprocess.run(
+            ["mmcli", "-m", obj, "--output-keyvalue"],
+            capture_output=True, text=True, timeout=10, check=False)
+        if hardware_id in (detail.stdout or ""):
+            return obj
+    return ""
+
+
+def _modemmanager_identity_for_hardware(hardware_id: str) -> dict:
+    """Read the live cellular SIM identity for one modem, without logging it."""
+    import subprocess
+    obj = _modemmanager_object_for_hardware(hardware_id)
+    if not obj:
+        return {"iccid": "", "imsi": ""}
+    detail = subprocess.run(
+        ["mmcli", "-m", obj, "--output-keyvalue"],
+        capture_output=True, text=True, timeout=10, check=False)
+    sim_path = ""
+    for line in (detail.stdout or "").splitlines():
+        if line.startswith("modem.generic.sim"):
+            sim_path = line.split(":", 1)[-1].strip()
+    if not sim_path or sim_path == "--":
+        return {"iccid": "", "imsi": ""}
+    sim_doc = subprocess.run(
+        ["mmcli", "-i", sim_path, "--output-keyvalue"],
+        capture_output=True, text=True, timeout=10, check=False)
+    identity = {"iccid": "", "imsi": ""}
+    for line in (sim_doc.stdout or "").splitlines():
+        if "iccid" in line:
+            identity["iccid"] = line.split(":", 1)[-1].strip()
+        elif "imsi" in line:
+            identity["imsi"] = line.split(":", 1)[-1].strip()
+    return identity
+
+
+def _refresh_modemmanager_identity(hardware_id: str) -> None:
+    """Ask the matched module to reread the SIM, then restart ModemManager's probe."""
+    import subprocess
+    obj = _modemmanager_object_for_hardware(hardware_id)
+    if obj:
+        subprocess.run(
+            ["mmcli", "-m", obj, "--command=AT+CFUN=0"],
+            capture_output=True, text=True, timeout=20, check=False)
+        subprocess.run(
+            ["mmcli", "-m", obj, "--command=AT+CFUN=1"],
+            capture_output=True, text=True, timeout=20, check=False)
+    subprocess.run(
+        ["systemctl", "restart", "ModemManager.service"],
+        capture_output=True, text=True, timeout=40, check=False)
+
+
+async def _esim_converge_modemmanager(hardware_id: str, expected: dict) -> dict:
+    """Refresh until ModemManager reports the profile that was just enabled."""
+    observed = await asyncio.to_thread(_modemmanager_identity_for_hardware, hardware_id)
+    if esim_identity.identity_matches(observed, expected):
+        return observed
+    await asyncio.to_thread(_refresh_modemmanager_identity, hardware_id)
+    for _attempt in range(max(1, ESIM_MODEM_IDENTITY_ATTEMPTS)):
+        observed = await asyncio.to_thread(_modemmanager_identity_for_hardware, hardware_id)
+        if esim_identity.identity_matches(observed, expected):
+            return observed
+        await asyncio.sleep(ESIM_MODEM_IDENTITY_INTERVAL)
+    raise HTTPException(
+        503, "ModemManager still reports the previous SIM after the eSIM profile switch")
+
+
 async def _esim_recover_profile_switch(name: str, hardware_id: str, iccid: str) -> dict:
     bridge = await _esim_restart_modem_bridge(hardware_id, iccid)
     info, readers = await _esim_refresh_modem_readers(name, hardware_id, iccid)
@@ -3755,10 +3832,12 @@ async def _esim_recover_profile_switch(name: str, hardware_id: str, iccid: str) 
             409, f"the active eSIM profile still needs line configuration: {missing}")
     target = await asyncio.to_thread(
         cfg.upsert_instance, {"id": str(target["id"]), "enabled": True})
+    modemmanager = await _esim_converge_modemmanager(hardware_id, {
+        "iccid": iccid, "imsi": target.get("imsi")})
     egress.publish()
     await api_instance_start(str(target["id"]))
     return {"card": info, "readers": readers, "instance_id": str(target["id"]),
-            "bridge": bridge}
+            "bridge": bridge, "modemmanager": modemmanager}
 
 
 async def _esim_run(

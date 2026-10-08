@@ -19,5 +19,8 @@
     "@vitejs/plugin-react": "^4.3.4",
     "tailwindcss": "^4.3.3",
     "vite": "^6.0.7"
+  },
+  "overrides": {
+    "source-map-js": "1.2.2"
   }
 }

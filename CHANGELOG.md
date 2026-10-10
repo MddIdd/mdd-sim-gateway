@@ -4,6 +4,10 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- WebUI mobile layout responsiveness: keep wide tabular views scrollable and stack dense grids on small screens. Keepalive table and absent SIM cards preserve column structure via horizontal scrolling without clipping, detail drawer and SIM configuration forms fold into single-column layouts on mobile, and allowance query fields stack cleanly.
+
 ## [1.13.2] - 2026-10-05
 
 The automatic update channels remain unchanged.

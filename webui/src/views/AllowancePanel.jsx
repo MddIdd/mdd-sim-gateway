@@ -153,7 +153,7 @@ export default function AllowancePanel({ instanceId, mode = 'overview', transpor
       <p className="u-note" style={{ marginTop: 0 }}>{rule?.known
         ? t('This carrier has a built-in method. Saving below creates an override; you can restore the default later.')
         : t('The carrier is unknown. Enter the service number and exact SMS query text supplied by the carrier.')}</p>
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(120px, 1fr) minmax(180px, 2fr)', gap: 8 }}>
+      <div className="u-allowance-query-grid">
         <label><span>{t('Service number')}</span><input value={ruleDraft.recipient} maxLength={32} onChange={event => setRuleDraft(current => ({ ...current, recipient: event.target.value }))} /></label>
         <label><span>{t('Query text')}</span><input value={ruleDraft.body} maxLength={500} onChange={event => setRuleDraft(current => ({ ...current, body: event.target.value }))} /></label>
       </div>

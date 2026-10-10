@@ -451,3 +451,62 @@ label:has(>.u-toggle) { display:flex; align-items:center; gap:10px; min-height:3
  .u-line-workspace>.sim-picker { max-height:180px; }
 }
 .u-nav-count { flex:none; margin-left:auto; min-width:18px; height:18px; padding:0 5px; border-radius:9px; background:var(--primary); color:#fff; font-size:11px; font-weight:700; display:grid; place-items:center; }
+
+/* --- Mobile Responsive Enhancements for Keepalive, Allowance & SimConfig --- */
+.u-keepalive-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.u-keepalive-row {
+  display: grid;
+  grid-template-columns: minmax(190px, 1.4fr) 110px 1fr 0.9fr 1fr minmax(180px, 1.4fr) 30px;
+  gap: 10px;
+  align-items: center;
+  padding: 11px 16px;
+  min-width: 760px;
+}
+.u-keepalive-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(300px, 1fr);
+  gap: 18px;
+}
+.u-keepalive-absent-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.4fr) 1fr 1fr 1fr auto;
+  gap: 10px;
+  align-items: center;
+  min-width: 640px;
+}
+.u-allowance-query-grid {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(180px, 2fr);
+  gap: 8px;
+}
+
+@media (max-width: 768px) {
+  .u-keepalive-detail-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .u-allowance-query-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  /* Prevent word break & column collapse on small screens */
+  .u-detail b {
+    word-break: normal;
+    overflow-wrap: anywhere;
+  }
+  .u-details.cols {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+  .u-panel {
+    padding: 14px;
+  }
+  .card {
+    border-radius: 10px;
+  }
+}

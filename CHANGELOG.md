@@ -4,6 +4,12 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Devices can have a custom display name in Hardware settings, so identical readers and modems
+  are easier to tell apart. The original hardware name remains visible, and clearing the custom
+  name restores the default. For devices without a serial number, names follow USB ports.
+
 ### Fixed
 
 - WebUI mobile layout responsiveness: keep wide tabular views scrollable and stack dense grids on small screens. Keepalive table and absent SIM cards preserve column structure via horizontal scrolling without clipping, detail drawer and SIM configuration forms fold into single-column layouts on mobile, and allowance query fields stack cleanly.

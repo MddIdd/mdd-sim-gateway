@@ -123,6 +123,8 @@ class HardwareRuntimeTests(unittest.TestCase):
                 "assignments": {old_id: {"usb_path": "1-3"}}}))
             (root / "devices-status.json").write_text(json.dumps({
                 "devices": {old_id: {"present": False}}}))
+            (root / "devices-hardware.json").write_text(json.dumps({
+                "devices": {old_id: {"device_type": "modem", "display_name": "Desk modem"}}}))
             for device_id in (old_id, new_id):
                 (identities / f"{device_id}.json").write_text(json.dumps({
                     "hardware_id": device_id, "imei": "350000000000036"}))
@@ -139,6 +141,9 @@ class HardwareRuntimeTests(unittest.TestCase):
             self.assertTrue((identities / f"{new_id}.json").exists())
             assignments = json.loads((root / "hardware-state.json").read_text())["assignments"]
             self.assertNotIn(old_id, assignments)
+            records = json.loads((root / "devices-hardware.json").read_text())["devices"]
+            self.assertEqual(records, {new_id: {"device_type": "modem",
+                                                "display_name": "Desk modem"}})
 
     def test_modem_id_migration_waits_for_matching_hardware_imei(self):
         with tempfile.TemporaryDirectory() as temp:

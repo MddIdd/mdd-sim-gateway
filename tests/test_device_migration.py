@@ -41,6 +41,9 @@ class DeviceMigrationTests(unittest.TestCase):
                                                          "base_port": 35963}}})
         self._write(self.app.device_status_path,
                     {"devices": {"2c7c-0125-1-1.2": {"present": False}}})
+        user_hardware_path = self.app.root / "devices-hardware.json"
+        self._write(user_hardware_path, {"devices": {
+            "2c7c-0125-1-1.2": {"device_type": "modem", "display_name": "Desk modem"}}})
         self._identity("2c7c-0125-1-1.2")
         self._identity("2c7c-0125-1-1.4")
 
@@ -55,6 +58,9 @@ class DeviceMigrationTests(unittest.TestCase):
         self.assertEqual(moved["usb_path"], "1-1.4")
         status = json.loads(self.app.device_status_path.read_text())["devices"]
         self.assertEqual(status, {})
+        records = json.loads(user_hardware_path.read_text())["devices"]
+        self.assertEqual(records, {"2c7c-0125-1-1.4": {
+            "device_type": "modem", "display_name": "Desk modem"}})
 
     def test_same_model_requires_matching_hardware_imei(self):
         devices = {"2c7c-0125-1-1.2": {"vowifi_enabled": True}}
@@ -69,6 +75,22 @@ class DeviceMigrationTests(unittest.TestCase):
         self._identity("2c7c-0125-1-1.4", "350000000000036")
         self.app.migrate_device_ids([_modem("2c7c-0125-1-1.4", "1-1.4")])
         self.assertEqual(self._desired(), devices)
+
+    def test_existing_new_id_name_wins_and_old_record_is_removed(self):
+        old_id, new_id = "2c7c-0125-1-1.2", "2c7c-0125-1-1.4"
+        self._write(self.app.device_desired_path,
+                    {"devices": {old_id: {"vowifi_enabled": True}}})
+        self._identity(old_id)
+        self._identity(new_id)
+        user_hardware_path = self.app.root / "devices-hardware.json"
+        self._write(user_hardware_path, {"devices": {
+            old_id: {"display_name": "Old name"},
+            new_id: {"display_name": "New name"}}})
+
+        self.app.migrate_device_ids([_modem(new_id, "1-1.4")])
+
+        records = json.loads(user_hardware_path.read_text())["devices"]
+        self.assertEqual(records, {new_id: {"display_name": "New name"}})
 
     def test_ambiguous_or_unrelated_devices_are_left_alone(self):
         devices = {"2c7c-0125-1-1.2": {"vowifi_enabled": True},

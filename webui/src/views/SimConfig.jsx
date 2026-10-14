@@ -269,7 +269,7 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
         {t('Country routing was detected from the SIM. Complete only the missing fields below, then start VoWiFi.')}
         {!!missing.length && <div style={{ marginTop: 6 }}>{t('Missing information')}: {missing.map(key => missingLabels[key] || key).join('、')}</div>}
       </div>}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+      <div className="u-form-grid" style={{ gap: 16 }}>
       {/* Card / PIN panel */}
       <div className="card" style={{ padding: 20 }}>
         <h3 style={{ marginTop: 0 }}>{t('SIM card')}</h3>
@@ -315,7 +315,7 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
       {/* Instance form */}
       <div className="card" style={{ padding: 20 }}>
         <h3 style={{ marginTop: 0 }}>{t('Line configuration')}</h3>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+        <div className="u-form-grid" style={{ gap: 10 }}>
           {!creating && <Field label={t('Instance ID')}><input value={form.id} onChange={(e) => upd({ id: e.target.value })} placeholder="1" /></Field>}
           <Field label={t('Name')}><input value={form.name} onChange={(e) => upd({ name: e.target.value })} placeholder="Telus" /></Field>
           <Field label="IMSI"><input className="mono" value={form.imsi} onChange={(e) => upd({ imsi: e.target.value })} /></Field>
@@ -400,7 +400,7 @@ export default function SimConfig({ instances, selected, refresh, cards, setSele
         <details style={{ marginTop: 12 }}>
           <summary>{t('Advanced IMS identity')}</summary>
           <p className="u-note">{t('Carrier defaults are applied automatically. Change these fields only when required by the carrier.')}</p>
-          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 10 }}>
+          <div className="u-form-grid" style={{ gap: 10 }}>
             <Field label="P-Access-Network-Info (PANI)">
               <input className="mono" value={form.sip.pani || ''} onChange={(e) => updSip({ pani: e.target.value })}
                 placeholder={t('Automatic carrier default')} />

@@ -38,6 +38,17 @@ SERIAL_TIMEOUT = 2.0
 MODEMMANAGER_TIMEOUT = 8.0
 OPEN_CHANNEL = bytes.fromhex("0070000001")
 
+def esim_identity_matches(observed: dict, expected: dict) -> bool:
+    """Match a readable ICCID exactly, falling back to IMSI only when absent."""
+    expected_iccid = str(expected.get("iccid") or "").strip()
+    observed_iccid = str(observed.get("iccid") or "").strip()
+    if expected_iccid.isdigit() and observed_iccid.isdigit():
+        return observed_iccid == expected_iccid
+    expected_imsi = str(expected.get("imsi") or "").strip()
+    observed_imsi = str(observed.get("imsi") or "").strip()
+    return bool(expected_imsi.isdigit() and observed_imsi == expected_imsi)
+
+
 # Outcomes. "usable" and "unverified" are saved as a model; the rest are explained instead.
 USABLE = "usable"            # AT answered and AT+CSIM opened and closed a logical channel
 UNVERIFIED = "unverified"    # AT answered, but no ready SIM to try a logical channel on

@@ -6,9 +6,9 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
-from control.app import device_state
+from control.app import device_state, main
 from host import mdd_orchestrator
 from host.mdd_orchestrator import Orchestrator
 
@@ -1312,6 +1312,39 @@ class ReaderRecordMigrationTests(unittest.TestCase):
         self.assertEqual(device_state.migrate_reader_records(
             {"reader-new": {"name": self.NAME}}), [])
         self.assertIn("2c7c-0125-1-1.4", device_state.hardware())
+
+
+class DeviceDisplayNameTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reader_nickname_then_imei_keeps_raw_name_for_port_migration(self):
+        raw_name = "Alcor Link AK9563 01 00"
+        device = {"id": "reader-old", "device_type": "reader", "instance_id": None,
+                  "name": "Desk reader", "reader": raw_name, "stable_path": "1-2"}
+        with tempfile.TemporaryDirectory() as temp:
+            with patch.multiple(device_state, ROOT=temp,
+                                HARDWARE=str(Path(temp) / "devices-hardware.json")), \
+                    patch.object(main, "_unified_devices", new=AsyncMock(return_value=[device])), \
+                    patch.object(main.hub, "broadcast", new=AsyncMock()):
+                await main.api_device_name("reader-old", {"display_name": " Desk reader "})
+                await main.api_device_hardware("reader-old", {"imei": "490154203237518"})
+                record = device_state.hardware()["reader-old"]
+                self.assertEqual(record["display_name"], "Desk reader")
+                self.assertEqual(record["name"], raw_name)
+                self.assertEqual(record["imei"], "490154203237518")
+
+                moved = device_state.migrate_reader_records({
+                    "reader-new": {"name": raw_name, "reader_port": "1-3"}})
+                self.assertEqual(moved, [("reader-old", "reader-new")])
+                self.assertEqual(device_state.hardware()["reader-new"]["display_name"],
+                                 "Desk reader")
+
+    async def test_name_validation_and_missing_device(self):
+        with patch.object(main, "_unified_devices", new=AsyncMock(return_value=[])):
+            with self.assertRaises(main.HTTPException) as invalid:
+                await main.api_device_name("reader-a", {"display_name": "bad\nname"})
+            self.assertEqual(invalid.exception.status_code, 422)
+            with self.assertRaises(main.HTTPException) as missing:
+                await main.api_device_name("reader-a", {"display_name": "Desk reader"})
+            self.assertEqual(missing.exception.status_code, 404)
 
 
 def vpcd_modem_bridge_slot_choices():

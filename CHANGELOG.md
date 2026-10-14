@@ -4,6 +4,29 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.14.0] - 2026-10-15
+
+The automatic update channels remain on v1.13.2 pending real-device acceptance.
+
+### Added
+
+- Devices can have a custom display name in Hardware settings, so identical readers and modems
+  are easier to tell apart. The original hardware name remains visible, and clearing the custom
+  name restores the default. For devices without a serial number, names follow USB ports.
+
+### Fixed
+
+- eSIM profile-switch recovery now verifies ModemManager's live SIM identity when the
+  replacement bridge uses the cellular backend. Stale identities trigger one host-side,
+  target-modem reset and bridge rebuild, not a shared service restart. Direct-serial
+  bridges remain independent of ModemManager; failed convergence keeps the line stopped.
+  Full-container Hardware uses the same verification handshake and preserves other PC/SC
+  bridges while the reset target temporarily re-enumerates.
+
+- WebUI mobile layout responsiveness: keep wide tabular views scrollable and stack dense grids on small screens. Keepalive table and absent SIM cards preserve column structure via horizontal scrolling without clipping, detail drawer and SIM configuration forms fold into single-column layouts on mobile, and allowance query fields stack cleanly.
+
+- Updated source-map-js to 1.2.2 to address the reported denial-of-service advisory.
+
 ## [1.13.2] - 2026-10-05
 
 The automatic update channels remain unchanged.

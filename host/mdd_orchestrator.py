@@ -113,10 +113,11 @@ def append_jsonl(path: Path, record: dict, limit: int = 500):
         pass
 
 
-def run(args, *, check=False, capture=True):
+def run(args, *, check=False, capture=True, timeout=None):
     return subprocess.run(args, check=check, text=True,
                           stdout=subprocess.PIPE if capture else None,
-                          stderr=subprocess.PIPE if capture else None)
+                          stderr=subprocess.PIPE if capture else None,
+                          **({"timeout": timeout} if timeout is not None else {}))
 
 
 def slug(value: str) -> str:
@@ -739,6 +740,7 @@ class Orchestrator:
                 "request_id": request_id,
                 "device_id": device_id,
                 "expected_iccid_sha256": expected_iccid_sha256,
+                "require_cellular_identity": request.get("require_cellular_identity") is True,
                 "requested_at": requested_at,
                 "started_at": time.time(),
             }
@@ -746,19 +748,89 @@ class Orchestrator:
             self.root.mkdir(parents=True, exist_ok=True)
             (self.root / "pcsc-maintenance").write_text(
                 str(int(time.time())), encoding="ascii")
-            proc = self.bridges.pop(device_id, None)
-            self.bridge_ports.pop(device_id, None)
-            self._bridge_started.pop(device_id, None)
-            self._bridge_failures.pop(device_id, None)
-            if proc and proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(8)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
+            self._stop_profile_switch_bridge(device_id)
             self._bridge_restart_status(request, "stopped")
             self.log(f"stopped VPCD bridge for eUICC profile refresh: {device_id}")
+
+    def _stop_profile_switch_bridge(self, device_id: str):
+        proc = self.bridges.pop(device_id, None)
+        self.bridge_ports.pop(device_id, None)
+        self._bridge_started.pop(device_id, None)
+        self._bridge_failures.pop(device_id, None)
+        if proc and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(8)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+    @staticmethod
+    def esim_identity_matches(observed: dict, expected: dict) -> bool:
+        """Match a readable ICCID exactly, falling back to IMSI only when absent."""
+        return modem_probe.esim_identity_matches(observed, expected)
+
+    def _converge_profile_switch_modem(self, request: dict, identity: dict) -> bool:
+        """Verify the selected bridge's cellular owner without restarting shared services."""
+        device_id = request["device_id"]
+        command = self._bridge_commands.get(device_id) or []
+        if "--modem" not in command:
+            self._bridge_restart_status(
+                request, "failed", error="cannot determine the replacement bridge backend")
+            return False
+        if "--modemmanager" not in command:
+            if request.get("modem_reset_attempted"):
+                self._bridge_restart_status(
+                    request, "failed", error="cellular backend disappeared during SIM recovery")
+                return False
+            request["cellular_identity"] = "not_applicable"
+            return True
+        tty = command[command.index("--modem") + 1]
+        try:
+            obj = self.modemmanager_modem_for_tty(tty, timeout=10)
+            if not obj:
+                return False
+            detail = subprocess.run(
+                ["mmcli", "-m", obj, "--output-keyvalue"],
+                capture_output=True, text=True, timeout=10, check=False)
+            if detail.returncode:
+                return False
+            sim_path = self._kv(detail.stdout, "modem.generic.sim")
+            if not re.fullmatch(r"/org/freedesktop/ModemManager1/SIM/\d+", sim_path):
+                return False
+            sim_detail = subprocess.run(
+                ["mmcli", "-i", sim_path, "--output-keyvalue"],
+                capture_output=True, text=True, timeout=10, check=False)
+            if sim_detail.returncode:
+                return False
+            observed = {
+                "iccid": self._kv(sim_detail.stdout, "sim.properties.iccid"),
+                "imsi": self._kv(sim_detail.stdout, "sim.properties.imsi"),
+            }
+            if self.esim_identity_matches(observed, identity):
+                request["cellular_identity"] = "matched"
+                return True
+            if request.get("modem_reset_attempted"):
+                return False
+            if not any(str(value or "").isdigit() for value in observed.values()):
+                return False
+            request = self._bridge_restart_status(
+                request, "resetting_modem", modem_reset_attempted=True)
+            self._stop_profile_switch_bridge(device_id)
+            result = subprocess.run(
+                ["mmcli", "-m", obj, "--reset"],
+                capture_output=True, text=True, timeout=20, check=False)
+            if result.returncode:
+                self._bridge_restart_status(
+                    request, "failed", error="ModemManager could not reset the selected modem")
+                return False
+            self.cellular_states.pop(device_id, None)
+            self.radio_states.pop(device_id, None)
+            self._bridge_restart_status(request, "stopped")
+        except (OSError, subprocess.TimeoutExpired):
+            self._bridge_restart_status(
+                request, "failed", error="ModemManager SIM recovery command failed")
+        return False
 
     def finish_bridge_restart_requests(self, present_ids: set[str]):
         """Advance stopped requests only when the replacement bridge is authoritative."""
@@ -769,13 +841,16 @@ class Orchestrator:
                 self._bridge_restarts.pop(request_id, None)
                 continue
             device_id = str(request.get("device_id") or "")
+            timeout = 90 if request.get("require_cellular_identity") else 45
+            if now - float(request.get("started_at") or now) > timeout:
+                self._bridge_restart_status(
+                    request, "failed", error="timed out rebuilding the VPCD bridge and SIM identity")
+                continue
             if device_id not in present_ids:
+                if request.get("modem_reset_attempted"):
+                    continue
                 self._bridge_restart_status(
                     request, "failed", error="modem disappeared during bridge rebuild")
-                continue
-            if now - float(request.get("started_at") or now) > 45:
-                self._bridge_restart_status(
-                    request, "failed", error="timed out rebuilding the VPCD bridge")
                 continue
             proc = self.bridges.get(device_id)
             if not proc or proc.poll() is not None:
@@ -793,6 +868,9 @@ class Orchestrator:
             expected = str(request.get("expected_iccid_sha256") or "")
             actual = str(identity.get("iccid") or "")
             if expected and hashlib.sha256(actual.encode()).hexdigest() != expected:
+                continue
+            if request.get("require_cellular_identity") and not self._converge_profile_switch_modem(
+                    request, identity):
                 continue
             self._bridge_restart_status(
                 request, "channels_ready", bridge_pid=int(proc.pid),
@@ -1405,6 +1483,11 @@ class Orchestrator:
         # unsupported, so a stale desired flag must not resurrect ModemManager.
         if str(hardware.get("modem_backend") or "auto") == "serial":
             return False
+        if self.applied_cellular_backend and any(
+                request.get("modem_reset_attempted")
+                and request.get("state") not in {"channels_ready", "failed"}
+                for request in self._bridge_restarts.values()):
+            return True
         if plan["cellular_devices"]:
             return True
         # With RF deliberately disabled, ModemManager has no remaining job: data is off and
@@ -1527,15 +1610,16 @@ class Orchestrator:
         })
 
     @staticmethod
-    def modemmanager_modem_for_tty(tty: str) -> str:
+    def modemmanager_modem_for_tty(tty: str, *, timeout=None) -> str:
         """Return the ModemManager object owning a tty, supporting multiple modules."""
-        listing = run(["mmcli", "-L"])
+        listing = run(["mmcli", "-L"], **({"timeout": timeout} if timeout is not None else {}))
         if listing.returncode:
             return ""
         objects = re.findall(r"(/org/freedesktop/ModemManager1/Modem/\d+)", listing.stdout)
         basename = Path(tty).name
         for obj in objects:
-            detail = run(["mmcli", "-m", obj, "--output-keyvalue"])
+            detail = run(["mmcli", "-m", obj, "--output-keyvalue"],
+                         **({"timeout": timeout} if timeout is not None else {}))
             if detail.returncode == 0 and re.search(rf"(?<![A-Za-z0-9_.-]){re.escape(basename)}(?![A-Za-z0-9_.-])",
                                                    detail.stdout):
                 return obj
@@ -2974,6 +3058,17 @@ class Orchestrator:
                               if key in modem})
                 hardware_doc["assignments"] = assignments | {new_id: moved}
                 atomic_json(self.hw_state_path, hardware_doc)
+            # The matching hardware IMEI above also proves the user-facing record belongs
+            # to this modem. Keep an existing new-id record and retire the stale key.
+            user_hardware_path = self.root / "devices-hardware.json"
+            user_hardware_doc = read_json(user_hardware_path)
+            user_devices = user_hardware_doc.get("devices")
+            if isinstance(user_devices, dict) and old_id in user_devices:
+                if new_id not in user_devices:
+                    user_devices[new_id] = user_devices[old_id]
+                user_devices.pop(old_id, None)
+                user_hardware_doc["updated_at"] = int(time.time())
+                atomic_json(user_hardware_path, user_hardware_doc)
             status_doc = read_json(self.device_status_path)
             status_devices = status_doc.get("devices")
             if isinstance(status_devices, dict) and old_id in status_devices:
@@ -3413,6 +3508,9 @@ class Orchestrator:
         start writes one of these files, and noticing that costs a stat rather than the
         fifteen subprocesses a full reconcile spends.
         """
+        if any(request.get("state") not in {"channels_ready", "failed"}
+               for request in self._bridge_restarts.values()):
+            seconds = min(seconds, self.interval)
         watched = self._input_mtimes()
         deadline = time.time() + seconds
         while not self.stop:

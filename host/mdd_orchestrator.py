@@ -768,13 +768,7 @@ class Orchestrator:
     @staticmethod
     def esim_identity_matches(observed: dict, expected: dict) -> bool:
         """Match a readable ICCID exactly, falling back to IMSI only when absent."""
-        expected_iccid = str(expected.get("iccid") or "").strip()
-        observed_iccid = str(observed.get("iccid") or "").strip()
-        if expected_iccid.isdigit() and observed_iccid.isdigit():
-            return observed_iccid == expected_iccid
-        expected_imsi = str(expected.get("imsi") or "").strip()
-        observed_imsi = str(observed.get("imsi") or "").strip()
-        return bool(expected_imsi.isdigit() and observed_imsi == expected_imsi)
+        return modem_probe.esim_identity_matches(observed, expected)
 
     def _converge_profile_switch_modem(self, request: dict, identity: dict) -> bool:
         """Verify the selected bridge's cellular owner without restarting shared services."""

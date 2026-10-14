@@ -12,6 +12,11 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- eSIM profile-switch recovery now verifies ModemManager's live SIM identity when the
+  replacement bridge uses the cellular backend. Stale identities trigger one host-side,
+  target-modem reset and bridge rebuild, not a shared service restart. Direct-serial
+  bridges remain independent of ModemManager; failed convergence keeps the line stopped.
+
 - WebUI mobile layout responsiveness: keep wide tabular views scrollable and stack dense grids on small screens. Keepalive table and absent SIM cards preserve column structure via horizontal scrolling without clipping, detail drawer and SIM configuration forms fold into single-column layouts on mobile, and allowance query fields stack cleanly.
 
 ## [1.13.2] - 2026-10-05

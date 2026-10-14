@@ -96,6 +96,40 @@ class BridgeRestartHandshakeTests(unittest.TestCase):
 
 
 class ESimProfileSwitchControlTests(unittest.IsolatedAsyncioTestCase):
+    def test_bridge_request_requires_host_cellular_verification(self):
+        with tempfile.TemporaryDirectory() as temp, patch.object(main.cfg, "DATA_DIR", temp):
+            request_id, _status_path = main._esim_write_bridge_restart_request(
+                "modem-1", "profile-target")
+            request = mdd_orchestrator.read_json(
+                Path(temp) / "orchestrator" / "bridge-restart-requests" / f"{request_id}.json")
+        self.assertTrue(request["require_cellular_identity"])
+        self.assertNotIn("profile-target", str(request))
+
+    async def test_bridge_completion_requires_cellular_verification(self):
+        for cellular_identity in ("matched", "not_applicable", None):
+            with self.subTest(cellular_identity=cellular_identity), \
+                    patch.object(main, "_esim_write_bridge_restart_request",
+                                 return_value=("switch-1", "status.json")), \
+                    patch.object(main, "_read_json_file", return_value={
+                        "request_id": "switch-1", "state": "channels_ready",
+                        "cellular_identity": cellular_identity}):
+                if cellular_identity is None:
+                    with self.assertRaises(main.HTTPException):
+                        await main._esim_restart_modem_bridge("modem-1", "profile-target")
+                else:
+                    result = await main._esim_restart_modem_bridge("modem-1", "profile-target")
+                    self.assertEqual(result["cellular_identity"], cellular_identity)
+
+    async def test_failed_host_convergence_never_enables_or_starts_line(self):
+        with patch.object(main, "_esim_restart_modem_bridge", new=AsyncMock(
+                side_effect=main.HTTPException(503, "identity mismatch"))), \
+                patch.object(main.cfg, "upsert_instance") as enable, \
+                patch.object(main, "api_instance_start", new=AsyncMock()) as start:
+            with self.assertRaises(main.HTTPException):
+                await main._esim_recover_profile_switch("reader", "modem-1", "profile-target")
+        enable.assert_not_called()
+        start.assert_not_awaited()
+
     def test_legacy_line_is_scoped_from_its_live_modem_match(self):
         reader = "VoWiFi Modem modem-1 00 00"
         with patch.object(main.hub, "cards", {

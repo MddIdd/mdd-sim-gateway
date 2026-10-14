@@ -45,7 +45,7 @@ STATUS_OK_GRACE_SECONDS = 20
 STATUS_POLL_FAST_SECONDS = 4.0
 STATUS_POLL_HEALTHY_SECONDS = 15.0
 ESIM_BRIDGE_RESTART_TIMEOUT = float(
-    os.environ.get("MDD_ESIM_BRIDGE_RESTART_TIMEOUT", "50"))
+    os.environ.get("MDD_ESIM_BRIDGE_RESTART_TIMEOUT", "100"))
 ESIM_CARD_REFRESH_ATTEMPTS = int(
     os.environ.get("MDD_ESIM_CARD_REFRESH_ATTEMPTS", "12"))
 ESIM_CARD_REFRESH_INTERVAL = float(
@@ -3650,6 +3650,7 @@ def _esim_write_bridge_restart_request(hardware_id: str, iccid: str) -> tuple[st
     with open(temporary, "w", encoding="utf-8") as handle:
         json.dump({"request_id": request_id, "device_id": hardware_id,
                    "expected_iccid_sha256": hashlib.sha256(iccid.encode()).hexdigest(),
+                   "require_cellular_identity": True,
                    "requested_at": time.time()}, handle)
     os.chmod(temporary, 0o600)
     os.replace(temporary, path)
@@ -3670,6 +3671,10 @@ async def _esim_restart_modem_bridge(
         if status.get("request_id") == request_id:
             last_state = str(status.get("state") or last_state)
             if last_state == "channels_ready":
+                if status.get("cellular_identity") not in {"matched", "not_applicable"}:
+                    raise HTTPException(
+                        503, "host orchestrator did not verify the cellular SIM identity; "
+                        "update the host orchestrator before retrying")
                 return status
             if last_state == "failed":
                 raise HTTPException(

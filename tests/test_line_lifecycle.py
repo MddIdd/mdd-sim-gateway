@@ -747,7 +747,8 @@ class OfflineDeviceStatusTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(main.hub, "cards_list", return_value=[]), \
                 patch.object(main.device_state, "native_reader_devices", return_value={}), \
                 patch.object(main.device_state, "hardware", return_value={
-                    "modem-a": {"device_type": "modem", "name": "Saved modem"}}), \
+                    "modem-a": {"device_type": "modem", "name": "Saved modem",
+                                "display_name": "Desk modem"}}), \
                 patch.object(main.cfg, "get_settings", return_value={
                     "proxy": {"exits": {}}, "rekey": {"minutes": 30}}), \
                 patch.object(main.egress, "status", return_value={"lines": {}}), \
@@ -757,6 +758,8 @@ class OfflineDeviceStatusTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(devices), 1)
         device = devices[0]
+        self.assertEqual(device["name"], "Desk modem")
+        self.assertEqual(device["hardware_name"], "Saved modem")
         self.assertFalse(device["present"])
         self.assertEqual(device["capabilities"]["cellular"]["actual"], "off")
         self.assertEqual(device["capabilities"]["flight"]["actual"], "off")

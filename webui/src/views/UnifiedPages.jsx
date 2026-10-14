@@ -302,6 +302,7 @@ function deviceIdentityLine(d, t) {
 function HardwarePanel({ device, refreshDevices, showToast, focusImei = false, onSetup }) {
   const { t } = useI18n()
   const [imei, setImei] = useState(device.imei || '')
+  const [displayName, setDisplayName] = useState(device.display_name || '')
   const imeiInput = useRef(null)
   useEffect(() => {
     if (!focusImei || !imeiInput.current) return
@@ -310,7 +311,17 @@ function HardwarePanel({ device, refreshDevices, showToast, focusImei = false, o
   }, [focusImei])
   const [saving, setSaving] = useState(false)
   useEffect(() => setImei(device.imei || ''), [device.id, device.imei])
+  useEffect(() => setDisplayName(device.display_name || ''), [device.id, device.display_name])
   const isReader = device.device_type === 'reader'
+  const saveName = async () => {
+    setSaving(true)
+    try {
+      await api.saveDeviceName(device.id, displayName.trim())
+      await refreshDevices()
+      showToast(t('Device name saved'))
+    } catch (error) { showToast(`${t('Error')}: ${error.message}`) }
+    finally { setSaving(false) }
+  }
   const save = async () => {
     const digits = String(imei || '').replace(/\D/g, '')
     if (digits.length !== 15) { showToast(t('IMEI must contain exactly 15 digits')); return }
@@ -345,13 +356,21 @@ function HardwarePanel({ device, refreshDevices, showToast, focusImei = false, o
     <p>{t('The device name identifies this hardware in the interface. Model and firmware appear only when the hardware reports them.')}</p>
   </div>
     <div className="u-details cols u-hardware-facts">
-      <div className="u-detail"><span>{t('Device name')}</span><b>{deviceTitle(device, 0)}</b></div>
+      <div className="u-detail"><span>{t('Device name')}</span><div className="u-device-name-value"><b>{deviceTitle(device, 0)}</b>{device.display_name && <small>{t('Hardware name')}: {device.hardware_name || device.reader || t('Unknown device')}</small>}</div></div>
       <div className="u-detail"><span>{t('Device type')}</span><b>{deviceTypeName(device, t)}</b></div>
       {device.model && <div className="u-detail"><span>{t('Model')}</span><b>{device.model}</b></div>}
       {device.firmware && <div className="u-detail"><span>{t('Firmware version')}</span><b>{device.firmware}</b></div>}
       <div className="u-detail"><span>{t('Stable path')}</span><b>{stablePathName(device, t)}</b></div>
       <LogicalChannels value={device.logical_channels}/>
       {!isReader && <div className="u-detail"><span>IMEI</span><b>{device.imei_masked || t('Hardware did not report')}</b></div>}
+    </div>
+    <div className="u-hardware-action">
+      <div className="u-hardware-action-copy"><h4>{t('Display name')}</h4>
+        <p>{t('Names follow USB ports for devices without serial numbers. If identical readers swap ports, their names swap too. Clear this field to use the default name.')}</p>
+      </div>
+      <input value={displayName} maxLength={80} onChange={event => setDisplayName(event.target.value)}
+        aria-label={t('Display name')} placeholder={t('Use default name')} />
+      <button className="btn btn-primary" disabled={saving || displayName.trim() === (device.display_name || '')} onClick={saveName}>{t('Save')}</button>
     </div>
     {isReader && <div className="u-hardware-action u-hardware-imei">
       <div className="u-hardware-action-copy"><h4>{t('Hardware IMEI')}</h4>

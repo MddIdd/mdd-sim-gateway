@@ -456,6 +456,8 @@ const zh = {
   'Set a 15-digit IMEI on the Hardware tab before starting VoWiFi.': '启动 VoWiFi 前，请先在“硬件”页设置 15 位 IMEI。',
   'Set a 15-digit IMEI in Hardware; the line will then start automatically': '请在“硬件”页设置 15 位 IMEI，设置后线路会自动启动',
   'Device name': '设备名称', 'Smart-card reader': '智能读卡器', 'Cellular modem': '蜂窝通信模块',
+  'Display name': '显示名称', 'Hardware name': '硬件名称', 'Device name saved': '设备名称已保存', 'Use default name': '使用默认名称',
+  'Names follow USB ports for devices without serial numbers. If identical readers swap ports, their names swap too. Clear this field to use the default name.': '无序列号设备的名称跟随 USB 端口。两台相同读卡器互换端口时，名称也会互换。清空此项可恢复默认名称。',
   'Firmware version': '固件版本', 'Hardware did not report': '硬件未上报',
   'The device name identifies this hardware in the interface. Model and firmware appear only when the hardware reports them.': '设备名称是界面中的硬件标识；型号和固件版本仅在硬件主动上报时显示。',
   'Remove device record': '删除设备记录', 'Only disconnected devices can be removed; SIM and line configurations are preserved.': '仅可删除已断开的设备；SIM 和线路配置会保留。',

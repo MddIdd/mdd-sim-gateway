@@ -4641,11 +4641,17 @@ async def _unified_devices() -> list[dict]:
             flight_available = not is_native_reader and not serial_only
         result.append({
             "id": device_id, "device_type": "reader" if is_native_reader else "modem",
-            "name": (card_info.get("display_name") or card_info.get("name")
+            "name": (hardware_record.get("display_name") or
+                     card_info.get("display_name") or card_info.get("name")
                      or hardware_record.get("name") or "Smart-card reader"
                      if is_native_reader else
-                     assignment.get("name") or observed.get("name")
+                     hardware_record.get("display_name") or assignment.get("name") or observed.get("name")
                      or hardware_record.get("name") or "Cellular modem"),
+            "display_name": hardware_record.get("display_name") or "",
+            "hardware_name": ((card_info.get("name") or hardware_record.get("name") or "Smart-card reader")
+                              if is_native_reader else
+                              (assignment.get("name") or observed.get("name")
+                               or hardware_record.get("name") or "Cellular modem")),
             "present": device_present,
             "model": identity.get("model") or observed.get("model") or "",
             "firmware": identity.get("firmware") or observed.get("firmware") or "",
@@ -4863,6 +4869,28 @@ async def api_device_sim_reread(device_id: str):
     return {"ok": True, "updated": filled, "completing": completing, "missing": missing}
 
 
+@app.put("/api/devices/{device_id}/name")
+async def api_device_name(device_id: str, body: dict):
+    """Set a local display name without changing the hardware identity."""
+    if set(body or {}) != {"display_name"} or not isinstance(body.get("display_name"), str):
+        raise HTTPException(400, "display_name must be a string")
+    name = body["display_name"].strip()
+    if len(name) > 80 or any(ord(ch) < 32 or ord(ch) == 127 for ch in name):
+        raise HTTPException(422, "display_name must be at most 80 characters without control characters")
+    device = next((item for item in await _unified_devices() if item["id"] == device_id), None)
+    if not device:
+        raise HTTPException(404, "no such physical device")
+    patch = {"device_type": device["device_type"], "display_name": name}
+    if device["device_type"] == "reader":
+        # Keep the raw PC/SC name for unambiguous reader-port migration.
+        patch["name"] = (device.get("reader")
+                         or device_state.hardware().get(device_id, {}).get("name") or "")
+        patch["stable_path"] = device.get("stable_path") or ""
+    device_state.set_hardware(device_id, patch)
+    await hub.broadcast({"type": "hardware", "device": device_id})
+    return {"ok": True, "display_name": name}
+
+
 @app.put("/api/devices/{device_id}/hardware")
 async def api_device_hardware(device_id: str, body: dict):
     """Save user-managed physical hardware identity (currently native-reader IMEI)."""
@@ -4878,7 +4906,8 @@ async def api_device_hardware(device_id: str, body: dict):
     if len(imei) != 15:
         raise HTTPException(422, "IMEI must contain exactly 15 digits")
     record = device_state.set_hardware(device_id, {
-        "device_type": "reader", "name": device.get("name") or "Smart-card reader",
+        "device_type": "reader", "name": (device.get("reader")
+            or device_state.hardware().get(device_id, {}).get("name") or "Smart-card reader"),
         "stable_path": device.get("stable_path") or "", "imei": imei})
 
     # A running line renders the device identity inside its container. Apply a hardware

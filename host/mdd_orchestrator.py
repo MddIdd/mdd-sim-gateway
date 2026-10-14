@@ -2974,6 +2974,17 @@ class Orchestrator:
                               if key in modem})
                 hardware_doc["assignments"] = assignments | {new_id: moved}
                 atomic_json(self.hw_state_path, hardware_doc)
+            # The matching hardware IMEI above also proves the user-facing record belongs
+            # to this modem. Keep an existing new-id record and retire the stale key.
+            user_hardware_path = self.root / "devices-hardware.json"
+            user_hardware_doc = read_json(user_hardware_path)
+            user_devices = user_hardware_doc.get("devices")
+            if isinstance(user_devices, dict) and old_id in user_devices:
+                if new_id not in user_devices:
+                    user_devices[new_id] = user_devices[old_id]
+                user_devices.pop(old_id, None)
+                user_hardware_doc["updated_at"] = int(time.time())
+                atomic_json(user_hardware_path, user_hardware_doc)
             status_doc = read_json(self.device_status_path)
             status_devices = status_doc.get("devices")
             if isinstance(status_devices, dict) and old_id in status_devices:

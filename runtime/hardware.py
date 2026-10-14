@@ -274,10 +274,11 @@ class HardwareSupervisor:
                 self.bridge_restarts[request_id] = value
 
     @staticmethod
-    def command(*args, check=False):
+    def command(*args, check=False, timeout=None):
         return subprocess.run(args, text=True, stdout=subprocess.PIPE,
                               stderr=subprocess.STDOUT, check=check,
-                              env={**os.environ, "LC_ALL": "C"})
+                              env={**os.environ, "LC_ALL": "C"},
+                              **({"timeout": timeout} if timeout is not None else {}))
 
     def mmcli_keyvalue(self, flag, target):
         """Cached `mmcli <flag> <target> --output-keyvalue` for one reconcile pass.
@@ -509,24 +510,72 @@ class HardwareSupervisor:
                 requested_at = time.time()
             request = {"request_id": request_id, "device_id": device_id,
                        "expected_iccid_sha256": expected,
+                       "require_cellular_identity": request.get("require_cellular_identity") is True,
                        "requested_at": requested_at, "started_at": time.time()}
             self.bridge_restart_status(request, "stopping")
             maintenance = self.data_path / "orchestrator" / "pcsc-maintenance"
             maintenance.parent.mkdir(parents=True, exist_ok=True)
             maintenance.write_text(str(int(time.time())), encoding="ascii")
-            process = self.bridges.pop(device_id, None)
-            self.bridge_retry_at.pop(device_id, None)
-            if process and process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(8)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
+            self.stop_profile_switch_bridge(device_id)
             self.bridge_restart_status(request, "stopped")
             self.log(f"stopped VPCD bridge for eUICC profile refresh: {device_id}")
 
-    def finish_bridge_restart_requests(self, present_ids):
+    def stop_profile_switch_bridge(self, device_id):
+        process = self.bridges.pop(device_id, None)
+        self.bridge_retry_at.pop(device_id, None)
+        if process and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(8)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+    def converge_profile_switch_modem(self, request, identity, discovered, objects):
+        """Verify cellular identity in the private Hardware D-Bus namespace."""
+        device_id = request["device_id"]
+        modem = next((item for item in discovered if item["id"] == device_id), None)
+        if not modem:
+            return False
+        try:
+            obj = self.modem_object_for_tty(modem["tty"], objects)
+            if not obj:
+                return False
+            detail = self.command("mmcli", "-m", obj, "--output-keyvalue", timeout=10)
+            if detail.returncode:
+                return False
+            sim_path = self._kv(detail.stdout, "modem.generic.sim")
+            if not re.fullmatch(r"/org/freedesktop/ModemManager1/SIM/\d+", sim_path):
+                return False
+            detail = self.command("mmcli", "-i", sim_path, "--output-keyvalue", timeout=10)
+            if detail.returncode:
+                return False
+            observed = {"iccid": self._kv(detail.stdout, "sim.properties.iccid"),
+                        "imsi": self._kv(detail.stdout, "sim.properties.imsi")}
+            if modem_probe.esim_identity_matches(observed, identity):
+                request["cellular_identity"] = "matched"
+                return True
+            if request.get("modem_reset_attempted") or not any(
+                    str(value or "").isdigit() for value in observed.values()):
+                return False
+            request = self.bridge_restart_status(
+                request, "resetting_modem", modem_reset_attempted=True)
+            self.stop_profile_switch_bridge(device_id)
+            result = self.command("mmcli", "-m", obj, "--reset", timeout=20)
+            self.forget_mmcli_details()
+            if result.returncode:
+                self.bridge_restart_status(
+                    request, "failed", error="ModemManager could not reset the selected modem")
+                return False
+            self.qmi_reset_at[device_id] = time.monotonic()
+            self.cellular_states.pop(device_id, None)
+            self.bridge_restart_status(request, "stopped")
+        except (OSError, subprocess.TimeoutExpired):
+            self.bridge_restart_status(
+                request, "failed", error="ModemManager SIM recovery command failed")
+        return False
+
+    def finish_bridge_restart_requests(self, present_ids, discovered=(), objects=()):
         """Confirm the replacement PID, logical channels and requested active ICCID."""
         now = time.time()
         for request_id, request in list(self.bridge_restarts.items()):
@@ -535,13 +584,16 @@ class HardwareSupervisor:
                 self.bridge_restarts.pop(request_id, None)
                 continue
             device_id = str(request.get("device_id") or "")
+            timeout = 90 if request.get("require_cellular_identity") else 45
+            if now - float(request.get("started_at") or now) > timeout:
+                self.bridge_restart_status(
+                    request, "failed", error="timed out rebuilding the VPCD bridge and SIM identity")
+                continue
             if device_id not in present_ids:
+                if request.get("modem_reset_attempted"):
+                    continue
                 self.bridge_restart_status(
                     request, "failed", error="modem disappeared during bridge rebuild")
-                continue
-            if now - float(request.get("started_at") or now) > 45:
-                self.bridge_restart_status(
-                    request, "failed", error="timed out rebuilding the VPCD bridge")
                 continue
             process = self.bridges.get(device_id)
             if not process or process.poll() is not None:
@@ -562,6 +614,9 @@ class HardwareSupervisor:
             expected = str(request.get("expected_iccid_sha256") or "")
             actual = str(identity.get("iccid") or "")
             if hashlib.sha256(actual.encode()).hexdigest() != expected:
+                continue
+            if request.get("require_cellular_identity") and not self.converge_profile_switch_modem(
+                    request, identity, discovered, objects):
                 continue
             self.bridge_restart_status(
                 request, "channels_ready", bridge_pid=int(process.pid),
@@ -585,6 +640,12 @@ class HardwareSupervisor:
         return "\n".join(stanzas)
 
     def reconcile_pcsc(self, modems, objects):
+        present_ids = {modem["id"] for modem in modems}
+        if any(request.get("modem_reset_attempted")
+               and request.get("state") not in {"channels_ready", "failed"}
+               and request.get("device_id") not in present_ids
+               for request in self.bridge_restarts.values()):
+            return
         for index, modem in enumerate(modems):
             modem["base_port"] = BASE_VPCD_PORT + index * VPCD_PORT_STRIDE
         layout = [(item["id"], item["tty"]) for item in modems]
@@ -1277,7 +1338,7 @@ class HardwareSupervisor:
                 # this SIM, not a hardware plane still coming up; retrying will not change it.
                 bridge_errors[modem["id"]] = str(
                     metadata.get("channel_error") or "SIM logical channel allocation failed")
-        self.finish_bridge_restart_requests({modem["id"] for modem in discovered})
+        self.finish_bridge_restart_requests({modem["id"] for modem in discovered}, discovered, modems)
         ready_bridges = len(ready_ids)
         maintenance_ids = {
             str(request.get("device_id") or "") for request in self.bridge_restarts.values()

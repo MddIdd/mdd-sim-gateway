@@ -28,8 +28,10 @@ from pathlib import Path
 
 try:
     from host import modem_probe
+    from host.vpcd_modem_bridge import BridgeRecoveryBudget
 except ImportError:  # run as host/mdd_orchestrator.py, with host/ itself on the path
     import modem_probe
+    from vpcd_modem_bridge import BridgeRecoveryBudget
 
 try:
     import serial
@@ -682,6 +684,7 @@ class Orchestrator:
         # status document reported every freshly respawned process as a running bridge.
         self._bridge_started: dict[str, float] = {}
         self._bridge_failures: dict[str, dict] = {}
+        self.bridge_recovery = BridgeRecoveryBudget(self.root / "bridge-recovery.json")
         # device id -> ModemManager's "failed" verdict on it: reason, since when, and the
         # module reboots tried. Cleared once ModemManager reports any other state.
         self._modem_failed: dict[str, dict] = {}
@@ -1203,6 +1206,7 @@ class Orchestrator:
                 "transitioning": device_transitioning,
                 "error": (error or ("device is not connected" if not present else "")
                           or " ".join(part for part in (
+                              self.bridge_recovery.error(device_id) if not bridge_alive else "",
                               degraded,
                               # The exit record is the only place the actual exception
                               # lands; without it a failing takeover reads as success.
@@ -1396,6 +1400,10 @@ class Orchestrator:
     def _record_bridge_exit(self, hwid: str, proc, started: float) -> None:
         """Keep an exited bridge visible instead of silently respawning over it."""
         uptime = time.time() - started if started else 0.0
+        self.bridge_recovery.record_exit(hwid, proc.returncode, uptime)
+        recovery_error = self.bridge_recovery.error(hwid)
+        if recovery_error:
+            self.log(f"SIM bridge {hwid}: {recovery_error}")
         previous = self._bridge_failures.get(hwid)
         # A crash after a long healthy run is a fresh incident, not an escalation.
         count = previous["count"] + 1 if previous and uptime < BRIDGE_STABLE_SECONDS else 1
@@ -1416,10 +1424,12 @@ class Orchestrator:
                  + (f": {reason}" if reason else ""))
 
     def _bridge_retry_due(self, hwid: str) -> bool:
+        if time.time() < self.bridge_recovery.retry_at(hwid):
+            return False
         failure = self._bridge_failures.get(hwid)
         if not failure:
             return True
-        delay = min(BRIDGE_RETRY_BASE_SECONDS * (2 ** (failure["count"] - 1)),
+        delay = min(BRIDGE_RETRY_BASE_SECONDS * (2 ** min(failure["count"] - 1, 6)),
                     BRIDGE_RETRY_CEILING_SECONDS)
         return time.time() - failure["at"] >= delay
 

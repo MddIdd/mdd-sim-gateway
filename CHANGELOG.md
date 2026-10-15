@@ -4,6 +4,19 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- A modem SIM bridge no longer stays alive indefinitely returning `6F00` after its AT SIM
+  access fails. Three consecutive transport failures (or invalid logical-channel replies)
+  on one channel spanning at least 30 seconds retire that bridge and release its channels
+  for a scoped rebuild. Other channels' traffic cannot mask the fault. Recovery backs off
+  and permits three rebuilds per hour, with the limit persisted across supervisor restarts;
+  failed replacement processes also consume the limit. PIN and other normal card errors
+  do not trigger recovery, and APDUs are never automatically replayed by the detector.
+  A rebuild interrupts all reader slots and lines on that physical modem; it does not
+  reset the modem or restart unrelated USB readers. Ordinary exits of a replacement that
+  ran at least 60 seconds retire the old recovery budget; watchdog exits remain bounded.
+
 ## [1.14.0] - 2026-10-15
 
 The automatic update channels remain on v1.13.2 pending real-device acceptance.

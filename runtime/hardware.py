@@ -26,6 +26,7 @@ import yaml
 # /app is the working directory of `python -m runtime.hardware`, and the image ships
 # host/vpcd_modem_bridge.py and host/modem_probe.py beside it.
 from host import modem_probe
+from host.vpcd_modem_bridge import BridgeRecoveryBudget
 
 try:
     import serial
@@ -237,6 +238,9 @@ class HardwareSupervisor:
         self.pcscd = None
         self.bridges = {}
         self.bridge_retry_at = {}
+        self.bridge_started_at = {}
+        self.bridge_recovery = BridgeRecoveryBudget(
+            self.data_path / "orchestrator" / "bridge-recovery.json")
         self.pcsc_fingerprint = ""
         self.reported = set()
         self.cellular_states = {}
@@ -464,6 +468,7 @@ class HardwareSupervisor:
                 process.kill()
                 process.wait()
         self.bridges.clear()
+        self.bridge_started_at.clear()
         if self.pcscd and self.pcscd.poll() is None:
             self.pcscd.terminate()
             try:
@@ -667,16 +672,24 @@ class HardwareSupervisor:
         live = {item["id"] for item in modems}
         for hardware_id, process in list(self.bridges.items()):
             if hardware_id not in live or process.poll() is not None:
+                started = self.bridge_started_at.pop(hardware_id, None)
                 if process.poll() is None:
                     process.terminate()
                     process.wait(5)
                 else:
+                    uptime = max(0, time.monotonic() - started) if started is not None else 0
+                    self.bridge_recovery.record_exit(hardware_id, process.returncode, uptime)
                     self.bridge_retry_at[hardware_id] = time.monotonic() + 5
+                    recovery_error = self.bridge_recovery.error(hardware_id)
+                    if recovery_error:
+                        self.log(f"SIM bridge {hardware_id}: {recovery_error}")
                 self.bridges.pop(hardware_id, None)
         for modem in modems:
             if modem["id"] in self.bridges:
                 continue
             if time.monotonic() < self.bridge_retry_at.get(modem["id"], 0):
+                continue
+            if time.time() < self.bridge_recovery.retry_at(modem["id"]):
                 continue
             obj = self.modem_object_for_tty(modem["tty"], objects)
             if not obj:
@@ -693,6 +706,7 @@ class HardwareSupervisor:
                        "--identity-refresh", "60"]
             self.bridges[modem["id"]] = subprocess.Popen(
                 command, stdout=sink, stderr=subprocess.STDOUT)
+            self.bridge_started_at[modem["id"]] = time.monotonic()
             sink.close()
 
     @staticmethod
@@ -1287,7 +1301,8 @@ class HardwareSupervisor:
                 "unit_active": bool(self.modemmanager and self.modemmanager.poll() is None),
                 "required": True,
                 "applied": bool(self.modemmanager and self.modemmanager.poll() is None),
-                "unclaimed": {}, "degraded_to_direct_serial": {}, "bridge_failures": {},
+                "unclaimed": {}, "degraded_to_direct_serial": {},
+                "bridge_failures": self.bridge_recovery.snapshot(),
             },
             "modem_objects": sorted(modem_objects),
             "discovered_modems": discovered,
@@ -1338,6 +1353,8 @@ class HardwareSupervisor:
                 # this SIM, not a hardware plane still coming up; retrying will not change it.
                 bridge_errors[modem["id"]] = str(
                     metadata.get("channel_error") or "SIM logical channel allocation failed")
+            if not process and self.bridge_recovery.error(modem["id"]):
+                bridge_errors[modem["id"]] = self.bridge_recovery.error(modem["id"])
         self.finish_bridge_restart_requests({modem["id"] for modem in discovered}, discovered, modems)
         ready_bridges = len(ready_ids)
         maintenance_ids = {

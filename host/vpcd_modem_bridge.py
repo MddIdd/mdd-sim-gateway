@@ -53,6 +53,105 @@ CHANNEL_SETTLE_SECONDS = 0.5
 PENDING_RESPONSE_HOLD_SECONDS = 2.0
 MAX_SELECT_HISTORY = 16
 SELECT_MF = bytes.fromhex("00A40004023F00")
+SIM_ACCESS_FAILURES = 3
+SIM_ACCESS_FAILURE_SECONDS = 30.0
+SIM_ACCESS_RECOVERY_EXIT = 75
+BRIDGE_RECOVERY_WINDOW = 3600.0
+BRIDGE_RECOVERY_ATTEMPTS = 3
+BRIDGE_STABLE_SECONDS = 60.0
+
+
+class SIMAccessHealth:
+    """Detect a stuck allocated channel, independently of traffic on other channels.
+
+    Only modem transport errors and 'logical channel not supported' count. PIN failures,
+    missing files and other card verdicts must never trigger a reset or replay an APDU.
+    """
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.failed = threading.Event()
+        self.streaks = {}
+
+    def observe(self, channel, failed):
+        with self.lock:
+            if not failed:
+                self.streaks.pop(channel, None)
+                return
+            now = time.monotonic()
+            count, since = self.streaks.get(channel, (0, now))
+            self.streaks[channel] = (count + 1, since)
+            if count + 1 >= SIM_ACCESS_FAILURES and now - since >= SIM_ACCESS_FAILURE_SECONDS:
+                self.failed.set()
+
+
+class BridgeRecoveryBudget:
+    """Persist a per-modem recovery limit, including failed replacement processes.
+
+    At most three rebuilds per hour after a runtime SIM-access failure. Ordinary startup
+    errors keep their existing retry policy; a live process never consumes a retry.
+    """
+
+    def __init__(self, path):
+        self.path = str(path)
+        try:
+            with open(self.path, encoding="utf-8") as handle:
+                self.records = json.load(handle)
+            if not isinstance(self.records, dict):
+                self.records = {}
+            self.records = {key: value for key, value in self.records.items()
+                            if isinstance(value, dict)
+                            and isinstance(value.get("since"), (int, float))
+                            and isinstance(value.get("retry_at"), (int, float))
+                            and isinstance(value.get("failures"), int)}
+        except (OSError, ValueError):
+            self.records = {}
+
+    def record_exit(self, device_id, returncode, uptime=0.0):
+        now = time.time()
+        # An ordinary exit after a stable replacement is a new incident. Keep counting
+        # watchdog exits even after 60s: repeated stuck-channel failures often take longer
+        # than that to accumulate, and must not bypass the rebuild limit.
+        if returncode != SIM_ACCESS_RECOVERY_EXIT and uptime >= BRIDGE_STABLE_SECONDS:
+            if self.records.pop(device_id, None) is not None:
+                write_metadata(self.path, self.records)
+            return
+        previous = self.records.get(device_id, {})
+        active = bool(previous) and now < previous.get("since", 0) + BRIDGE_RECOVERY_WINDOW
+        if returncode != SIM_ACCESS_RECOVERY_EXIT and not active:
+            return
+        count = previous["failures"] + 1 if active else 1
+        since = previous["since"] if active else now
+        retry_at = (now + 15 * 2 ** (count - 1) if count <= BRIDGE_RECOVERY_ATTEMPTS
+                    else since + BRIDGE_RECOVERY_WINDOW)
+        self.records[device_id] = {"since": since, "at": now, "failures": count,
+                                   "retry_at": retry_at,
+                                   "limited": count > BRIDGE_RECOVERY_ATTEMPTS}
+        write_metadata(self.path, self.records)
+
+    def snapshot(self):
+        """Detached, unexpired diagnostics using the host bridge_failures field names."""
+        now = time.time()
+        return {device_id: {"count": value["failures"],
+                            "at": value.get("at", value["since"]),
+                            "reason": self.error(device_id) or "SIM access recovery attempted",
+                            "retry_at": value["retry_at"],
+                            "limited": bool(value.get("limited"))}
+                for device_id, value in self.records.items()
+                if now < value["since"] + BRIDGE_RECOVERY_WINDOW}
+
+    def retry_at(self, device_id):
+        value = self.records.get(device_id, {})
+        return value.get("retry_at", 0)
+
+    def error(self, device_id):
+        value = self.records.get(device_id, {})
+        if time.time() >= self.retry_at(device_id):
+            return ""
+        if value.get("limited"):
+            return ("SIM access recovery paused after three failed rebuilds; "
+                    "automatic retry at %d" % value["retry_at"])
+        return "SIM access failed; waiting to rebuild this modem's bridge"
 
 
 class ModemError(RuntimeError):
@@ -346,11 +445,25 @@ class ModemCard:
         if self.debug:
             print("[bridge] APDU --> header=%s bytes=%d" %
                   (apdu[:4].hex().upper(), len(apdu)), flush=True)
-        raw = self._at('AT+CSIM=%d,"%s"' % (len(hex_apdu), hex_apdu))
-        match = CSIM_RE.search(raw)
-        if not match:
-            raise ModemError("missing +CSIM response: %r" % raw[-200:])
-        response = bytes.fromhex(match.group(2).decode("ascii"))
+        health = getattr(self, "access_health", None)
+        channel = apdu[0] & 3
+        try:
+            raw = self._at('AT+CSIM=%d,"%s"' % (len(hex_apdu), hex_apdu))
+            match = CSIM_RE.search(raw)
+            if not match:
+                raise ModemError("missing +CSIM response: %r" % raw[-200:])
+            try:
+                response = bytes.fromhex(match.group(2).decode("ascii"))
+            except ValueError as exc:
+                raise ModemError("malformed +CSIM response") from exc
+            if len(response) < 2:
+                raise ModemError("truncated +CSIM response")
+        except ModemError:
+            if health and channel:
+                health.observe(channel, True)
+            raise
+        if health and channel:
+            health.observe(channel, response[-2:] == bytes.fromhex("6881"))
         if self.debug:
             status = response[-2:].hex().upper() if len(response) >= 2 else "unknown"
             print("[bridge] APDU <-- bytes=%d sw=%s" %
@@ -633,14 +746,18 @@ def retain_hardware_identity(previous, observed):
     return result
 
 
-def refresh_metadata(card, path, static, interval, initial_identity=None):
+def refresh_metadata(card, path, static, interval, initial_identity=None,
+                     stopping=None, metadata_lock=None):
     """Refresh ICCID after a hot SIM swap without competing for the exclusive AT port."""
     identity = dict(initial_identity or {})
-    while True:
-        time.sleep(interval)
+    stopping = stopping or threading.Event()
+    metadata_lock = metadata_lock or threading.Lock()
+    while not stopping.wait(interval):
         try:
             identity = retain_hardware_identity(identity, card.identity())
-            write_metadata(path, {**static, **identity, "updated_at": int(time.time())})
+            with metadata_lock:
+                if not stopping.is_set():
+                    write_metadata(path, {**static, **identity, "updated_at": int(time.time())})
         except Exception as exc:
             print("[bridge] identity refresh failed: %s" % exc, flush=True)
 
@@ -704,6 +821,10 @@ def main():
     if len(set(slot_channels)) < len(slot_channels):
         print("[bridge] slot channel map %r (shared)" % slot_channels, flush=True)
 
+    # Start monitoring only after allocation. Basic-channel identity refreshes must not
+    # erase the failures of a dead supplementary channel.
+    card.access_health = SIMAccessHealth()
+
     atr = bytes.fromhex(args.atr)
     arbiters = {channel: ChannelArbiter(card, channel) for channel in channels}
     threads = []
@@ -723,28 +844,39 @@ def main():
         thread.start()
         threads.append(thread)
 
+    stopping = threading.Event()
+    metadata_lock = threading.Lock()
     if args.metadata_file and args.identity_refresh > 0:
         threading.Thread(target=refresh_metadata,
                          args=(card, args.metadata_file, static_metadata,
-                               args.identity_refresh, identity), daemon=True).start()
+                               args.identity_refresh, identity, stopping, metadata_lock),
+                         daemon=True).start()
 
-    stopping = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stopping.set())
     signal.signal(signal.SIGINT, lambda *_: stopping.set())
     try:
-        while not stopping.is_set() and all(thread.is_alive() for thread in threads):
+        while (not stopping.is_set() and not card.access_health.failed.is_set()
+               and all(thread.is_alive() for thread in threads)):
             time.sleep(1)
     except KeyboardInterrupt:
         pass
     finally:
+        stopping.set()
         # Release the UICC logical channels before handing the modem to ModemManager.
         # A raw SIGTERM used to leak all three channels until the next modem reset.
         for channel in channels:
             card.close_channel(channel)
-        static_metadata.update(logical_channel_metadata([], args.slots, "stopped"))
-        write_metadata(args.metadata_file, {**static_metadata, **identity,
-                                            "updated_at": int(time.time())})
+        failed = card.access_health.failed.is_set()
+        error = "SIM access failed repeatedly; rebuilding logical channels" if failed else ""
+        static_metadata.update(logical_channel_metadata(
+            [], args.slots, "error" if failed else "stopped", error))
+        with metadata_lock:
+            write_metadata(args.metadata_file, {**static_metadata, **identity,
+                                                "updated_at": int(time.time())})
         card.close()
+    if failed:
+        print("[bridge] %s" % error, flush=True)
+        return SIM_ACCESS_RECOVERY_EXIT
     return 0
 
 

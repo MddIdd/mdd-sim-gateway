@@ -6,6 +6,8 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Updated the Vite build dependency to 6.4.5 so the WebUI passes the security audit.
+
 - Automatic recovery of a container-routed line now rechecks its current country exit's
   UDP connectivity when engine startup fails. Three verified failures on the same node
   trigger the existing bounded failover policy even if that exit previously carried IMS

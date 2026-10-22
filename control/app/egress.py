@@ -644,6 +644,57 @@ def _ensure_socks_exit(country, proxy, timeout):
     raise EgressError(f"{country.upper()} exit unavailable: {reason}")
 
 
+def exit_probe_context(inst: dict, settings: dict) -> dict | None:
+    """Identify a current, automatically selected container exit we can safely probe.
+
+    Listener readiness alone is not connectivity evidence. Stale/mismatched configuration,
+    direct routes, manual pins and pools without alternatives must not start a node walk.
+    """
+    proxy = settings.get("proxy") or {}
+    if transport() != "socks5" or not proxy.get("enabled"):
+        return None
+    state = status()
+    if not current_status(state, proxy, time.time()):
+        return None
+    country = line_country(inst)
+    selected = (state.get("exits") or {}).get(country) or {}
+    if (not (proxy.get("exits") or {}).get(country, {}).get("enabled")
+            or selected.get("ready") is not True or selected.get("mode") != "subscription"
+            or selected.get("transport") != "socks5"
+            or selected.get("selection") == "manual" or not selected.get("node")
+            or len(selected.get("candidates") or []) < 2
+            or selected["node"] not in selected["candidates"]):
+        return None
+    try:
+        socks_endpoint(selected)
+    except ValueError:
+        return None
+    return {"country": country, "config_fingerprint": state["config_fingerprint"],
+            **{key: selected.get(key) for key in
+               ("node", "node_tag", "proxy_host", "proxy_port")}}
+
+
+def probe_current_exit(inst: dict, settings: dict) -> dict | None:
+    """Probe only after a failed start, returning evidence tied to one selector/config.
+
+    Probe independent public DNS/STUN targets, not the carrier's ePDG hostname: a bad
+    carrier DNS name must not blame a healthy proxy. Never expose raw probe exceptions.
+    """
+    context = exit_probe_context(inst, settings)
+    if context is None:
+        return None
+    try:
+        test_udp_proxy(context["proxy_host"], context["proxy_port"], timeout=8.0)
+        reachable = True
+    except EgressError:
+        reachable = False
+    # Probing blocks while the selector/configuration may change. Evidence from the old
+    # node must not be charged to its replacement, even when both use the same listener.
+    if exit_probe_context(inst, cfg.get_settings()) != context:
+        return None
+    return {"context": context, "reachable": reachable}
+
+
 def request_reselect(inst: dict, reason: str, stable_for: float = 0.0) -> str:
     """Ask the host to move this SIM's country exit to a different node.
 

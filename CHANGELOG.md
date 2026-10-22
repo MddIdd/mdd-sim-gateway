@@ -6,6 +6,15 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ### Fixed
 
+- Updated the Vite build dependency to 6.4.5 so the WebUI passes the security audit.
+
+- Automatic recovery of a container-routed line now rechecks its current country exit's
+  UDP connectivity when engine startup fails. Three verified failures on the same node
+  trigger the existing bounded failover policy even if that exit previously carried IMS
+  for hours. Successful probes reset the strike count; stale configuration, selector changes,
+  manual pins and registered peers prevent eviction. Exhausting the pool retains hourly
+  backoff instead of retrying the same unusable exit every few minutes.
+
 - A modem SIM bridge no longer stays alive indefinitely returning `6F00` after its AT SIM
   access fails. Three consecutive transport failures (or invalid logical-channel replies)
   on one channel spanning at least 30 seconds retire that bridge and release its channels

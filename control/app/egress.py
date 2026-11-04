@@ -570,10 +570,12 @@ def line_country(inst: dict) -> str:
 def epdg_for(inst: dict) -> str:
     if inst.get("epdg"):
         return str(inst["epdg"]).strip()
-    mcc = str(inst.get("mcc") or "").zfill(3)
-    mnc = str(inst.get("mnc") or "").zfill(3)
-    if not mcc.strip("0") or not mnc.strip("0"):
+    raw_mcc = str(inst.get("mcc") or "").strip()
+    raw_mnc = str(inst.get("mnc") or "").strip()
+    if not raw_mcc.isdigit() or not raw_mnc.isdigit() or not raw_mcc.strip("0"):
         return ""
+    mcc = raw_mcc.zfill(3)
+    mnc = raw_mnc.zfill(3)
     return f"epdg.epc.mnc{mnc}.mcc{mcc}.pub.3gppnetwork.org"
 
 

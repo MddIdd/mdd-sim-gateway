@@ -4616,8 +4616,15 @@ async def _unified_devices() -> list[dict]:
                         "ModemManager could not start this modem. It is being rebooted.")
                 elif radio_on and registered and host_cell.get("data_active"):
                     cell_actual = "on"
-                elif radio_on:
+                elif radio_on and str(host_cell.get("state") or "").lower() in {"enabling", "connecting"}:
                     cell_actual = "starting"
+                elif radio_on:
+                    cell_actual = "degraded"
+                    cell_reason = (
+                        "Cellular data bearer is not connected"
+                        if registered else
+                        f"Waiting for cellular registration ({registration})"
+                    )
                 else:
                     cell_actual, cell_reason = "error", "Cellular radio is not enabled"
                 cellular_view = {

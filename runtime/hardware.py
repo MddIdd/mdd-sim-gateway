@@ -687,7 +687,9 @@ finally:
         glib.g_main_loop_unref(loop)
 print("OK")
 """
-        cycle_timeout = max(18, int(4 * 4 + float(off_seconds) + 2))
+        # 4 QMI stages * 4s + 2s client release + off_seconds + 6s headroom so
+        # the child's finally: power_op(client, "on") finishes before the outer timeout.
+        cycle_timeout = max(24, int(4 * 4 + 2 + float(off_seconds) + 6))
         try:
             proc = self.command(
                 sys.executable, "-c", script, str(wdm_path), str(slot), str(off_seconds),
@@ -700,7 +702,7 @@ print("OK")
             try:
                 rec = self.command(
                     sys.executable, "-c", script, str(wdm_path), str(slot), "0",
-                    "on", timeout=8)
+                    "on", timeout=14)
                 if rec.returncode == 0 and "OK" in (rec.stdout or ""):
                     recovery_note = "power-on recovery succeeded"
             except Exception:

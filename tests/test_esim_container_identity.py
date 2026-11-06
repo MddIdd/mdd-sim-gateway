@@ -184,7 +184,7 @@ class ContainerIdentityRecoveryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as dev_dir:
             wdm = Path(dev_dir) / "cdc-wdm0"
             wdm.write_text("")
-            timeout_exc = hardware.subprocess.TimeoutExpired("python3", 20)
+            timeout_exc = hardware.subprocess.TimeoutExpired("python3", 26)
             with patch.object(
                 self.app, "command",
                 side_effect=[timeout_exc, SimpleNamespace(returncode=0, stdout="OK\n")],
@@ -197,9 +197,9 @@ class ContainerIdentityRecoveryTests(unittest.TestCase):
             first_args = cmd.call_args_list[0].args
             second_args = cmd.call_args_list[1].args
             self.assertEqual(first_args[3:7], (str(wdm), "1", "2.0", "cycle"))
-            self.assertEqual(cmd.call_args_list[0].kwargs.get("timeout"), 20)
+            self.assertEqual(cmd.call_args_list[0].kwargs.get("timeout"), 26)
             self.assertEqual(second_args[3:7], (str(wdm), "1", "0", "on"))
-            self.assertEqual(cmd.call_args_list[1].kwargs.get("timeout"), 8)
+            self.assertEqual(cmd.call_args_list[1].kwargs.get("timeout"), 14)
 
     def test_reconcile_pcsc_respawns_bridge_when_modemmanager_object_path_changes(self):
         old_obj = "/org/freedesktop/ModemManager1/Modem/0"

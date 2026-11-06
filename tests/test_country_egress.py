@@ -27,6 +27,8 @@ class CountryEgressTests(unittest.TestCase):
                          "epdg.epc.mnc260.mcc310.pub.3gppnetwork.org")
         self.assertEqual(egress.epdg_for({"mcc": "454", "mnc": "00"}),
                          "epdg.epc.mnc000.mcc454.pub.3gppnetwork.org")
+        self.assertEqual(egress.epdg_for({"mcc": 454, "mnc": 0}),
+                         "epdg.epc.mnc000.mcc454.pub.3gppnetwork.org")
         self.assertEqual(egress.epdg_for({"mcc": "460", "mnc": "000"}),
                          "epdg.epc.mnc000.mcc460.pub.3gppnetwork.org")
         self.assertEqual(egress.epdg_for({"mcc": "454", "mnc": "00",

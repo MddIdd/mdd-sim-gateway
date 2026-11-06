@@ -570,9 +570,15 @@ def line_country(inst: dict) -> str:
 def epdg_for(inst: dict) -> str:
     if inst.get("epdg"):
         return str(inst["epdg"]).strip()
-    raw_mcc = str(inst.get("mcc") or "").strip()
-    raw_mnc = str(inst.get("mnc") or "").strip()
-    if not raw_mcc.isdigit() or not raw_mnc.isdigit() or not raw_mcc.strip("0"):
+    mcc_val = inst.get("mcc")
+    mnc_val = inst.get("mnc")
+    raw_mcc = "" if mcc_val is None else str(mcc_val).strip()
+    raw_mnc = "" if mnc_val is None else str(mnc_val).strip()
+    if (not raw_mcc.isascii() or not raw_mcc.isdigit()
+            or not raw_mnc.isascii() or not raw_mnc.isdigit()
+            or not (1 <= len(raw_mcc) <= 3)
+            or not (1 <= len(raw_mnc) <= 3)
+            or not raw_mcc.strip("0")):
         return ""
     mcc = raw_mcc.zfill(3)
     mnc = raw_mnc.zfill(3)

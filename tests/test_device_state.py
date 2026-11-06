@@ -733,6 +733,39 @@ modem.3gpp.registration-state : unknown
             self.assertEqual(len(respawned), 1)
             self.assertIn(str(moved), app.bridges["a"].command)
 
+    def test_a_bridge_is_respawned_when_modemmanager_renumbers_its_object(self):
+        """A SIM hot-swap re-creates the ModemManager object on a new path."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            app = Orchestrator(root / "data", root, dry_run=False)
+            app.root.mkdir(parents=True)
+            modems = [{"id": "a", "name": "A", "tty": "/dev/ttyUSB2"}]
+            desired = {"a": {"vowifi_enabled": True}}
+            config = root / "readers.conf"
+            old_obj = "/org/freedesktop/ModemManager1/Modem/0"
+            new_obj = "/org/freedesktop/ModemManager1/Modem/1"
+
+            with patch.object(app, "usb_modems", return_value=modems), \
+                    patch("host.mdd_orchestrator.run",
+                          return_value=SimpleNamespace(returncode=0, stdout="", stderr="")), \
+                    patch("host.mdd_orchestrator.subprocess.Popen",
+                          side_effect=lambda command, **kwargs: self.Process(command)), \
+                    patch.dict("os.environ", {"MDD_VPCD_READER_CONFIG": str(config)}):
+                with patch.object(app, "vpcd_library", return_value=root / "none"), \
+                        patch.object(app, "modemmanager_modem_for_tty", return_value=old_obj):
+                    app.reconcile_hardware({"hardware": {"auto_detect": True}}, desired,
+                                           through_modemmanager=True)
+                stale = app.bridges["a"]
+                self.assertIn(old_obj, stale.command)
+
+                with patch.object(app, "vpcd_library", return_value=root / "none"), \
+                        patch.object(app, "modemmanager_modem_for_tty", return_value=new_obj):
+                    app.reconcile_hardware({"hardware": {"auto_detect": True}}, desired,
+                                           through_modemmanager=True)
+                self.assertFalse(stale.running)
+                self.assertIsNot(app.bridges["a"], stale)
+                self.assertIn(new_obj, app.bridges["a"].command)
+
     def test_unclaimed_tty_records_the_modemmanager_state_a_maintainer_would_ask_for(self):
         """A bridge that never starts leaves only a repeating log line to go on."""
         listing = ("    /org/freedesktop/ModemManager1/Modem/5 [Baiwang] QDC507\n")

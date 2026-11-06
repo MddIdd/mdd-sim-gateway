@@ -554,6 +554,8 @@ class HardwareSupervisor:
         script = r"""
 import ctypes, sys, time
 wdm_path, slot, off_sec = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
+mode = sys.argv[4] if len(sys.argv) > 4 else "cycle"
+step_timeout = 3 if mode == "on" else 4
 glib = ctypes.CDLL("libglib-2.0.so.0")
 gio = ctypes.CDLL("libgio-2.0.so.0")
 gobj = ctypes.CDLL("libgobject-2.0.so.0")
@@ -616,7 +618,7 @@ def power_op(client, op):
         e1 = ctypes.POINTER(GError)()
         getattr(qmi, f"qmi_message_uim_power_{op}_sim_input_set_slot")(inp, slot, ctypes.byref(e1))
         check(e1)
-        r = run_async(lambda cb: getattr(qmi, f"qmi_client_uim_power_{op}_sim")(client, inp, 8, None, cb, None))
+        r = run_async(lambda cb: getattr(qmi, f"qmi_client_uim_power_{op}_sim")(client, inp, step_timeout, None, cb, None))
     finally:
         getattr(qmi, f"qmi_message_uim_power_{op}_sim_input_unref")(inp)
     e2 = ctypes.POINTER(GError)()
@@ -643,29 +645,32 @@ try:
         gobj.g_object_unref(res)
     check(err1)
     err2 = ctypes.POINTER(GError)()
-    res = run_async(lambda cb: qmi.qmi_device_open(dev, 0x40, 8, None, cb, None))
+    res = run_async(lambda cb: qmi.qmi_device_open(dev, 0x40, step_timeout, None, cb, None))
     try:
         qmi.qmi_device_open_finish(dev, res, ctypes.byref(err2))
     finally:
         gobj.g_object_unref(res)
     check(err2)
     err3 = ctypes.POINTER(GError)()
-    res = run_async(lambda cb: qmi.qmi_device_allocate_client(dev, 11, 0, 8, None, cb, None))
+    res = run_async(lambda cb: qmi.qmi_device_allocate_client(dev, 11, 0, step_timeout, None, cb, None))
     try:
         client = qmi.qmi_device_allocate_client_finish(dev, res, ctypes.byref(err3))
     finally:
         gobj.g_object_unref(res)
     check(err3)
-    try:
-        power_op(client, "off")
-        time.sleep(off_sec)
-    finally:
+    if mode == "on":
         power_op(client, "on")
+    else:
+        try:
+            power_op(client, "off")
+            time.sleep(off_sec)
+        finally:
+            power_op(client, "on")
 finally:
     if client and dev:
         try:
             e_rel = ctypes.POINTER(GError)()
-            r_rel = run_async(lambda cb: qmi.qmi_device_release_client(dev, client, 1, 5, None, cb, None))
+            r_rel = run_async(lambda cb: qmi.qmi_device_release_client(dev, client, 1, 2, None, cb, None))
             qmi.qmi_device_release_client_finish(dev, r_rel, ctypes.byref(e_rel))
             gobj.g_object_unref(r_rel)
             if e_rel:
@@ -682,13 +687,25 @@ finally:
         glib.g_main_loop_unref(loop)
 print("OK")
 """
+        cycle_timeout = max(18, int(4 * 4 + float(off_seconds) + 2))
         try:
             proc = self.command(
                 sys.executable, "-c", script, str(wdm_path), str(slot), str(off_seconds),
-                timeout=25)
+                "cycle", timeout=cycle_timeout)
             if proc.returncode == 0 and "OK" in (proc.stdout or ""):
                 return True, ""
             return False, (proc.stdout or "").strip()[-300:] or f"rc={proc.returncode}"
+        except subprocess.TimeoutExpired as exc:
+            recovery_note = "power-on recovery failed"
+            try:
+                rec = self.command(
+                    sys.executable, "-c", script, str(wdm_path), str(slot), "0",
+                    "on", timeout=8)
+                if rec.returncode == 0 and "OK" in (rec.stdout or ""):
+                    recovery_note = "power-on recovery succeeded"
+            except Exception:
+                pass
+            return False, f"{exc} ({recovery_note})"
         except Exception as exc:
             return False, str(exc)
 
@@ -722,20 +739,23 @@ print("OK")
                 wdm_path = self.qmi_wdm_for_usb_path(modem.get("usb_path"))
                 request = self.bridge_restart_status(
                     request, "resetting_modem", qmi_power_cycle_attempted=True,
-                    qmi_power_cycle_at=time.time())
-                self.stop_profile_switch_bridge(device_id)
+                    qmi_power_cycle_succeeded=False)
+                if wdm_path:
+                    self.stop_profile_switch_bridge(device_id)
                 qmi_ok, qmi_err = self.qmi_uim_power_cycle_sim(wdm_path)
                 if qmi_ok:
                     self.log(f"power-cycled UICC slot via QMI UIM for {device_id} ({wdm_path})")
                     self.forget_mmcli_details()
                     self.qmi_reset_at[device_id] = time.monotonic()
                     self.cellular_states.pop(device_id, None)
-                    self.bridge_restart_status(request, "stopped")
+                    self.bridge_restart_status(
+                        request, "stopped", qmi_power_cycle_succeeded=True,
+                        qmi_power_cycle_at=time.time())
                     return False
                 self.log(f"QMI UIM SIM power cycle unavailable/failed for {device_id} ({qmi_err}); falling back to mmcli --reset")
             if request.get("modem_reset_attempted"):
                 return False
-            if (request.get("qmi_power_cycle_attempted")
+            if (request.get("qmi_power_cycle_succeeded")
                     and time.time() - float(request.get("qmi_power_cycle_at") or 0) < 25):
                 return False
             request = self.bridge_restart_status(

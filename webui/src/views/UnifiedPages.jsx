@@ -138,6 +138,8 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
   const [pendingTarget, setPendingTarget] = useState(null)
   const c = capability(device, kind)
   const pending = submitting || c.actual === 'starting' || c.actual === 'stopping'
+  const canDisableWhileStarting = !submitting && c.desired && (c.actual === 'starting' || c.actual === 'stopping')
+  const switchDisabled = (pending && !canDisableWhileStarting) || unavailable
   const unavailable = !c.available || c.actual === 'unsupported' || device.compatibilityOnly ||
     device.present === false || (kind === 'cellular' && capability(device, 'flight').desired)
   const title = kind === 'cellular' ? t('4G network') : kind === 'flight' ? t('Flight mode') : t('VoWiFi / WiFi Calling')
@@ -198,12 +200,16 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
   // carrier's answer is the one that tells the user something, so it wins while the line is off.
   const unsupportedReason = unsupported && c.actual === 'off'
     ? (device.capabilities?.vowifi?.support?.reason || '') : ''
+  const reasonMatch = String(c.reason || '').match(/^Waiting for cellular registration \((.+)\)$/)
+  const renderedReason = reasonMatch
+    ? t('Waiting for cellular registration ({registration})', { registration: reasonMatch[1] })
+    : (c.reason ? t(c.reason) : t(`cap.help.${c.actual}`))
   const detail = c.actual === 'on'
     ? (kind === 'vowifi' ? t('Working — connected to the carrier over Wi-Fi.')
       : kind === 'cellular' ? [t('Mobile data connected'), cellular.operator, cellular.ip].filter(Boolean).join(' · ')
       : t('cap.help.on'))
     : unsupportedReason ? t(unsupportedReason)
-    : (c.reason ? t(c.reason) : t(`cap.help.${c.actual}`))
+    : renderedReason
   const badgeState = capabilityBadgeState(device, kind, displayedState)
   // A draft line starts by itself once these are filled in. IMEI belongs to the reader
   // (Hardware tab); every other field belongs to the SIM (SIM tab).
@@ -237,7 +243,7 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
       </div>}
     </div>
     <div className="u-cap-actions">{canRetry && <button className="btn btn-ghost" disabled={submitting} onClick={() => change(true, true)}>{t(unsupported ? 'Try again' : 'Restart line')}</button>}{unsupported && !c.desired && !unavailable && <button className="btn btn-ghost" disabled={pending} onClick={() => change(true)}>{t('Try anyway')}</button>}<Badge state={badgeState}>{device.present === false ? t('Offline') : null}</Badge><button className={`u-switch ${displayedDesired ? 'on' : ''}`} role="switch" aria-checked={displayedDesired}
-      aria-label={title} disabled={pending || unavailable} onClick={toggle}><span /></button></div>
+      aria-label={title} disabled={switchDisabled} onClick={toggle}><span /></button></div>
   </div>
 }
 

@@ -1149,6 +1149,51 @@ modem.3gpp.registration-state : unknown
             self.assertFalse(device["transitioning"])
             self.assertEqual(device["actual"]["vowifi_backend"], "direct-serial")
 
+    def test_cellular_transitioning_tracks_only_active_bearer_operations(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = Orchestrator(Path(temp) / "data", Path(temp), dry_run=True)
+            app.root.mkdir(parents=True)
+            app.bridges["a"] = SimpleNamespace(poll=lambda: None, pid=9)
+            app._bridge_started["a"] = time.time() - 10
+            app.radio_states["a"] = True
+            assignments = {"a": {"id": "a", "name": "A", "tty": "/dev/ttyUSB2"}}
+            desired_on = {"a": {"cellular_enabled": True, "flight_mode": False,
+                                "vowifi_enabled": True}}
+            desired_off = {"a": {"cellular_enabled": False, "flight_mode": False,
+                                 "vowifi_enabled": True}}
+
+            with patch.object(app, "service_active", return_value=True), \
+                    patch.object(app, "modemmanager_modem_for_tty",
+                                 return_value="/org/freedesktop/ModemManager1/Modem/0"):
+                # Unattached searching/denied or registered-without-data: settled.
+                for state, reg in (("searching", "searching"), ("enabled", "denied"),
+                                   ("registered", "home")):
+                    with self.subTest(state=state, registration=reg):
+                        app.cellular_states["a"] = {
+                            "available": True, "state": state, "registration": reg,
+                            "radio_enabled": True, "data_active": False}
+                        app.publish_device_status(desired_on, assignments)
+                        doc = device_state._read(str(app.device_status_path), {})
+                        self.assertFalse(doc["devices"]["a"]["transitioning"])
+
+                # Genuine enabling/connecting while cellular is enabled: transitioning.
+                for state in ("enabling", "connecting"):
+                    with self.subTest(state=state):
+                        app.cellular_states["a"] = {
+                            "available": True, "state": state, "registration": "home",
+                            "radio_enabled": True, "data_active": False}
+                        app.publish_device_status(desired_on, assignments)
+                        doc = device_state._read(str(app.device_status_path), {})
+                        self.assertTrue(doc["devices"]["a"]["transitioning"])
+
+                # Genuine disconnecting while cellular is disabled: transitioning.
+                app.cellular_states["a"] = {
+                    "available": True, "state": "disconnecting", "registration": "home",
+                    "radio_enabled": True, "data_active": True}
+                app.publish_device_status(desired_off, assignments)
+                doc = device_state._read(str(app.device_status_path), {})
+                self.assertTrue(doc["devices"]["a"]["transitioning"])
+
     def test_serial_mode_never_touches_the_modem_radio_port(self):
         """VoWiFi-only mode gives the direct bridge exclusive ownership of the AT port.
 

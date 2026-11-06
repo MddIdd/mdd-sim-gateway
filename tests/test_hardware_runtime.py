@@ -244,14 +244,17 @@ class HardwareRuntimeTests(unittest.TestCase):
                 "version": 2,
                 "devices": {modem["id"]: {"cellular_enabled": False, "vowifi_enabled": True,
                                           "flight_mode": False}}}))
-            app.cellular_states = {modem["id"]: {
-                "available": True, "state": "disconnecting", "registration": "home",
-                "radio_enabled": True, "data_active": True}}
-            app.publish_control_state([modem], {modem["id"]})
-            doc = json.loads((root / "devices-status.json").read_text())
-            self.assertTrue(doc["devices"][modem["id"]]["transitioning"])
-            self.assertTrue(doc["shared"]["transitioning"])
-            self.assertTrue(app.transitioning)
+            for state, active in (("connected", True), ("disconnecting", True),
+                                  ("disconnecting", False)):
+                with self.subTest(state=state, data_active=active):
+                    app.cellular_states = {modem["id"]: {
+                        "available": True, "state": state, "registration": "home",
+                        "radio_enabled": True, "data_active": active}}
+                    app.publish_control_state([modem], {modem["id"]})
+                    doc = json.loads((root / "devices-status.json").read_text())
+                    self.assertTrue(doc["devices"][modem["id"]]["transitioning"])
+                    self.assertTrue(doc["shared"]["transitioning"])
+                    self.assertTrue(app.transitioning)
 
     def test_snapshot_reports_the_sim_iccid_and_number(self):
         """Control shows "no SIM" unless the VPCD reader or this ICCID says otherwise, so a

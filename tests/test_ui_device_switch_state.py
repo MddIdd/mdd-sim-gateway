@@ -20,14 +20,21 @@ class CapabilitySwitchStateTests(unittest.TestCase):
             self.assertEqual(key.group(1), kind.group(1), switch)
 
     def test_enabled_capability_can_be_disabled_during_starting_or_stopping_when_idle(self):
-        self.assertIn(
+        unavailable_decl = "const unavailable = !c.available"
+        can_disable_decl = (
             "const canDisableWhileStarting = !submitting && c.desired && "
-            "(c.actual === 'starting' || c.actual === 'stopping')",
-            SOURCE,
+            "(c.actual === 'starting' || c.actual === 'stopping')"
         )
-        self.assertIn(
-            "const switchDisabled = (pending && !canDisableWhileStarting) || unavailable",
-            SOURCE,
+        switch_disabled_decl = (
+            "const switchDisabled = (pending && !canDisableWhileStarting) || unavailable"
+        )
+        self.assertIn(unavailable_decl, SOURCE)
+        self.assertIn(can_disable_decl, SOURCE)
+        self.assertIn(switch_disabled_decl, SOURCE)
+        self.assertLess(
+            SOURCE.index(unavailable_decl),
+            SOURCE.index(switch_disabled_decl),
+            "unavailable must be declared before switchDisabled to avoid a TDZ ReferenceError",
         )
         self.assertIn("disabled={switchDisabled}", SOURCE)
 

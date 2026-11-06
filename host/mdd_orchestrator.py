@@ -1163,7 +1163,7 @@ class Orchestrator:
             cell_state = str(cellular_state.get("state") or "").lower()
             data_transitioning = (
                 (target_data_active and not observed_data_active and cell_state in {"enabling", "connecting"})
-                or (not target_data_active and observed_data_active and cell_state == "disconnecting")
+                or (not target_data_active and (observed_data_active or cell_state == "disconnecting"))
             )
             # The bridge is no longer a VoWiFi actual: it runs for every present modem so
             # the card stays reachable. Comparing it against the VoWiFi switch would park

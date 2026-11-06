@@ -1177,7 +1177,7 @@ class HardwareSupervisor:
             cell_state = str(cellular.get("state") or "").lower()
             data_transitioning = (
                 (target_data and not cellular.get("data_active") and cell_state in {"enabling", "connecting"})
-                or (not target_data and bool(cellular.get("data_active")) and cell_state == "disconnecting")
+                or (not target_data and (bool(cellular.get("data_active")) or cell_state == "disconnecting"))
             )
             assignment = {
                 "name": modem.get("name") or DEFAULT_MODEM_NAME, "tty": modem["tty"],

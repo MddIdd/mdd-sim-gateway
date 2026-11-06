@@ -1187,12 +1187,15 @@ modem.3gpp.registration-state : unknown
                         self.assertTrue(doc["devices"]["a"]["transitioning"])
 
                 # Genuine disconnecting while cellular is disabled: transitioning.
-                app.cellular_states["a"] = {
-                    "available": True, "state": "disconnecting", "registration": "home",
-                    "radio_enabled": True, "data_active": True}
-                app.publish_device_status(desired_off, assignments)
-                doc = device_state._read(str(app.device_status_path), {})
-                self.assertTrue(doc["devices"]["a"]["transitioning"])
+                for state, active in (("connected", True), ("disconnecting", True),
+                                      ("disconnecting", False)):
+                    with self.subTest(state=state, data_active=active):
+                        app.cellular_states["a"] = {
+                            "available": True, "state": state, "registration": "home",
+                            "radio_enabled": True, "data_active": active}
+                        app.publish_device_status(desired_off, assignments)
+                        doc = device_state._read(str(app.device_status_path), {})
+                        self.assertTrue(doc["devices"]["a"]["transitioning"])
 
     def test_serial_mode_never_touches_the_modem_radio_port(self):
         """VoWiFi-only mode gives the direct bridge exclusive ownership of the AT port.

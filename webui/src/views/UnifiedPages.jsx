@@ -138,10 +138,10 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
   const [pendingTarget, setPendingTarget] = useState(null)
   const c = capability(device, kind)
   const pending = submitting || c.actual === 'starting' || c.actual === 'stopping'
-  const canDisableWhileStarting = !submitting && c.desired && (c.actual === 'starting' || c.actual === 'stopping')
-  const switchDisabled = (pending && !canDisableWhileStarting) || unavailable
   const unavailable = !c.available || c.actual === 'unsupported' || device.compatibilityOnly ||
     device.present === false || (kind === 'cellular' && capability(device, 'flight').desired)
+  const canDisableWhileStarting = !submitting && c.desired && (c.actual === 'starting' || c.actual === 'stopping')
+  const switchDisabled = (pending && !canDisableWhileStarting) || unavailable
   const title = kind === 'cellular' ? t('4G network') : kind === 'flight' ? t('Flight mode') : t('VoWiFi / WiFi Calling')
   const canRetry = kind === 'vowifi' && c.desired && ['off', 'degraded', 'error'].includes(c.actual) && !unavailable
   const change = async (next, retry = false) => {

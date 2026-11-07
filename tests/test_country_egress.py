@@ -25,6 +25,26 @@ class CountryEgressTests(unittest.TestCase):
     def test_epdg_name(self):
         self.assertEqual(egress.epdg_for({"mcc": "310", "mnc": "260"}),
                          "epdg.epc.mnc260.mcc310.pub.3gppnetwork.org")
+        self.assertEqual(egress.epdg_for({"mcc": "454", "mnc": "00"}),
+                         "epdg.epc.mnc000.mcc454.pub.3gppnetwork.org")
+        self.assertEqual(egress.epdg_for({"mcc": 454, "mnc": 0}),
+                         "epdg.epc.mnc000.mcc454.pub.3gppnetwork.org")
+        self.assertEqual(egress.epdg_for({"mcc": "460", "mnc": "000"}),
+                         "epdg.epc.mnc000.mcc460.pub.3gppnetwork.org")
+        self.assertEqual(egress.epdg_for({"mcc": "454", "mnc": "00",
+                                          "epdg": " epdg.custom.example.org "}),
+                         "epdg.custom.example.org")
+        for invalid in (
+            {},
+            {"mcc": "454"},
+            {"mnc": "00"},
+            {"mcc": "000", "mnc": "01"},
+            {"mcc": "00", "mnc": "00"},
+            {"mcc": "abc", "mnc": "00"},
+            {"mcc": "454", "mnc": "xy"},
+        ):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(egress.epdg_for(invalid), "")
 
     def test_manual_proxy_url(self):
         outbound = parse_proxy_url("socks5://alice:secret@127.0.0.1:1080", "exit-gb")

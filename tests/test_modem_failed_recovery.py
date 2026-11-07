@@ -152,7 +152,7 @@ class FailedModemTests(unittest.TestCase):
 class FailedModemWordingTests(unittest.TestCase):
     def test_every_failed_modem_reason_is_translated(self):
         source = (ROOT / "control" / "app" / "main.py").read_text(encoding="utf-8")
-        start = source.index('elif host_cell.get("state") == "failed":')
+        start = source.index('elif cell_state == "failed":')
         block = source[start:source.index("elif radio_on and registered", start)]
         sentences = ["".join(re.findall(r'"([^"]*)"', part))
                      for part in re.split(r"\bif\b|\belse\b", block.split("cell_reason = (")[1])]

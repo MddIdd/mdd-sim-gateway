@@ -65,6 +65,8 @@ const zh = {
   'ModemManager could not start this modem, and rebooting it did not help. Reconnect the modem or restart the host.': 'ModemManager 无法启动此模组，重启模组也没有恢复。请重新连接模组或重启主机。',
   'ModemManager could not start this modem. It is being rebooted.': 'ModemManager 无法启动此模组，正在重启模组。',
   'ModemManager could not start this modem, and it could not be rebooted. Reconnect the modem or restart the host.': 'ModemManager 无法启动此模组，且无法向模组发送重启命令。请重新连接模组或重启主机。',
+  'Cellular data bearer is not connected': '蜂窝数据承载尚未连接',
+  'Waiting for cellular registration ({registration})': '正在等待蜂窝网络注册（{registration}）',
   'The media relay is not ready, so calls would have no audio. Check the gateway, then try again.': '媒体中继未就绪，通话将没有声音。请检查网关后重试。',
   'This browser cannot reach the media relay. Check that its port is forwarded to the gateway, then try again.': '浏览器连接不到媒体中继。请确认中继端口已转发到网关后重试。',
   'Call media': '通话媒体', 'Media relay, port {port}': '媒体中继，端口 {port}', 'Direct (each line publishes its RTP ports)': '直连（每条线路发布自己的 RTP 端口）',

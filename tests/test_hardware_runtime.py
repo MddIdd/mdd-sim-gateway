@@ -201,6 +201,61 @@ class HardwareRuntimeTests(unittest.TestCase):
             self.assertFalse(observed["transitioning"])
             self.assertFalse(observed["actual"]["vowifi_bridge_active"])
 
+    def test_cellular_transitioning_tracks_only_active_bearer_operations(self):
+        with tempfile.TemporaryDirectory() as temp:
+            data = Path(temp)
+            root = data / "orchestrator"
+            root.mkdir()
+            modem = {"id": "2c7c-0125-port", "tty": "/dev/ttyUSB2",
+                     "usb_path": "1-3", "vid": "2c7c", "pid": "0125"}
+            app = HardwareSupervisor(data_path=data)
+
+            # Cellular enabled, no active bearer, searching/denied or registered-without-data: settled.
+            (root / "devices-desired.json").write_text(json.dumps({
+                "version": 2,
+                "devices": {modem["id"]: {"cellular_enabled": True, "vowifi_enabled": True,
+                                          "flight_mode": False}}}))
+            for state, reg in (("searching", "searching"), ("enabled", "denied"),
+                               ("registered", "home")):
+                with self.subTest(state=state, registration=reg):
+                    app.cellular_states = {modem["id"]: {
+                        "available": True, "state": state, "registration": reg,
+                        "radio_enabled": True, "data_active": False}}
+                    app.publish_control_state([modem], {modem["id"]})
+                    doc = json.loads((root / "devices-status.json").read_text())
+                    self.assertFalse(doc["devices"][modem["id"]]["transitioning"])
+                    self.assertFalse(doc["shared"]["transitioning"])
+                    self.assertFalse(app.transitioning)
+
+            # Genuine enabling / connecting operation while cellular is enabled: transitioning.
+            for state in ("enabling", "connecting"):
+                with self.subTest(state=state):
+                    app.cellular_states = {modem["id"]: {
+                        "available": True, "state": state, "registration": "home",
+                        "radio_enabled": True, "data_active": False}}
+                    app.publish_control_state([modem], {modem["id"]})
+                    doc = json.loads((root / "devices-status.json").read_text())
+                    self.assertTrue(doc["devices"][modem["id"]]["transitioning"])
+                    self.assertTrue(doc["shared"]["transitioning"])
+                    self.assertTrue(app.transitioning)
+
+            # Genuine disconnecting operation while cellular is disabled: transitioning.
+            (root / "devices-desired.json").write_text(json.dumps({
+                "version": 2,
+                "devices": {modem["id"]: {"cellular_enabled": False, "vowifi_enabled": True,
+                                          "flight_mode": False}}}))
+            for state, active in (("connected", True), ("disconnecting", True),
+                                  ("disconnecting", False)):
+                with self.subTest(state=state, data_active=active):
+                    app.cellular_states = {modem["id"]: {
+                        "available": True, "state": state, "registration": "home",
+                        "radio_enabled": True, "data_active": active}}
+                    app.publish_control_state([modem], {modem["id"]})
+                    doc = json.loads((root / "devices-status.json").read_text())
+                    self.assertTrue(doc["devices"][modem["id"]]["transitioning"])
+                    self.assertTrue(doc["shared"]["transitioning"])
+                    self.assertTrue(app.transitioning)
+
     def test_snapshot_reports_the_sim_iccid_and_number(self):
         """Control shows "no SIM" unless the VPCD reader or this ICCID says otherwise, so a
         container build without it lost the SIM whenever the bridge was down."""

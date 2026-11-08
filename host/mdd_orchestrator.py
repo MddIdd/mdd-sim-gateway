@@ -28,8 +28,10 @@ from pathlib import Path
 
 try:
     from host import modem_probe
+    from host.vpcd_modem_bridge import BridgeRecoveryBudget
 except ImportError:  # run as host/mdd_orchestrator.py, with host/ itself on the path
     import modem_probe
+    from vpcd_modem_bridge import BridgeRecoveryBudget
 
 try:
     import serial
@@ -682,6 +684,7 @@ class Orchestrator:
         # status document reported every freshly respawned process as a running bridge.
         self._bridge_started: dict[str, float] = {}
         self._bridge_failures: dict[str, dict] = {}
+        self.bridge_recovery = BridgeRecoveryBudget(self.root / "bridge-recovery.json")
         # device id -> ModemManager's "failed" verdict on it: reason, since when, and the
         # module reboots tried. Cleared once ModemManager reports any other state.
         self._modem_failed: dict[str, dict] = {}
@@ -1157,6 +1160,11 @@ class Orchestrator:
             target_data_active = bool(wanted.get("cellular_enabled")) and not bool(
                 wanted.get("flight_mode"))
             observed_data_active = bool(cellular_state.get("data_active"))
+            cell_state = str(cellular_state.get("state") or "").lower()
+            data_transitioning = (
+                (target_data_active and not observed_data_active and cell_state in {"enabling", "connecting"})
+                or (not target_data_active and (observed_data_active or cell_state == "disconnecting"))
+            )
             # The bridge is no longer a VoWiFi actual: it runs for every present modem so
             # the card stays reachable. Comparing it against the VoWiFi switch would park
             # every switched-off modem in "stopping" forever.
@@ -1170,7 +1178,7 @@ class Orchestrator:
             # the cellular state, and VoWiFi carries on through the bridge.
             modem_failed = device_id in self._modem_failed
             device_transitioning = bool(transitioning or (not degraded and not modem_failed and
-                present and (target_data_active != observed_data_active or
+                present and (data_transitioning or
                              (backend_active and radio_enabled is not None and
                               bool(wanted.get("flight_mode")) == radio_enabled) or
                              (not self._serial_mode
@@ -1203,6 +1211,7 @@ class Orchestrator:
                 "transitioning": device_transitioning,
                 "error": (error or ("device is not connected" if not present else "")
                           or " ".join(part for part in (
+                              self.bridge_recovery.error(device_id) if not bridge_alive else "",
                               degraded,
                               # The exit record is the only place the actual exception
                               # lands; without it a failing takeover reads as success.
@@ -1396,6 +1405,10 @@ class Orchestrator:
     def _record_bridge_exit(self, hwid: str, proc, started: float) -> None:
         """Keep an exited bridge visible instead of silently respawning over it."""
         uptime = time.time() - started if started else 0.0
+        self.bridge_recovery.record_exit(hwid, proc.returncode, uptime)
+        recovery_error = self.bridge_recovery.error(hwid)
+        if recovery_error:
+            self.log(f"SIM bridge {hwid}: {recovery_error}")
         previous = self._bridge_failures.get(hwid)
         # A crash after a long healthy run is a fresh incident, not an escalation.
         count = previous["count"] + 1 if previous and uptime < BRIDGE_STABLE_SECONDS else 1
@@ -1416,10 +1429,12 @@ class Orchestrator:
                  + (f": {reason}" if reason else ""))
 
     def _bridge_retry_due(self, hwid: str) -> bool:
+        if time.time() < self.bridge_recovery.retry_at(hwid):
+            return False
         failure = self._bridge_failures.get(hwid)
         if not failure:
             return True
-        delay = min(BRIDGE_RETRY_BASE_SECONDS * (2 ** (failure["count"] - 1)),
+        delay = min(BRIDGE_RETRY_BASE_SECONDS * (2 ** min(failure["count"] - 1, 6)),
                     BRIDGE_RETRY_CEILING_SECONDS)
         return time.time() - failure["at"] >= delay
 
@@ -3281,6 +3296,7 @@ class Orchestrator:
         # modem, and turning VoWiFi off to run an eSIM operation emptied the reader under
         # it. Bridges follow the hardware instead: every present modem gets one.
         live_ids = {m["id"] for m in modems}
+        modem_by_id = {m["id"]: m for m in modems}
         for hwid in list(self.bridges):
             proc = self.bridges[hwid]
             exited = proc.poll() is not None
@@ -3292,6 +3308,14 @@ class Orchestrator:
             # pcscd no longer listens on, so a port change has to respawn it.
             moved = (hwid in live_ids
                      and self.bridge_ports.get(hwid) != assignments[hwid]["base_port"])
+            if not moved and not exited and through_modemmanager and hwid in modem_by_id:
+                cmd = self._bridge_commands.get(hwid) or []
+                if "--modemmanager" in cmd:
+                    idx = cmd.index("--modemmanager")
+                    old_mm = cmd[idx + 1] if idx + 1 < len(cmd) else ""
+                    new_mm = self.modemmanager_modem_for_tty(modem_by_id[hwid]["tty"])
+                    if old_mm and new_mm and old_mm != new_mm:
+                        moved = True
             if hwid not in live_ids or moved or exited:
                 self.bridges.pop(hwid)
                 self.bridge_ports.pop(hwid, None)

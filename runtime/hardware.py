@@ -26,6 +26,7 @@ import yaml
 # /app is the working directory of `python -m runtime.hardware`, and the image ships
 # host/vpcd_modem_bridge.py and host/modem_probe.py beside it.
 from host import modem_probe
+from host.vpcd_modem_bridge import BridgeRecoveryBudget
 
 try:
     import serial
@@ -236,7 +237,11 @@ class HardwareSupervisor:
         self.networkmanager = None
         self.pcscd = None
         self.bridges = {}
+        self.bridge_objects = {}
         self.bridge_retry_at = {}
+        self.bridge_started_at = {}
+        self.bridge_recovery = BridgeRecoveryBudget(
+            self.data_path / "orchestrator" / "bridge-recovery.json")
         self.pcsc_fingerprint = ""
         self.reported = set()
         self.cellular_states = {}
@@ -464,6 +469,8 @@ class HardwareSupervisor:
                 process.kill()
                 process.wait()
         self.bridges.clear()
+        self.bridge_objects.clear()
+        self.bridge_started_at.clear()
         if self.pcscd and self.pcscd.poll() is None:
             self.pcscd.terminate()
             try:
@@ -522,6 +529,7 @@ class HardwareSupervisor:
 
     def stop_profile_switch_bridge(self, device_id):
         process = self.bridges.pop(device_id, None)
+        self.bridge_objects.pop(device_id, None)
         self.bridge_retry_at.pop(device_id, None)
         if process and process.poll() is None:
             process.terminate()
@@ -530,6 +538,178 @@ class HardwareSupervisor:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
+
+    @staticmethod
+    def qmi_wdm_for_usb_path(usb_path):
+        if not usb_path:
+            return ""
+        candidates = sorted(Path("/sys/bus/usb/devices").glob(
+            f"{usb_path}:*/usbmisc/cdc-wdm*"))
+        return f"/dev/{candidates[0].name}" if candidates else ""
+
+    def qmi_uim_power_cycle_sim(self, wdm_path, slot=1, off_seconds=2.0):
+        """Power-cycle the UICC slot via libqmi-glib through qmi-proxy."""
+        if not wdm_path or not Path(wdm_path).exists():
+            return False, f"no QMI control node at {wdm_path}"
+        script = r"""
+import ctypes, sys, time
+wdm_path, slot, off_sec = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
+mode = sys.argv[4] if len(sys.argv) > 4 else "cycle"
+step_timeout = 3 if mode == "on" else 4
+glib = ctypes.CDLL("libglib-2.0.so.0")
+gio = ctypes.CDLL("libgio-2.0.so.0")
+gobj = ctypes.CDLL("libgobject-2.0.so.0")
+qmi = ctypes.CDLL("libqmi-glib.so.5")
+class GError(ctypes.Structure):
+    _fields_ = [("domain", ctypes.c_uint32), ("code", ctypes.c_int), ("message", ctypes.c_char_p)]
+CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+glib.g_main_loop_new.restype = ctypes.c_void_p
+glib.g_main_loop_new.argtypes = [ctypes.c_void_p, ctypes.c_int]
+glib.g_main_loop_run.argtypes = [ctypes.c_void_p]
+glib.g_main_loop_quit.argtypes = [ctypes.c_void_p]
+glib.g_main_loop_unref.argtypes = [ctypes.c_void_p]
+glib.g_error_free.argtypes = [ctypes.POINTER(GError)]
+gio.g_file_new_for_path.restype = ctypes.c_void_p
+gio.g_file_new_for_path.argtypes = [ctypes.c_char_p]
+gobj.g_object_ref.restype = ctypes.c_void_p
+gobj.g_object_ref.argtypes = [ctypes.c_void_p]
+gobj.g_object_unref.argtypes = [ctypes.c_void_p]
+qmi.qmi_device_new.argtypes = [ctypes.c_void_p, ctypes.c_void_p, CB, ctypes.c_void_p]
+qmi.qmi_device_new_finish.restype = ctypes.c_void_p
+qmi.qmi_device_new_finish.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.POINTER(GError))]
+qmi.qmi_device_open.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint, ctypes.c_void_p, CB, ctypes.c_void_p]
+qmi.qmi_device_open_finish.restype = ctypes.c_int
+qmi.qmi_device_open_finish.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.POINTER(GError))]
+qmi.qmi_device_allocate_client.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint8, ctypes.c_uint, ctypes.c_void_p, CB, ctypes.c_void_p]
+qmi.qmi_device_allocate_client_finish.restype = ctypes.c_void_p
+qmi.qmi_device_allocate_client_finish.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.POINTER(GError))]
+qmi.qmi_device_release_client.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_uint, ctypes.c_void_p, CB, ctypes.c_void_p]
+qmi.qmi_device_release_client_finish.restype = ctypes.c_int
+qmi.qmi_device_release_client_finish.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.POINTER(GError))]
+for op in ("off", "on"):
+    getattr(qmi, f"qmi_message_uim_power_{op}_sim_input_new").restype = ctypes.c_void_p
+    getattr(qmi, f"qmi_message_uim_power_{op}_sim_input_set_slot").argtypes = [ctypes.c_void_p, ctypes.c_uint8, ctypes.POINTER(ctypes.POINTER(GError))]
+    getattr(qmi, f"qmi_message_uim_power_{op}_sim_input_unref").argtypes = [ctypes.c_void_p]
+    getattr(qmi, f"qmi_client_uim_power_{op}_sim").argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, CB, ctypes.c_void_p]
+    getattr(qmi, f"qmi_client_uim_power_{op}_sim_finish").restype = ctypes.c_void_p
+    getattr(qmi, f"qmi_client_uim_power_{op}_sim_finish").argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.POINTER(GError))]
+    getattr(qmi, f"qmi_message_uim_power_{op}_sim_output_get_result").restype = ctypes.c_int
+    getattr(qmi, f"qmi_message_uim_power_{op}_sim_output_get_result").argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.POINTER(GError))]
+    getattr(qmi, f"qmi_message_uim_power_{op}_sim_output_unref").argtypes = [ctypes.c_void_p]
+loop = glib.g_main_loop_new(None, 0)
+holder = {}
+def run_async(starter):
+    holder.clear()
+    def cb(src, res, ud):
+        holder["res"] = gobj.g_object_ref(res)
+        glib.g_main_loop_quit(loop)
+    c_cb = CB(cb)
+    starter(c_cb)
+    glib.g_main_loop_run(loop)
+    return holder["res"]
+def check(err_p):
+    if err_p:
+        msg = err_p.contents.message.decode("utf-8", "replace")
+        glib.g_error_free(err_p)
+        raise RuntimeError(msg)
+def power_op(client, op):
+    inp = getattr(qmi, f"qmi_message_uim_power_{op}_sim_input_new")()
+    try:
+        e1 = ctypes.POINTER(GError)()
+        getattr(qmi, f"qmi_message_uim_power_{op}_sim_input_set_slot")(inp, slot, ctypes.byref(e1))
+        check(e1)
+        r = run_async(lambda cb: getattr(qmi, f"qmi_client_uim_power_{op}_sim")(client, inp, step_timeout, None, cb, None))
+    finally:
+        getattr(qmi, f"qmi_message_uim_power_{op}_sim_input_unref")(inp)
+    e2 = ctypes.POINTER(GError)()
+    try:
+        out = getattr(qmi, f"qmi_client_uim_power_{op}_sim_finish")(client, r, ctypes.byref(e2))
+    finally:
+        gobj.g_object_unref(r)
+    check(e2)
+    e3 = ctypes.POINTER(GError)()
+    try:
+        getattr(qmi, f"qmi_message_uim_power_{op}_sim_output_get_result")(out, ctypes.byref(e3))
+    finally:
+        getattr(qmi, f"qmi_message_uim_power_{op}_sim_output_unref")(out)
+    check(e3)
+gfile = gio.g_file_new_for_path(wdm_path.encode("utf-8"))
+dev = None
+client = None
+try:
+    err1 = ctypes.POINTER(GError)()
+    res = run_async(lambda cb: qmi.qmi_device_new(gfile, None, cb, None))
+    try:
+        dev = qmi.qmi_device_new_finish(res, ctypes.byref(err1))
+    finally:
+        gobj.g_object_unref(res)
+    check(err1)
+    err2 = ctypes.POINTER(GError)()
+    res = run_async(lambda cb: qmi.qmi_device_open(dev, 0x40, step_timeout, None, cb, None))
+    try:
+        qmi.qmi_device_open_finish(dev, res, ctypes.byref(err2))
+    finally:
+        gobj.g_object_unref(res)
+    check(err2)
+    err3 = ctypes.POINTER(GError)()
+    res = run_async(lambda cb: qmi.qmi_device_allocate_client(dev, 11, 0, step_timeout, None, cb, None))
+    try:
+        client = qmi.qmi_device_allocate_client_finish(dev, res, ctypes.byref(err3))
+    finally:
+        gobj.g_object_unref(res)
+    check(err3)
+    if mode == "on":
+        power_op(client, "on")
+    else:
+        try:
+            power_op(client, "off")
+            time.sleep(off_sec)
+        finally:
+            power_op(client, "on")
+finally:
+    if client and dev:
+        try:
+            e_rel = ctypes.POINTER(GError)()
+            r_rel = run_async(lambda cb: qmi.qmi_device_release_client(dev, client, 1, 2, None, cb, None))
+            qmi.qmi_device_release_client_finish(dev, r_rel, ctypes.byref(e_rel))
+            gobj.g_object_unref(r_rel)
+            if e_rel:
+                glib.g_error_free(e_rel)
+        except Exception:
+            pass
+    if client:
+        gobj.g_object_unref(client)
+    if dev:
+        gobj.g_object_unref(dev)
+    if gfile:
+        gobj.g_object_unref(gfile)
+    if loop:
+        glib.g_main_loop_unref(loop)
+print("OK")
+"""
+        # 4 QMI stages * 4s + 2s client release + off_seconds + 6s headroom so
+        # the child's finally: power_op(client, "on") finishes before the outer timeout.
+        cycle_timeout = max(24, int(4 * 4 + 2 + float(off_seconds) + 6))
+        try:
+            proc = self.command(
+                sys.executable, "-c", script, str(wdm_path), str(slot), str(off_seconds),
+                "cycle", timeout=cycle_timeout)
+            if proc.returncode == 0 and "OK" in (proc.stdout or ""):
+                return True, ""
+            return False, (proc.stdout or "").strip()[-300:] or f"rc={proc.returncode}"
+        except subprocess.TimeoutExpired as exc:
+            recovery_note = "power-on recovery failed"
+            try:
+                rec = self.command(
+                    sys.executable, "-c", script, str(wdm_path), str(slot), "0",
+                    "on", timeout=14)
+                if rec.returncode == 0 and "OK" in (rec.stdout or ""):
+                    recovery_note = "power-on recovery succeeded"
+            except Exception:
+                pass
+            return False, f"{exc} ({recovery_note})"
+        except Exception as exc:
+            return False, str(exc)
 
     def converge_profile_switch_modem(self, request, identity, discovered, objects):
         """Verify cellular identity in the private Hardware D-Bus namespace."""
@@ -555,8 +735,30 @@ class HardwareSupervisor:
             if modem_probe.esim_identity_matches(observed, identity):
                 request["cellular_identity"] = "matched"
                 return True
-            if request.get("modem_reset_attempted") or not any(
-                    str(value or "").isdigit() for value in observed.values()):
+            if not any(str(value or "").isdigit() for value in observed.values()):
+                return False
+            if not request.get("qmi_power_cycle_attempted") and not request.get("modem_reset_attempted"):
+                wdm_path = self.qmi_wdm_for_usb_path(modem.get("usb_path"))
+                request = self.bridge_restart_status(
+                    request, "resetting_modem", qmi_power_cycle_attempted=True,
+                    qmi_power_cycle_succeeded=False)
+                if wdm_path:
+                    self.stop_profile_switch_bridge(device_id)
+                qmi_ok, qmi_err = self.qmi_uim_power_cycle_sim(wdm_path)
+                if qmi_ok:
+                    self.log(f"power-cycled UICC slot via QMI UIM for {device_id} ({wdm_path})")
+                    self.forget_mmcli_details()
+                    self.qmi_reset_at[device_id] = time.monotonic()
+                    self.cellular_states.pop(device_id, None)
+                    self.bridge_restart_status(
+                        request, "stopped", qmi_power_cycle_succeeded=True,
+                        qmi_power_cycle_at=time.time())
+                    return False
+                self.log(f"QMI UIM SIM power cycle unavailable/failed for {device_id} ({qmi_err}); falling back to mmcli --reset")
+            if request.get("modem_reset_attempted"):
+                return False
+            if (request.get("qmi_power_cycle_succeeded")
+                    and time.time() - float(request.get("qmi_power_cycle_at") or 0) < 25):
                 return False
             request = self.bridge_restart_status(
                 request, "resetting_modem", modem_reset_attempted=True)
@@ -665,20 +867,40 @@ class HardwareSupervisor:
                 raise RuntimeError("pcscd exited during startup")
 
         live = {item["id"] for item in modems}
+        current_objs = {item["id"]: self.modem_object_for_tty(item["tty"], objects)
+                        for item in modems}
         for hardware_id, process in list(self.bridges.items()):
-            if hardware_id not in live or process.poll() is not None:
+            expected_obj = current_objs.get(hardware_id)
+            stale_obj = bool(expected_obj and self.bridge_objects.get(hardware_id)
+                             and self.bridge_objects.get(hardware_id) != expected_obj)
+            if hardware_id not in live or process.poll() is not None or stale_obj:
+                started = self.bridge_started_at.pop(hardware_id, None)
                 if process.poll() is None:
                     process.terminate()
-                    process.wait(5)
+                    try:
+                        process.wait(5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                    if stale_obj:
+                        self.bridge_retry_at[hardware_id] = time.monotonic() + 1
                 else:
+                    uptime = max(0, time.monotonic() - started) if started is not None else 0
+                    self.bridge_recovery.record_exit(hardware_id, process.returncode, uptime)
                     self.bridge_retry_at[hardware_id] = time.monotonic() + 5
+                    recovery_error = self.bridge_recovery.error(hardware_id)
+                    if recovery_error:
+                        self.log(f"SIM bridge {hardware_id}: {recovery_error}")
                 self.bridges.pop(hardware_id, None)
+                self.bridge_objects.pop(hardware_id, None)
         for modem in modems:
             if modem["id"] in self.bridges:
                 continue
             if time.monotonic() < self.bridge_retry_at.get(modem["id"], 0):
                 continue
-            obj = self.modem_object_for_tty(modem["tty"], objects)
+            if time.time() < self.bridge_recovery.retry_at(modem["id"]):
+                continue
+            obj = current_objs.get(modem["id"]) or self.modem_object_for_tty(modem["tty"], objects)
             if not obj:
                 continue
             metadata = self.data_path / "modems" / f'{modem["id"]}.json'
@@ -693,6 +915,8 @@ class HardwareSupervisor:
                        "--identity-refresh", "60"]
             self.bridges[modem["id"]] = subprocess.Popen(
                 command, stdout=sink, stderr=subprocess.STDOUT)
+            self.bridge_objects[modem["id"]] = obj
+            self.bridge_started_at[modem["id"]] = time.monotonic()
             sink.close()
 
     @staticmethod
@@ -1160,6 +1384,11 @@ class HardwareSupervisor:
                 "available": False, "registration": "unknown", "data_active": False}
             target_data = bool(wanted.get("cellular_enabled")) and not bool(
                 wanted.get("flight_mode"))
+            cell_state = str(cellular.get("state") or "").lower()
+            data_transitioning = (
+                (target_data and not cellular.get("data_active") and cell_state in {"enabling", "connecting"})
+                or (not target_data and (bool(cellular.get("data_active")) or cell_state == "disconnecting"))
+            )
             assignment = {
                 "name": modem.get("name") or DEFAULT_MODEM_NAME, "tty": modem["tty"],
                 "usb_path": modem["usb_path"], "vid": modem["vid"], "pid": modem["pid"],
@@ -1186,8 +1415,7 @@ class HardwareSupervisor:
                     "cellular_supported": True,
                 },
                 "cellular": cellular,
-                "transitioning": ((not ready and not bridge_error) or target_data != bool(
-                    cellular.get("data_active"))),
+                "transitioning": ((not ready and not bridge_error) or data_transitioning),
                 "error": error,
             }
         now = int(time.time())
@@ -1287,7 +1515,8 @@ class HardwareSupervisor:
                 "unit_active": bool(self.modemmanager and self.modemmanager.poll() is None),
                 "required": True,
                 "applied": bool(self.modemmanager and self.modemmanager.poll() is None),
-                "unclaimed": {}, "degraded_to_direct_serial": {}, "bridge_failures": {},
+                "unclaimed": {}, "degraded_to_direct_serial": {},
+                "bridge_failures": self.bridge_recovery.snapshot(),
             },
             "modem_objects": sorted(modem_objects),
             "discovered_modems": discovered,
@@ -1338,6 +1567,8 @@ class HardwareSupervisor:
                 # this SIM, not a hardware plane still coming up; retrying will not change it.
                 bridge_errors[modem["id"]] = str(
                     metadata.get("channel_error") or "SIM logical channel allocation failed")
+            if not process and self.bridge_recovery.error(modem["id"]):
+                bridge_errors[modem["id"]] = self.bridge_recovery.error(modem["id"])
         self.finish_bridge_restart_requests({modem["id"] for modem in discovered}, discovered, modems)
         ready_bridges = len(ready_ids)
         maintenance_ids = {

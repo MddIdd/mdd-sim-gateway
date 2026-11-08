@@ -9,6 +9,7 @@
 
 - 4G 不在线：检查“设备 → 详情”的 ModemManager 对象、注册、APN 和 bearer；运行设备诊断。
 - VoWiFi 停在部分连接：检查国家出口 UDP 验证、ePDG、SIM 是否开通 Wi‑Fi Calling、PIN 剩余次数及引擎日志。
+- 全容器部署中，线路重连持续报 `egress_unavailable`：控制面会在每次启动失败后验证当前自动出口的 UDP 连通性（公共 DNS/STUN，不依赖运营商 ePDG 域名）。同一节点累计 3 次实测失败后尝试备用节点，即使此前已正常运行很久；中间验证成功会清零该节点的失败计数。手动锁定节点、同国家其他线路仍注册、配置过期或验证过程中切换节点时不会自动换节点。全部候选都失败后按现有策略转为约每小时重试。出口状态的“就绪”只表示代理服务与配置就绪，并不代表实时连通性；单纯配置或引擎错误不会作为节点故障证据。
 - 隧道已连接但 IMS 注册一直无响应（Asterisk 日志 `No response received ... on registration attempt`）：部分运营商会丢弃分片的 SIP 包，把隧道 MTU 调低通常能解决，例如 `SWU_TUN_MTU=1280`，需设在控制面上。原生安装写进 systemd drop-in（`/etc/systemd/system/mdd-sim-gateway-control.service.d/` 下的 `.conf`，内容为 `[Service]` 加 `Environment=SWU_TUN_MTU=1280`），再执行 `systemctl daemon-reload` 并重启控制面；docker 模式执行 `sudo SWU_TUN_MTU=1280 ./install.sh reload`，之后的重新加载和更新会沿用（要恢复默认值执行 `sudo SWU_TUN_MTU=default ./install.sh reload`，取值需在 1280–1500 之间）；全容器部署在 Compose 文件中 `control` 的 `environment` 里加上这一项。改动后需重建线路才生效。
 - 服务更新后 VoWiFi 突然停止：确认引擎容器仍存在，并检查控制面日志中是否把虚拟读卡器维护误判为 `card removed`。当前版本会在编排器退出信号到达时立即发布维护标记，并保留 45 秒重建窗口；旧版本应先恢复读卡桥再重新启动线路。
 - 浏览器电话一直未注册：它与 WebUI 同源连接 `/api/instances/<线路>/softphone/ws`。经反向代理访问时确认代理转发了 WebSocket 升级头；控制面日志出现 `refused WebSocket ... from origin` 表示代理改写了 `Host`，需把代理地址加入"可信反向代理"并传递 `X-Forwarded-Host`；直连时确认线路引擎在运行。控制面日志中的 `softphone relay: engine ... unreachable` 表示引擎的 Asterisk 未在网桥地址 8088 上监听，通常是引擎镜像未随本版本刷新。
@@ -17,6 +18,8 @@
 - 启用 relay 模式被拒绝，提示引擎无法过滤媒体网络：nftables（nf_tables 及其 socket 匹配）和 iptables-legacy 两种过滤都加载不了，错误信息里附有两者各自的报错。内核不支持 nftables 的 socket 匹配时（例如 Synology DSM 的 4.4 内核）会自动改用 iptables-legacy，这时仍被拒绝通常是引擎镜像还是旧版本（未包含 iptables-legacy）。执行 `sudo ./install.sh reload --engines` 刷新引擎镜像后重试。
 - 读卡器未出现：先用 `lsusb` 确认 USB 层，再运行 `pcsc_scan` 检查 PC/SC 层。SCR Prime（`04d9:c001`）需执行一次 `sudo ./install.sh patchprime` 加入 libccid 设备表；之后支持热插拔。读卡器没有 4G 开关属于正常设计。
 - SIM 逻辑通道分配失败：查看“设备 → 硬件”中的已分配数量、通道用途和明确错误。系统会自动释放本轮部分分配；若持续失败，先重启对应线路，确认仍失败后再安排模块复位，不要只按底层 QMI 错误码猜测原因。
+- 模块读卡持续报 `PhoneFailure`、随后出现 `ADF.USIM select failed`：同一已分配通道连续失败至少 3 次且跨度达到 30 秒时，系统会释放通道并只重建该模块的读卡桥接。普通 PIN、鉴权或文件不存在的卡片返回码不会触发重建，也不会自动重发原 APDU。重建等待依次为 15、30、60 秒；每轮一小时最多重建 3 次，仍失败则暂停到本轮一小时结束，设备状态会显示暂停原因。恢复次数保存在 `orchestrator/bridge-recovery.json`，重启硬件服务不会绕过限制。若仍无法恢复，保存硬件诊断和 `vpcd-<设备 ID>.log`，再安排该模块复位；无需重启 NAS。桥接重新运行仅代表读卡服务已启动，线路恢复须再确认隧道与 IMS 注册。
+  重建会中断该物理模块上的全部读卡槽，使用这些槽的其他线路也会短暂掉线并重新注册；独立 USB 读卡器不受该桥接重建影响。替代桥接运行至少 60 秒后若因普通原因退出，会清除旧故障的恢复预算；若再次因持续读卡失败退出，仍计入原预算。
 - Telegram 失败：选择手动 HTTP/SOCKS 代理或已就绪的国家出口，并使用“测试”。
 - Telegram 机器人不响应指令：先确认“通知 → Telegram → 聊天指令”已开启，且发送者的数字 ID
   在授权列表里（向 `@userinfobot` 索取自己的 ID；群聊需填群 ID，且群 ID 为负数）。指令走与推送

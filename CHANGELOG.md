@@ -4,6 +4,48 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.14.1] - 2026-11-08
+
+The automatic update channels remain on v1.13.2 pending real-device acceptance.
+
+### Fixed
+
+- Country exits now derive a valid ePDG hostname for zero-valued MNCs such as `00`,
+  `000`, or integer `0`. Missing values, non-ASCII digits, invalid lengths, and an
+  all-zero MCC are rejected without discarding a legitimate zero-valued MNC.
+
+- Full-container eSIM recovery can power-cycle the selected modem's UICC slot via
+  QMI UIM when a warm modem reset leaves the previous profile cached. Unavailable
+  or failed QMI operations immediately fall back to the scoped ModemManager reset;
+  a timed-out cycle gets a bounded power-on recovery attempt. Both deployment modes
+  rebuild a bridge whose ModemManager object path changes after SIM re-enumeration.
+
+- A SIM without usable cellular data no longer keeps every device capability in a
+  permanent transition. Unattached cellular service reports a degraded state while
+  registered VoWiFi remains usable. Enabled capabilities can be switched off when
+  starting or stopping and no API request is in flight; active bearer teardown still
+  waits for completion. New status reasons have Chinese translations.
+
+- Updated the Vite build dependency to 6.4.5 so the WebUI passes the security audit.
+
+- Automatic recovery of a container-routed line now rechecks its current country exit's
+  UDP connectivity when engine startup fails. Three verified failures on the same node
+  trigger the existing bounded failover policy even if that exit previously carried IMS
+  for hours. Successful probes reset the strike count; stale configuration, selector changes,
+  manual pins and registered peers prevent eviction. Exhausting the pool retains hourly
+  backoff instead of retrying the same unusable exit every few minutes.
+
+- A modem SIM bridge no longer stays alive indefinitely returning `6F00` after its AT SIM
+  access fails. Three consecutive transport failures (or invalid logical-channel replies)
+  on one channel spanning at least 30 seconds retire that bridge and release its channels
+  for a scoped rebuild. Other channels' traffic cannot mask the fault. Recovery backs off
+  and permits three rebuilds per hour, with the limit persisted across supervisor restarts;
+  failed replacement processes also consume the limit. PIN and other normal card errors
+  do not trigger recovery, and APDUs are never automatically replayed by the detector.
+  A rebuild interrupts all reader slots and lines on that physical modem; it does not
+  reset the modem or restart unrelated USB readers. Ordinary exits of a replacement that
+  ran at least 60 seconds retire the old recovery budget; watchdog exits remain bounded.
+
 ## [1.14.0] - 2026-10-15
 
 The automatic update channels remain on v1.13.2 pending real-device acceptance.

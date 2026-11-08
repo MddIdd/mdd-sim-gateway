@@ -8,7 +8,7 @@ kind=${1:-}
 
 case "$kind" in
   runtime)
-    runtime_files="pin_keeper.py ami_usim.py swu_ike.py outer_transport.py log_capture.py render.py notify.py entrypoint.sh"
+    runtime_files="pin_keeper.py ami_usim.py swu_ike.py outer_transport.py log_capture.py vowifi_trace.py render.py notify.py entrypoint.sh"
     {
       for file in $runtime_files; do
         [ -f "$engine_dir/$file" ] && cat "$engine_dir/$file"

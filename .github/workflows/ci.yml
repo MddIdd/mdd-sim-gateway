@@ -125,3 +125,4 @@ jobs:
             python3 -c "import Crypto, cryptography, jinja2, panoramisk, requests, serial, smartcard, socks, card"
             asterisk -V
           '
+          python3 tools/test_vowifi_trace_engine.py mdd-sim-gateway/engine:ci

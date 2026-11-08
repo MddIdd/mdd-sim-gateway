@@ -8,6 +8,7 @@ COPY ami_usim.py     /usr/local/bin/ami_usim.py
 COPY swu_ike.py      /usr/local/bin/swu_ike.py
 COPY outer_transport.py /usr/local/bin/outer_transport.py
 COPY log_capture.py  /usr/local/bin/log_capture.py
+COPY vowifi_trace.py /usr/local/bin/vowifi_trace.py
 COPY render.py       /usr/local/bin/render.py
 COPY notify.py       /usr/local/bin/notify.py
 COPY templates/      /opt/mdd-sim-gateway/templates/

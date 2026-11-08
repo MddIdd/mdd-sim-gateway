@@ -22,6 +22,11 @@ RUN npm ci
 COPY webui/ ./
 RUN npm run build
 
+# Compose's GitHub binary endpoint intermittently times out even when its metadata
+# and Docker Hub are healthy. The official image contains the exact same release
+# binaries; pin its index and still verify our existing per-architecture hashes.
+FROM docker/compose-bin:v2.32.4@sha256:2f9a25e681af058b800a39f7f6bc847d7933f06bbc1acd93479d2a2a40d0fa7a AS compose-bin
+
 # ---------- stage 2: native build (pcsc-lite + python deps) ----------
 # Everything that needs a C toolchain is compiled here and only the *artifacts* are copied into
 # the runtime stage, so swig/gcc/meson/ninja/flex/perl/wget never reach the shipped image.
@@ -38,7 +43,6 @@ ARG LPAC_SHA256=f3e92f08d10121cf3633cce66853ba1260eb5daa35c594f903cc2720fc11f9ee
 ARG DOCKER_CLI_VERSION=27.5.1
 ARG DOCKER_CLI_SHA256_AMD64=4f798b3ee1e0140eab5bf30b0edc4e84f4cdb53255a429dc3bbae9524845d640
 ARG DOCKER_CLI_SHA256_ARM64=e6b53725a73763ab3f988c73f8772eaed429754c1a579db5ff11f21990fd1817
-ARG COMPOSE_VERSION=2.32.4
 ARG COMPOSE_SHA256_AMD64=ed1917fb54db184192ea9d0717bcd59e3662ea79db48bff36d3475516c480a6b
 ARG COMPOSE_SHA256_ARM64=0c4591cf3b1ed039adcd803dbbeddf757375fc08c11245b0154135f838495a2f
 COPY patches/lpac/01_pcsc_reader_selection.patch /tmp/mdd-lpac.patch
@@ -47,7 +51,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libcurl4-openssl-dev libpcsclite-dev patch \
         wget ca-certificates meson ninja-build flex perl \
     && cd /tmp \
-    && wget -qO pcsc.tar.gz "https://github.com/LudovicRousseau/PCSC/archive/refs/tags/${PCSC_VERSION}.tar.gz" \
+    && wget -qO pcsc.tar.gz "https://codeload.github.com/LudovicRousseau/PCSC/tar.gz/refs/tags/${PCSC_VERSION}" \
     && echo "${PCSC_SHA256}  pcsc.tar.gz" | sha256sum -c - \
     && tar xf pcsc.tar.gz && cd "PCSC-${PCSC_VERSION}" \
     && meson setup builddir --prefix=/usr -Dpolkit=false -Dlibsystemd=false -Dlibudev=false \
@@ -62,7 +66,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /tmp/pcsc.tar.gz "/tmp/PCSC-${PCSC_VERSION}" \
     && cd /tmp \
     && wget -qO lpac.tar.gz \
-       "https://github.com/estkme-group/lpac/archive/${LPAC_COMMIT}.tar.gz" \
+       "https://codeload.github.com/estkme-group/lpac/tar.gz/${LPAC_COMMIT}" \
     && echo "${LPAC_SHA256}  lpac.tar.gz" | sha256sum -c - \
     && tar xf lpac.tar.gz && cd "lpac-${LPAC_COMMIT}" \
     && patch -p1 < /tmp/mdd-lpac.patch \
@@ -77,10 +81,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # The detached updater needs only the Docker client and Compose plugin. Both are checksummed
 # native binaries; no daemon or host package is installed or modified.
+COPY --from=compose-bin /docker-compose /docker-tools/cli-plugins/docker-compose
 RUN architecture="$(dpkg --print-architecture)" \
     && case "$architecture" in \
-         amd64) docker_arch=x86_64; docker_sum="$DOCKER_CLI_SHA256_AMD64"; compose_arch=x86_64; compose_sum="$COMPOSE_SHA256_AMD64" ;; \
-         arm64) docker_arch=aarch64; docker_sum="$DOCKER_CLI_SHA256_ARM64"; compose_arch=aarch64; compose_sum="$COMPOSE_SHA256_ARM64" ;; \
+         amd64) docker_arch=x86_64; docker_sum="$DOCKER_CLI_SHA256_AMD64"; compose_sum="$COMPOSE_SHA256_AMD64" ;; \
+         arm64) docker_arch=aarch64; docker_sum="$DOCKER_CLI_SHA256_ARM64"; compose_sum="$COMPOSE_SHA256_ARM64" ;; \
          *) echo "unsupported Docker CLI architecture: $architecture" >&2; exit 1 ;; \
        esac \
     && mkdir -p /docker-tools/cli-plugins \
@@ -88,8 +93,6 @@ RUN architecture="$(dpkg --print-architecture)" \
     && echo "$docker_sum  /tmp/docker.tgz" | sha256sum -c - \
     && tar -xzf /tmp/docker.tgz -C /tmp \
     && cp /tmp/docker/docker /docker-tools/docker \
-    && wget -qO /docker-tools/cli-plugins/docker-compose \
-       "https://github.com/docker/compose/releases/download/v${COMPOSE_VERSION}/docker-compose-linux-${compose_arch}" \
     && echo "$compose_sum  /docker-tools/cli-plugins/docker-compose" | sha256sum -c - \
     && chmod 0755 /docker-tools/docker /docker-tools/cli-plugins/docker-compose
 

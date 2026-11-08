@@ -1750,13 +1750,20 @@ class swu():
         
         decoded_payload = []
         while position < len(data):
-            
+            # A truncated/zero-length payload must not spin the decoder or escape into
+            # the connected-state dispatcher as an apparently valid empty message.
+            if not next_payload or position + 4 > len(data):
+                return (False, [])
+            length = struct.unpack("!H", data[position + 2:position + 4])[0]
+            if length < 4 or position + length > len(data):
+                return (False, [])
             position, payload_decoded, next_payload = self.decode_generic_payload_header(data, position, next_payload)
             decoded_payload.append(payload_decoded)
         
         return (True, decoded_payload)
          
     def decode_ike(self, data):
+        self.ike_decoded_ok = False
         self.current_packet_received = data
         
         try:        
@@ -1779,6 +1786,12 @@ class swu():
                 else:
                     self.ike_decoded_ok = True
                     print('received decoded message')
+            # Empty *outer* payloads are not authenticated INFORMATIONAL messages.
+            # An SK envelope containing [] is a valid empty DPD and remains accepted.
+            if self.ike_decoded_ok and (not self.decoded_payload or any(
+                    item[0] == SK and not isinstance(item[1], list)
+                    for item in self.decoded_payload)):
+                self.ike_decoded_ok = False
         except:
             self.ike_decoded_ok = False
 
@@ -2894,7 +2907,11 @@ class swu():
         
         if self.ipv6_address_list != []:
             ipv6_address_prefix = ':'.join(self.ipv6_address_list[0].split(':')[0:4])
-            ipv6_address_identifier = 'fe80::' + ':'.join(self.ipv6_address_list[0].split(':')[4:8])
+            # Operate on the address bits: splitting a compressed IPv6 string can
+            # create an invalid triple colon and lose part of the interface ID.
+            identifier = int(ipaddress.IPv6Address(self.ipv6_address_list[0])) & ((1 << 64) - 1)
+            ipv6_address_identifier = str(ipaddress.IPv6Address(
+                int(ipaddress.IPv6Address('fe80::')) | identifier))
             self.exec_in_netns("ip -6 addr add " + ipv6_address_identifier + "/64 dev " + self.tun_device)
             # VoWiFi engine addition: the upstream code only puts a derived link-local on the
             # tun (the assigned global is never assigned). That is fine for a plain data APN

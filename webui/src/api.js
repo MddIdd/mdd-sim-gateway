@@ -142,6 +142,10 @@ export const api = {
   maintenance: (action) => j('POST', '/api/system/maintenance', { action }),
   restartProgress: () => j('GET', '/api/system/maintenance/restart-progress'),
   supportBundleUrl: '/api/diagnostics/support-bundle',
+  vowifiTrace: (id) => j('GET', `/api/instances/${encodeURIComponent(id)}/diagnostics/vowifi-trace`),
+  startVowifiTrace: (id) => j('POST', `/api/instances/${encodeURIComponent(id)}/diagnostics/vowifi-trace`, { minutes: 60 }),
+  stopVowifiTrace: (id) => j('DELETE', `/api/instances/${encodeURIComponent(id)}/diagnostics/vowifi-trace`),
+  markVowifiTrace: (id, result) => j('POST', `/api/instances/${encodeURIComponent(id)}/diagnostics/vowifi-trace/markers`, { result }),
 
   instances: () => j('GET', '/api/instances'),
   cards: () => j('GET', '/api/cards'),

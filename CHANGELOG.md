@@ -4,6 +4,27 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.14.2-rc1] - 2026-11-08
+
+Manual diagnostic prerelease; automatic update targets remain v1.14.0 and the latest
+stable release remains v1.14.1. The intermittent incoming-call issue is not confirmed fixed.
+
+### Added
+
+- Diagnostics → Support bundle can record one VoWiFi line for up to 60 minutes and mark
+  incoming-call failures, ringing, and answers. The opt-in recording survives container
+  rebuilds, expires automatically, and keeps existing automatic recovery enabled.
+  Bounded SIP metadata, Contact expiry, negotiated ports/SPIs, TCP/ESP header summaries,
+  and XFRM counters are exported with session-specific address/call labels. Authentication
+  headers, message bodies, audio, IPsec keys, raw packet captures, and private salts are excluded.
+
+### Fixed
+
+- Empty outer IKE envelopes and malformed payload lengths no longer reach connected-state
+  dispatch as valid messages; legitimate encrypted empty DPD messages remain accepted.
+- Compressed IPv6 tunnel addresses now derive a valid link-local address without losing
+  interface identifier bits. Neither fix is established as the incoming-call failure's cause.
+
 ## [1.14.1] - 2026-11-08
 
 The automatic update channels remain on v1.13.2 pending real-device acceptance.

@@ -79,6 +79,11 @@ rotate_asterisk_logs() {
 
 rotate_asterisk_logs
 
+# Optional expiring recorder. Its request and pseudonymized evidence live in /logs,
+# so one recording continues across supervised engine rebuilds. Idle sessions only
+# poll a small private request file; raw SIP logging is never enabled.
+python3 -u /usr/local/bin/vowifi_trace.py &
+
 # --- 1. Render configs from /config/instance.json --------------------------------
 log "rendering configs..."
 python3 /usr/local/bin/render.py || { log "render failed"; exit 1; }

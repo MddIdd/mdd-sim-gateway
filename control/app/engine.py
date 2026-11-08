@@ -529,7 +529,7 @@ def start(inst: dict, settings: dict, dev_mounts: bool = False, reason: str = "r
     if dev_mounts:
         eng = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "engine")
         for f in ["pin_keeper.py", "ami_usim.py", "render.py", "notify.py", "swu_ike.py",
-                  "log_capture.py"]:
+                  "log_capture.py", "vowifi_trace.py"]:
             volumes[os.path.join(eng, f)] = {"bind": f"/usr/local/bin/{f}", "mode": "ro"}
         volumes[os.path.join(eng, "entrypoint.sh")] = {"bind": "/entrypoint.sh", "mode": "ro"}
         volumes[os.path.join(eng, "templates")] = {"bind": "/opt/mdd-sim-gateway/templates", "mode": "ro"}

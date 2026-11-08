@@ -20,7 +20,7 @@ import docker
 import yaml
 
 from . import config as cfg
-from . import store
+from . import store, vowifi_trace
 
 
 _SECRET_KEYS = re.compile(
@@ -840,6 +840,25 @@ def support_bundle(status_documents: dict, log_lines: int = 500) -> bytes:
             coverage.update({"first_ts": first_ts, "last_ts": last_ts})
         candidates.append({"name": name, "text": text, "priority": priority,
                            "coverage": coverage})
+
+    # Metadata-only, explicitly enabled VoWiFi recordings. Never include their private
+    # request/salt, runtime marker, raw packet captures or Asterisk full/messages files.
+    for path in sorted(base.glob("*/logs/vowifi-trace/*.jsonl*")):
+        if path.name not in {name + suffix for name in ("sip", "snapshots", "packets", "marks")
+                             for suffix in (".jsonl", ".jsonl.1")} or path.is_symlink():
+            continue
+        try:
+            if path.stat().st_size > 2 * 1024 * 1024:
+                continue
+            source = path.read_text(errors="replace").splitlines()
+            eligible = [safe for line in source if (safe := vowifi_trace.export_line(line))]
+            selected = eligible[-log_lines:]
+            if selected:
+                iid = path.parents[2].name
+                add_candidate(path, f"logs/{iid}-vowifi-trace-{path.name}", source, eligible,
+                              selected, "\n".join(selected), 60)
+        except OSError:
+            continue
 
     # Events are filtered rather than generically exported: subscriber calls and message
     # bodies never enter the candidate set at all.

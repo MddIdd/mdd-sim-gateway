@@ -36,7 +36,7 @@ from . import (store, engine, status as status_mod, sim, card, notify_push, lpa,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
                sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd, mms,
                mms_media, mms_staging, mms_transport, softphone_ws, modem_ims, vowifi_support,
-               modem_voice, gate, line_offline, contacts, media, clients, authz)
+               modem_voice, gate, line_offline, contacts, media, clients, authz, vowifi_trace)
 from .version import VERSION
 from .ami import AmiClient
 from .runtime import RuntimeRegistry
@@ -5848,6 +5848,48 @@ async def api_support_bundle():
         (settings.get("maintenance") or {}).get("support_bundle_log_lines", 500))
     headers = {"Content-Disposition": 'attachment; filename="vowifi-support-redacted.zip"'}
     return Response(content, media_type="application/zip", headers=headers)
+
+
+# Opt-in recording is administrative; client/engine principals are denied by authz.
+def _trace_line(iid):
+    if not cfg.get_instance(iid):
+        raise HTTPException(404, "Line not found")
+    try:
+        vowifi_trace.directory(iid)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/instances/{iid}/diagnostics/vowifi-trace")
+async def api_vowifi_trace_status(iid: str):
+    _trace_line(iid)
+    return await asyncio.to_thread(vowifi_trace.status, iid)
+
+
+@app.post("/api/instances/{iid}/diagnostics/vowifi-trace")
+async def api_vowifi_trace_start(iid: str, body: dict):
+    _trace_line(iid)
+    if not await asyncio.to_thread(engine.is_running, iid):
+        raise HTTPException(409, "Start VoWiFi before recording")
+    try:
+        return await asyncio.to_thread(vowifi_trace.start, iid, body.get("minutes", 60))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.delete("/api/instances/{iid}/diagnostics/vowifi-trace")
+async def api_vowifi_trace_stop(iid: str):
+    _trace_line(iid)
+    return await asyncio.to_thread(vowifi_trace.stop, iid)
+
+
+@app.post("/api/instances/{iid}/diagnostics/vowifi-trace/markers")
+async def api_vowifi_trace_mark(iid: str, body: dict):
+    _trace_line(iid)
+    try:
+        return await asyncio.to_thread(vowifi_trace.mark, iid, body.get("result"))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 # ----------------------------- instances -----------------------------

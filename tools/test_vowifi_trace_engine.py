@@ -36,16 +36,26 @@ astlogdir = {root}/log
         (root / 'modules.conf').write_text('[modules]\nautoload=yes\n')
         (root / 'logger.conf').write_text('[logfiles]\nconsole=error\n')
         (root / 'pjsip.conf').write_text('[trace-test]\ntype=transport\nprotocol=tcp\nbind=127.0.0.1:15060\n')
-        process = subprocess.Popen(['asterisk', '-f', '-C', str(root/'asterisk.conf')],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                   env={**os.environ, 'MDD_RUNDIR': str(root/'run')})
+        config = str(root/'asterisk.conf')
+        startup = root/'startup.log'
+        with startup.open('w') as log:
+            process = subprocess.Popen(['asterisk', '-f', '-C', config],
+                                       stdout=log, stderr=subprocess.STDOUT,
+                                       env={**os.environ, 'MDD_RUNDIR': str(root/'run')})
         try:
             deadline = time.monotonic() + 25
             while True:
                 try:
+                    # The transport binds while res_pjsip is loading, before the logger
+                    # module necessarily registers its callbacks. Wait for the recorder.
+                    ready = subprocess.run(['asterisk', '-C', config, '-rx',
+                                            'module show like res_pjsip_logger.so'],
+                                           capture_output=True, text=True, timeout=1)
+                    if 'res_pjsip_logger.so' not in ready.stdout or 'Running' not in ready.stdout:
+                        raise OSError('Recorder module is not running yet')
                     connection = socket.create_connection(('127.0.0.1', 15060), timeout=1)
                     break
-                except OSError:
+                except (OSError, subprocess.TimeoutExpired):
                     if process.poll() is not None or time.monotonic() > deadline:
                         raise AssertionError('Asterisk test transport did not start')
                     time.sleep(0.2)
@@ -62,6 +72,7 @@ astlogdir = {root}/log
                            'Contact: <sip:private-contact@127.0.0.1:15061>;expires=42\r\n'
                            'Authorization: Digest username="private-auth", realm="private-realm", nonce="private-nonce", uri="sip:private-receiver@example.invalid", response="private-response"\r\n'
                            'Security-Verify: ipsec-3gpp;port-c=42001;port-s=52001;spi-c=4660;spi-s=22136\r\n'
+                           'Content-Type: text/plain\r\n'
                            f'Content-Length: {len(body)}\r\n\r\n{body}')
                 connection.sendall(message.encode())
                 try:
@@ -97,6 +108,10 @@ astlogdir = {root}/log
             assert len(path.read_text().splitlines())==count, 'Expired marker continued recording'
             connection.close()
             print('Native recorder: TCP receive/transmit, correlation, Contact expiry, security ports/SPIs, source anonymization and expiry passed.')
+        except BaseException:
+            print('Asterisk process status:', process.poll(), flush=True)
+            print(startup.read_text(errors='replace')[-4000:], flush=True)
+            raise
         finally:
             process.terminate()
             try:

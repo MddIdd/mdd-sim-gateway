@@ -45,7 +45,7 @@ RUN dnf -y --refresh --setopt=fastestmirror=True --setopt=max_parallel_downloads
 # distro-provided libpcsclite pulled in by python3-pyscard so pyscard (loads libpcsclite.so.1 at
 # runtime) uses the pinned version and talks the same protocol as the host pcscd.
 RUN cd /tmp && \
-    wget -qO pcsc.tar.gz "https://github.com/LudovicRousseau/PCSC/archive/refs/tags/${PCSC_VERSION}.tar.gz" && \
+    wget -qO pcsc.tar.gz "https://codeload.github.com/LudovicRousseau/PCSC/tar.gz/refs/tags/${PCSC_VERSION}" && \
     echo "${PCSC_SHA256}  pcsc.tar.gz" | sha256sum -c - && \
     tar xf pcsc.tar.gz && cd "PCSC-${PCSC_VERSION}" && \
     meson setup builddir --prefix=/usr -Dpolkit=false && \

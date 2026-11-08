@@ -20,6 +20,9 @@ stable release remains v1.14.1. The intermittent incoming-call issue is not conf
 
 ### Fixed
 
+- PCSC and lpac build inputs now use the official codeload URLs directly, avoiding
+  the failing GitHub archive redirect while retaining the exact source archive checksums.
+
 - Control image builds obtain Compose from Docker's digest-pinned official image,
   avoiding failures at the GitHub binary download endpoint. The version and both architecture
   checksums are unchanged and are still verified during the build.

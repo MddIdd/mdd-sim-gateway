@@ -51,7 +51,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libcurl4-openssl-dev libpcsclite-dev patch \
         wget ca-certificates meson ninja-build flex perl \
     && cd /tmp \
-    && wget -qO pcsc.tar.gz "https://github.com/LudovicRousseau/PCSC/archive/refs/tags/${PCSC_VERSION}.tar.gz" \
+    && wget -qO pcsc.tar.gz "https://codeload.github.com/LudovicRousseau/PCSC/tar.gz/refs/tags/${PCSC_VERSION}" \
     && echo "${PCSC_SHA256}  pcsc.tar.gz" | sha256sum -c - \
     && tar xf pcsc.tar.gz && cd "PCSC-${PCSC_VERSION}" \
     && meson setup builddir --prefix=/usr -Dpolkit=false -Dlibsystemd=false -Dlibudev=false \
@@ -66,7 +66,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /tmp/pcsc.tar.gz "/tmp/PCSC-${PCSC_VERSION}" \
     && cd /tmp \
     && wget -qO lpac.tar.gz \
-       "https://github.com/estkme-group/lpac/archive/${LPAC_COMMIT}.tar.gz" \
+       "https://codeload.github.com/estkme-group/lpac/tar.gz/${LPAC_COMMIT}" \
     && echo "${LPAC_SHA256}  lpac.tar.gz" | sha256sum -c - \
     && tar xf lpac.tar.gz && cd "lpac-${LPAC_COMMIT}" \
     && patch -p1 < /tmp/mdd-lpac.patch \

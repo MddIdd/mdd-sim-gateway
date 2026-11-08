@@ -4593,13 +4593,14 @@ async def _unified_devices() -> list[dict]:
                                                  host_cell.get("radio_enabled",
                                                                host_cell.get("powered"))))
                 registered = registration in {"home", "roaming", "registered"}
-                if not cell_desired and host_cell.get("data_active"):
+                cell_state = str(host_cell.get("state") or "").lower()
+                if not cell_desired and (host_cell.get("data_active") or cell_state == "disconnecting"):
                     cell_actual = "stopping"
                 elif not cell_desired:
                     cell_actual = "off"
                 elif flight_desired:
                     cell_actual, cell_reason = "off", "Flight mode is enabled"
-                elif host_cell.get("state") == "failed":
+                elif cell_state == "failed":
                     # ModemManager gave up on the modem; the orchestrator reboots it when
                     # that can help. VoWiFi runs through the bridge regardless.
                     failure = host_cell.get("failure") or {}
@@ -4616,8 +4617,15 @@ async def _unified_devices() -> list[dict]:
                         "ModemManager could not start this modem. It is being rebooted.")
                 elif radio_on and registered and host_cell.get("data_active"):
                     cell_actual = "on"
-                elif radio_on:
+                elif radio_on and cell_state in {"enabling", "connecting"}:
                     cell_actual = "starting"
+                elif radio_on:
+                    cell_actual = "degraded"
+                    cell_reason = (
+                        "Cellular data bearer is not connected"
+                        if registered else
+                        f"Waiting for cellular registration ({registration})"
+                    )
                 else:
                     cell_actual, cell_reason = "error", "Cellular radio is not enabled"
                 cellular_view = {

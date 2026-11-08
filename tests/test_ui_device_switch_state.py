@@ -19,6 +19,32 @@ class CapabilitySwitchStateTests(unittest.TestCase):
             self.assertIsNotNone(key, switch)
             self.assertEqual(key.group(1), kind.group(1), switch)
 
+    def test_enabled_capability_can_be_disabled_during_starting_or_stopping_when_idle(self):
+        unavailable_decl = "const unavailable = !c.available"
+        can_disable_decl = (
+            "const canDisableWhileStarting = !submitting && c.desired && "
+            "(c.actual === 'starting' || c.actual === 'stopping')"
+        )
+        switch_disabled_decl = (
+            "const switchDisabled = (pending && !canDisableWhileStarting) || unavailable"
+        )
+        self.assertIn(unavailable_decl, SOURCE)
+        self.assertIn(can_disable_decl, SOURCE)
+        self.assertIn(switch_disabled_decl, SOURCE)
+        self.assertLess(
+            SOURCE.index(unavailable_decl),
+            SOURCE.index(switch_disabled_decl),
+            "unavailable must be declared before switchDisabled to avoid a TDZ ReferenceError",
+        )
+        self.assertIn("disabled={switchDisabled}", SOURCE)
+
+    def test_registration_reason_uses_translatable_template(self):
+        self.assertIn(
+            "t('Waiting for cellular registration ({registration})', "
+            "{ registration: reasonMatch[1] })",
+            SOURCE,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

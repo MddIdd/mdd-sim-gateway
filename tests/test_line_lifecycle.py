@@ -766,6 +766,52 @@ class OfflineDeviceStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(device["capabilities"]["vowifi"]["actual"], "off")
         self.assertFalse(device["capabilities"]["vowifi"]["available"])
 
+    async def test_unattached_cellular_reports_degraded_without_disrupting_registered_vowifi(self):
+        desired = {"devices": {"modem-a": {
+            "cellular_enabled": True, "vowifi_enabled": True, "flight_mode": False}}}
+        line = {"id": "2", "name": "1psim US", "iccid": "8901000000000000001",
+                "mcc": "310", "mnc": "240", "enabled": True}
+
+        async def unified_for(cellular):
+            observed = {"devices": {"modem-a": {
+                "present": True, "transitioning": False,
+                "actual": {"cellular_radio_enabled": True, "vowifi_bridge_active": True},
+                "cellular": {"available": True, "sim_iccid": "8901000000000000001",
+                             "radio_enabled": True, **cellular}}}}
+            with patch.object(main, "_device_sources", return_value=(desired, observed, {})), \
+                    patch.object(main, "_device_identities", return_value={}), \
+                    patch.object(main.hub, "cards_list", return_value=[]), \
+                    patch.object(main.cfg, "list_instances", return_value=[line]), \
+                    patch.object(main.device_state, "native_reader_devices", return_value={}), \
+                    patch.object(main.device_state, "hardware", return_value={}), \
+                    patch.object(main.cfg, "get_settings", return_value={
+                        "proxy": {"exits": {}}, "rekey": {"minutes": 30}}), \
+                    patch.object(main, "_cached_line_status", return_value={"state": "OK"}), \
+                    patch.object(main.egress, "status", return_value={"exits": {}}), \
+                    patch.object(main.egress, "line_country", return_value="us"), \
+                    patch.object(main.egress, "country_for_mcc", return_value="US"):
+                return (await main._unified_devices())[0]["capabilities"]
+
+        # Searching or denied without a bearer: cellular is degraded, registered VoWiFi stays on.
+        for state, reg in (("searching", "searching"), ("enabled", "denied")):
+            caps = await unified_for({"state": state, "registration": reg, "data_active": False})
+            self.assertEqual(caps["cellular"]["actual"], "degraded")
+            self.assertEqual(caps["cellular"]["reason"],
+                             f"Waiting for cellular registration ({reg})")
+            self.assertEqual(caps["vowifi"]["actual"], "on")
+
+        # Registered without an active data bearer: cellular is degraded with bearer reason.
+        caps = await unified_for({"state": "registered", "registration": "roaming",
+                                  "data_active": False})
+        self.assertEqual(caps["cellular"]["actual"], "degraded")
+        self.assertEqual(caps["cellular"]["reason"], "Cellular data bearer is not connected")
+        self.assertEqual(caps["vowifi"]["actual"], "on")
+
+        # Genuine connecting operation: cellular reports starting.
+        caps = await unified_for({"state": "connecting", "registration": "home",
+                                  "data_active": False})
+        self.assertEqual(caps["cellular"]["actual"], "starting")
+
 
 if __name__ == "__main__":
     unittest.main()

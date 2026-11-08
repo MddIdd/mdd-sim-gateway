@@ -68,6 +68,11 @@ class BackendStringCoverageTests(unittest.TestCase):
         self.assertTrue(translated("VoWiFi is enabled but no configured line is running",
                                    zh_block()))
 
+    def test_the_degraded_cellular_reasons_are_translated(self):
+        block = zh_block()
+        self.assertTrue(translated("Cellular data bearer is not connected", block))
+        self.assertTrue(translated("Waiting for cellular registration ({registration})", block))
+
     def test_every_modem_voice_reason_is_translated(self):
         from control.app import modem_voice
         block = zh_block()

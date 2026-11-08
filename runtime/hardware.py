@@ -1384,6 +1384,11 @@ print("OK")
                 "available": False, "registration": "unknown", "data_active": False}
             target_data = bool(wanted.get("cellular_enabled")) and not bool(
                 wanted.get("flight_mode"))
+            cell_state = str(cellular.get("state") or "").lower()
+            data_transitioning = (
+                (target_data and not cellular.get("data_active") and cell_state in {"enabling", "connecting"})
+                or (not target_data and (bool(cellular.get("data_active")) or cell_state == "disconnecting"))
+            )
             assignment = {
                 "name": modem.get("name") or DEFAULT_MODEM_NAME, "tty": modem["tty"],
                 "usb_path": modem["usb_path"], "vid": modem["vid"], "pid": modem["pid"],
@@ -1410,8 +1415,7 @@ print("OK")
                     "cellular_supported": True,
                 },
                 "cellular": cellular,
-                "transitioning": ((not ready and not bridge_error) or target_data != bool(
-                    cellular.get("data_active"))),
+                "transitioning": ((not ready and not bridge_error) or data_transitioning),
                 "error": error,
             }
         now = int(time.time())

@@ -4,7 +4,27 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.14.1] - 2026-11-08
+
+The automatic update channels remain on v1.13.2 pending real-device acceptance.
+
 ### Fixed
+
+- Country exits now derive a valid ePDG hostname for zero-valued MNCs such as `00`,
+  `000`, or integer `0`. Missing values, non-ASCII digits, invalid lengths, and an
+  all-zero MCC are rejected without discarding a legitimate zero-valued MNC.
+
+- Full-container eSIM recovery can power-cycle the selected modem's UICC slot via
+  QMI UIM when a warm modem reset leaves the previous profile cached. Unavailable
+  or failed QMI operations immediately fall back to the scoped ModemManager reset;
+  a timed-out cycle gets a bounded power-on recovery attempt. Both deployment modes
+  rebuild a bridge whose ModemManager object path changes after SIM re-enumeration.
+
+- A SIM without usable cellular data no longer keeps every device capability in a
+  permanent transition. Unattached cellular service reports a degraded state while
+  registered VoWiFi remains usable. Enabled capabilities can be switched off when
+  starting or stopping and no API request is in flight; active bearer teardown still
+  waits for completion. New status reasons have Chinese translations.
 
 - Updated the Vite build dependency to 6.4.5 so the WebUI passes the security audit.
 

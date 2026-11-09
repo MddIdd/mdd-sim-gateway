@@ -86,6 +86,11 @@ class BackendStringCoverageTests(unittest.TestCase):
                    if not translated(text, block)]
         self.assertEqual(missing, [], f"untranslated status labels: {missing}")
 
+    def test_proxy_health_warning_and_label_are_translated(self):
+        from control.app import proxy_health
+        for text in (proxy_health.LABEL, proxy_health.REASON):
+            self.assertTrue(translated(text, zh_block()), text)
+
     def test_the_timeline_can_label_every_reason_the_backend_records(self):
         # An unmapped code renders as the raw code, because reasonLabel falls back to it.
         known = js_map(HISTORY.read_text(encoding="utf-8"), "REASON_LABEL")

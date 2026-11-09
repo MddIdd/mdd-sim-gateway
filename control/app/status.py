@@ -22,7 +22,7 @@ LABELS = {
     "EPDG_UNRESOLVED": "Cannot resolve ePDG",
     "TUNNEL_DOWN": "Establishing VoWiFi tunnel",
     "REGISTERING": "Registering to IMS",
-    "OK": "Working",
+    "OK": "IMS registered",
     "ERROR": "Failed",
 }
 
@@ -55,7 +55,7 @@ REASONS = {
     "reg_rejected": "Can't register to the carrier's IMS (authentication or provisioning issue).",
     "reg_unanswered": "The carrier's IMS stopped answering registration — usually a stale "
                       "IPsec session; rebuilding the tunnel clears it.",
-    "ok": "Working — connected to the carrier over Wi-Fi.",
+    "ok": "IMS registration is active.",
 }
 
 

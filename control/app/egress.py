@@ -26,7 +26,7 @@ from copy import deepcopy
 from urllib.parse import unquote, urlsplit
 
 from . import config as cfg
-from .egress_contract import current_status, socks_endpoint
+from .egress_contract import current_status, socks_endpoint, proxy_fingerprint
 
 _HERE = os.path.dirname(__file__)
 _MCC_PATH = os.path.join(_HERE, "mcc_country.json")
@@ -650,6 +650,47 @@ def _ensure_socks_exit(country, proxy, timeout):
                 reason = "container country exit is not ready"
         time.sleep(0.4)
     raise EgressError(f"{country.upper()} exit unavailable: {reason}")
+
+
+def runtime_probe_context(inst: dict, settings: dict) -> dict | None:
+    """Identify the actual exit for advisory monitoring, including manual/single nodes.
+
+    None means no proxy is configured. A context without an endpoint means that the
+    current route is not yet verifiable; it must never inherit an old node's verdict.
+    No failover eligibility rules belong here: monitoring does not change selection.
+    """
+    proxy = settings.get("proxy") or {}
+    country = line_country(inst)
+    selected_cfg = (proxy.get("exits") or {}).get(country) or {}
+    if (not proxy.get("enabled") or not selected_cfg.get("enabled")
+            or selected_cfg.get("mode") == "direct"):
+        return None
+    fingerprint = proxy_fingerprint(proxy)
+    context = {"country": country, "config_fingerprint": fingerprint,
+               "transport": transport()}
+    document = status()
+    if transport() == "socks5":
+        fresh = current_status(document, proxy, time.time())
+    else:
+        stamp = document.get("updated_at")
+        fresh = (document.get("enabled") is True
+                 and document.get("config_fingerprint") == fingerprint
+                 and type(stamp) in (int, float) and -5 <= time.time() - stamp <= 60)
+    if not fresh:
+        return context
+    selected = (document.get("exits") or {}).get(country) or {}
+    if (selected.get("ready") is not True or selected.get("mode") == "direct"
+            or (transport() == "socks5" and selected.get("transport") != "socks5")):
+        return context
+    # A selector that has not reported its active node is not testable yet.
+    if selected.get("mode") == "subscription" and not selected.get("node"):
+        return context
+    try:
+        socks_endpoint(selected)
+    except ValueError:
+        return context
+    return {**context, **{key: selected.get(key) for key in
+                         ("proxy_host", "proxy_port", "node", "node_tag")}}
 
 
 def exit_probe_context(inst: dict, settings: dict) -> dict | None:

@@ -40,6 +40,7 @@ function starCount(value) {
 
 function lineCapabilityState(status, desired = true) {
   const state = String(status?.state || '').toUpperCase()
+  if (desired && state === 'OK' && status?.proxy_health?.state === 'failed') return 'degraded'
   if (state === 'OK') return 'on'
   if (state === 'STOPPED') return desired ? 'degraded' : 'off'
   if (['ERROR', 'NO_CARD', 'PIN_PROBLEM'].includes(state)) return 'error'

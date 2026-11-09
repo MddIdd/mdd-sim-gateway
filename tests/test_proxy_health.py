@@ -92,7 +92,7 @@ class ProxyMonitorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(first["state"], "suspect")
             self.assertEqual((await self.refresh(force=True))["state"], "suspect")
             self.assertEqual(probe.call_count, 1)
-            self.age(61)
+            self.age(31)
             self.assertEqual((await self.refresh())["state"], "failed")
         self.age(11)
         with patch.object(egress, "test_udp_proxy", return_value=12):
@@ -115,6 +115,39 @@ class ProxyMonitorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(probe.call_count, 1)
         self.assertEqual(a["state"], "passed")
         self.assertEqual(a, b)
+
+    async def test_successful_exits_wait_ten_minutes_and_stay_fresh_between_checks(self):
+        with patch.object(egress, "test_udp_proxy", return_value=12) as probe:
+            await self.refresh()
+            self.age(599)
+            self.assertEqual(self.monitor.snapshot(self.context)["state"], "passed")
+            await self.refresh()
+            self.assertEqual(probe.call_count, 1)
+            self.age(2)
+            self.assertEqual(self.monitor.snapshot(self.context)["state"], "passed")
+            await self.refresh()
+            self.assertEqual(probe.call_count, 2)
+            self.age(721)
+            self.assertEqual(self.monitor.snapshot(self.context)["state"], "unknown")
+
+    async def test_first_failure_confirms_in_thirty_seconds_then_checks_recovery_each_minute(self):
+        with patch.object(egress, "test_udp_proxy", side_effect=TimeoutError()) as probe:
+            self.assertEqual((await self.refresh())["state"], "suspect")
+            self.age(29)
+            await self.refresh()
+            self.assertEqual(probe.call_count, 1)
+            self.age(2)
+            self.assertEqual((await self.refresh())["state"], "failed")
+            self.assertEqual(probe.call_count, 2)
+            self.age(59)
+            await self.refresh()
+            self.assertEqual(probe.call_count, 2)
+        self.age(2)
+        with patch.object(egress, "test_udp_proxy", return_value=12) as probe:
+            self.assertEqual((await self.refresh())["state"], "passed")
+            self.age(61)
+            await self.refresh()
+            self.assertEqual(probe.call_count, 1)
 
     async def test_switch_during_probe_discards_both_success_and_failure(self):
         for failure in (False, True):

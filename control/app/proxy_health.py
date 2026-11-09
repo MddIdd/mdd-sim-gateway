@@ -7,9 +7,12 @@ import time
 
 from . import egress
 
-INTERVAL = 60
+INTERVAL = 600
+CONFIRM_INTERVAL = 30
+FAILURE_INTERVAL = 60
 MIN_RECHECK = 10
-MAX_AGE = 180
+MAX_AGE = INTERVAL + 120
+UNHEALTHY_MAX_AGE = 180
 FAILURES = 2
 LABEL = "Proxy UDP connectivity problem"
 REASON = ("The current proxy repeatedly failed UDP connectivity checks. Incoming and outgoing "
@@ -26,6 +29,10 @@ class Monitor:
     def key(context):
         return json.dumps(context, sort_keys=True, separators=(",", ":"))
 
+    @staticmethod
+    def max_age(result):
+        return MAX_AGE if result.get("state") == "passed" else UNHEALTHY_MAX_AGE
+
     def snapshot(self, context):
         if context is None:
             return None
@@ -34,7 +41,7 @@ class Monitor:
         value = {"state": "unknown", "checked_at": None}
         if result:
             value = {name: result[name] for name in ("state", "checked_at")}
-            if time.monotonic() - result["completed"] > MAX_AGE:
+            if time.monotonic() - result["completed"] > self.max_age(result):
                 value["state"] = "unknown"
         # Preserve an established warning while its recheck runs.
         if key in self.tasks and value["state"] == "unknown":
@@ -48,8 +55,11 @@ class Monitor:
         if key in self.tasks:
             return await asyncio.shield(self.tasks[key])
         previous = self.results.get(key)
+        state = (previous or {}).get("state")
+        interval = (INTERVAL if state == "passed" else
+                    CONFIRM_INTERVAL if state == "suspect" else FAILURE_INTERVAL)
         if previous and time.monotonic() - previous["completed"] < (
-                MIN_RECHECK if force else INTERVAL):
+                MIN_RECHECK if force else interval):
             return self.snapshot(context)
         task = asyncio.create_task(self._probe(context, current_context))
         self.tasks[key] = task
@@ -76,7 +86,7 @@ class Monitor:
             if current_context() != context:
                 return None
             previous = self.results.get(key) or {}
-            recent = time.monotonic() - previous.get("completed", float("-inf")) <= MAX_AGE
+            recent = time.monotonic() - previous.get("completed", float("-inf")) <= self.max_age(previous)
             failures = (previous.get("failures", 0) if recent else 0) + 1 if verdict == "failed" else 0
             state = ("failed" if failures >= FAILURES else "suspect") if failures else verdict
             self.results[key] = {"state": state, "failures": failures,

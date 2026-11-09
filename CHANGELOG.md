@@ -4,6 +4,22 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.14.2-rc2] - 2026-11-09
+
+Manual diagnostic prerelease; automatic update targets remain v1.14.0 and the latest
+stable release remains v1.14.1. Proxy warnings do not establish the incoming-call root cause.
+
+### Fixed
+
+- Registered VoWiFi lines now monitor the current proxy's UDP connectivity in the
+  background every ten minutes when healthy, including manually selected and single-node
+  exits. A failed check is confirmed after thirty seconds; warnings are rechecked every
+  minute until recovery. Repeated failed checks show a proxy warning with the last
+  check time and a recheck button, while preserving
+  the IMS registration state. Changing exits discards old results, and successful checks
+  clear the warning. These advisory checks do not restart lines or switch nodes;
+  passing a public UDP check does not establish carrier call availability.
+
 ## [1.14.2-rc1] - 2026-11-08
 
 Manual diagnostic prerelease; automatic update targets remain v1.14.0 and the latest

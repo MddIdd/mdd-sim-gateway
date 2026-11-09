@@ -5,6 +5,7 @@ import SimConfig from './SimConfig.jsx'
 import Logs from './Logs.jsx'
 import VowifiHistory from './VowifiHistory.jsx'
 import VowifiTrace from './VowifiTrace.jsx'
+import ProxyHealth from './ProxyHealth.jsx'
 
 const CAP_STATES = ['off', 'starting', 'on', 'stopping', 'degraded', 'error', 'unsupported']
 
@@ -46,7 +47,7 @@ function DeviceStatusBadges({ device }) {
     ['vowifi', capabilityBadgeState(device, 'vowifi', vowifi), 'VoWiFi'],
   ]
   return <span className="u-badge-row">{badges.map(([key, state, label]) =>
-    <Badge key={key} state={state}>{`${label} · ${t(`cap.${state}`)}`}</Badge>)}</span>
+    <Badge key={key} state={state}>{`${label} · ${t(key === 'vowifi' && device.status?.state === 'OK' && device.status?.proxy_health?.state === 'failed' ? 'Proxy UDP connectivity problem' : `cap.${state}`)}`}</Badge>)}</span>
 }
 
 function exitNodeLabel(device, t) {
@@ -117,7 +118,7 @@ function LineActivity({ device, compact = false }) {
   const retryMax = Number(activity.retry_max || status.retry?.max || 0)
   return <div className={`u-line-activity ${compact ? 'compact' : ''}`}>
     <div className="u-line-activity-head"><b>{t('Backend activity')}</b><Badge state={actual}>{t(status.label || `cap.${actual}`)}</Badge></div>
-    {!compact && status.reason && status.state !== 'OK' && <p className="u-line-reason"><b>{t('Reason')}:</b> {t(status.reason)}</p>}
+    {!compact && status.reason && (status.state !== 'OK' || status.proxy_health?.state === 'failed') && <p className="u-line-reason"><b>{t('Reason')}:</b> {t(status.reason)}</p>}
     <div className="u-line-step"><span>{t('Now')}</span><b>{t(current)}</b></div>
     {next && <div className="u-line-step"><span>{t('Next')}</span><b>{t(next, { seconds: activity.seconds || status.automatic_retry_in || 0 })}</b></div>}
     {retryMax > 0 && status.state !== 'OK' && <div className="u-line-retry">
@@ -144,7 +145,8 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
   const canDisableWhileStarting = !submitting && c.desired && (c.actual === 'starting' || c.actual === 'stopping')
   const switchDisabled = (pending && !canDisableWhileStarting) || unavailable
   const title = kind === 'cellular' ? t('4G network') : kind === 'flight' ? t('Flight mode') : t('VoWiFi / WiFi Calling')
-  const canRetry = kind === 'vowifi' && c.desired && ['off', 'degraded', 'error'].includes(c.actual) && !unavailable
+  const proxyWarning = kind === 'vowifi' && device.status?.state === 'OK' && device.status?.proxy_health?.state === 'failed'
+  const canRetry = kind === 'vowifi' && c.desired && ['off', 'degraded', 'error'].includes(c.actual) && !unavailable && !proxyWarning
   const change = async (next, retry = false) => {
     const other = capability(device, kind === 'cellular' ? 'vowifi' : 'cellular')
     const impact = retry
@@ -206,7 +208,7 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
     ? t('Waiting for cellular registration ({registration})', { registration: reasonMatch[1] })
     : (c.reason ? t(c.reason) : t(`cap.help.${c.actual}`))
   const detail = c.actual === 'on'
-    ? (kind === 'vowifi' ? t('Working — connected to the carrier over Wi-Fi.')
+    ? (kind === 'vowifi' ? t('IMS registration is active.')
       : kind === 'cellular' ? [t('Mobile data connected'), cellular.operator, cellular.ip].filter(Boolean).join(' · ')
       : t('cap.help.on'))
     : unsupportedReason ? t(unsupportedReason)
@@ -236,6 +238,7 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
   }
   return <div className={`u-capability ${compact ? 'compact' : ''}`}>
     <div><b>{title}</b><div className="u-cap-detail">{detail}</div>
+      {kind === 'vowifi' && <ProxyHealth device={device} onChanged={onChanged} showToast={showToast} />}
       {!!setupMissing.length && <div className="u-cap-setup">
         <span>{t('Missing information')}: {setupMissing.map(key => t(`setup.field.${key}`)).join(t('list separator'))}</span>
         {needsCardRead && <button className="btn btn-ghost" disabled={rereading} onClick={rereadSim}>{t(rereading ? 'Reading…' : 'Read SIM again')}</button>}
@@ -243,7 +246,7 @@ export function CapabilitySwitch({ device, kind, onChanged, showToast, compact =
         {onSetup && needsSim && <button className="btn btn-ghost" onClick={() => onSetup('sim')}>{t('Complete SIM details')}</button>}
       </div>}
     </div>
-    <div className="u-cap-actions">{canRetry && <button className="btn btn-ghost" disabled={submitting} onClick={() => change(true, true)}>{t(unsupported ? 'Try again' : 'Restart line')}</button>}{unsupported && !c.desired && !unavailable && <button className="btn btn-ghost" disabled={pending} onClick={() => change(true)}>{t('Try anyway')}</button>}<Badge state={badgeState}>{device.present === false ? t('Offline') : null}</Badge><button className={`u-switch ${displayedDesired ? 'on' : ''}`} role="switch" aria-checked={displayedDesired}
+    <div className="u-cap-actions">{canRetry && <button className="btn btn-ghost" disabled={submitting} onClick={() => change(true, true)}>{t(unsupported ? 'Try again' : 'Restart line')}</button>}{unsupported && !c.desired && !unavailable && <button className="btn btn-ghost" disabled={pending} onClick={() => change(true)}>{t('Try anyway')}</button>}<Badge state={badgeState}>{device.present === false ? t('Offline') : proxyWarning ? t('Proxy UDP connectivity problem') : null}</Badge><button className={`u-switch ${displayedDesired ? 'on' : ''}`} role="switch" aria-checked={displayedDesired}
       aria-label={title} disabled={switchDisabled} onClick={toggle}><span /></button></div>
   </div>
 }

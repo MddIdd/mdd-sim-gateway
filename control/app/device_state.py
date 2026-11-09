@@ -62,6 +62,8 @@ def native_vowifi_capability(desired: bool, running: bool, line_status: dict | N
                 "reason": "VoWiFi is configured but the line is not running"}
     raw = str((line_status or {}).get("state") or (line_status or {}).get("label") or "").lower()
     if raw in {"ok", "working", "registered"}:
+        if ((line_status or {}).get("proxy_health") or {}).get("state") == "failed":
+            return {"desired": True, "actual": "degraded", "reason": line_status.get("reason", "")}
         return {"desired": True, "actual": "on", "reason": ""}
     if raw in {"error", "failed", "stopped"}:
         return {"desired": True, "actual": "error",

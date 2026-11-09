@@ -2911,6 +2911,8 @@ class Orchestrator:
 
     def reconcile_proxy(self, desired: dict):
         proxy = desired.get("proxy") or {}
+        fingerprint = hashlib.sha256(json.dumps(
+            proxy, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
         lines_status, wanted, owners = {}, set(), {}
         exits_state = {}
         try:
@@ -2922,6 +2924,7 @@ class Orchestrator:
                 for line in desired.get("lines") or []:
                     lines_status[str(line.get("id"))] = {"ready": True, "mode": "direct"}
                 atomic_json(self.status_path, {"updated_at": int(time.time()), "enabled": False,
+                                               "config_fingerprint": fingerprint,
                                                "exits": {}, "lines": lines_status})
                 return
             config, exits_state = self.build_proxy_config(proxy)
@@ -2992,6 +2995,7 @@ class Orchestrator:
                 if state.get("mode") != "direct" and state.get("ready"):
                     exits_state[country] = {**state, "ready": False, "error": str(exc)}
         atomic_json(self.status_path, {"updated_at": int(time.time()), "enabled": True,
+                                       "config_fingerprint": fingerprint,
                                        "exits": exits_state, "lines": lines_status})
 
     def usb_modems(self, hardware: dict) -> list[dict]:

@@ -120,6 +120,7 @@ export const api = {
   settings: () => j('GET', '/api/settings'),
   saveSettings: (patch) => j('PUT', '/api/settings', patch),
   egressStatus: () => j('GET', '/api/egress/status'),
+  checkProxyHealth: (id) => j('POST', `/api/instances/${encodeURIComponent(id)}/proxy-health/check`, {}),
   testEgress: (country) => j('POST', `/api/egress/${encodeURIComponent(country)}/test`, {}),
   testProxyProfile: (profileId, profile) => j('POST', `/api/egress/profile/${encodeURIComponent(profileId)}/test`, profile || {}),
   refreshEgress: () => j('POST', '/api/egress/refresh', {}),

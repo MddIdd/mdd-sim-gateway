@@ -3,6 +3,16 @@ import React, { createContext, useContext, useEffect, useMemo, useState } from '
 const STORAGE_KEY = 'mdd-language'
 
 const zh = {
+  'IMS registration is active.': 'IMS 已注册。',
+  'Proxy status awaiting check': '代理状态待检测',
+  'Checking proxy UDP connectivity…': '正在检测代理 UDP 连通性…',
+  'Proxy UDP check failed; confirming…': '代理 UDP 检测未通过，正在复核…',
+  'Proxy UDP check passed': '代理 UDP 检测通过',
+  'Proxy UDP connectivity problem': '代理 UDP 连通性异常',
+  'The current proxy repeatedly failed UDP connectivity checks. Incoming and outgoing calls may fail. Check or change the proxy.': '当前代理连续未通过 UDP 连通性检测，呼入和呼出可能受影响，请检查或更换代理。',
+  'Check or change the proxy, then run the connectivity check again.': '请检查或更换代理，然后重新检测连通性。',
+  'Proxy check could not be completed. Try again shortly.': '代理检测未能完成，请稍后重试。',
+  'Check again': '重新检测',
   'Back to conversations': '返回会话列表',
   '{count} unread': '{count} 条未读', 'Mark all read': '全部标为已读',
   Contacts: '通讯录', 'Add contact': '添加联系人', 'Contact added': '联系人已添加', 'Contact removed': '联系人已删除',

@@ -36,7 +36,8 @@ from . import (store, engine, status as status_mod, sim, card, notify_push, lpa,
                estkme, usbreader, egress, device_state, operations, update_check, cellular_sms,
                sysinfo, failover, carrier_id, allowance, cellular_call, sms_pdu, ussd, mms,
                mms_media, mms_staging, mms_transport, softphone_ws, modem_ims, vowifi_support,
-               modem_voice, gate, line_offline, contacts, media, clients, authz, vowifi_trace)
+               modem_voice, gate, line_offline, contacts, media, clients, authz, vowifi_trace,
+               proxy_health)
 from .version import VERSION
 from .ami import AmiClient
 from .runtime import RuntimeRegistry
@@ -468,6 +469,7 @@ class Hub:
         self.reg_unanswered_recovery_at: dict[str, float] = {}
         self.status_cache: dict[str, dict] = {}  # background sampled; HTTP never probes devices
         self.status_sampled_at: dict[str, float] = {}  # last authoritative status observation
+        self.proxy_health = proxy_health.Monitor()
         self._pushed_calls: set[int] = set() # call-record ids already push-notified (dedupe)
         # Separate from _pushed_calls: one call legitimately raises BOTH an incoming_call (on
         # the first INVITE) and a missed_call (when it ends unanswered), so they cannot share
@@ -1734,6 +1736,44 @@ def _line_media_state(iid: str) -> str:
     return str(_line_media_report(iid).get("state") or "starting")
 
 
+def _proxy_context(iid: str):
+    inst = cfg.get_instance(str(iid))
+    if not inst or not inst.get("enabled", True):
+        return None
+    return egress.runtime_probe_context(inst, cfg.get_settings())
+
+
+def _with_proxy_health(inst: dict, st: dict) -> dict:
+    context = _proxy_context(str(inst["id"])) if st.get("state") != "STOPPED" else None
+    return proxy_health.annotate(st, hub.proxy_health.snapshot(context))
+
+
+async def proxy_health_poller():
+    """Probe shared active exits off the status/HTTP paths. Results are advisory only."""
+    while True:
+        try:
+            contexts = {}
+            for inst in cfg.list_instances():
+                iid = str(inst["id"])
+                if (not inst.get("enabled", True) or inst.get("provisioning_state") == "draft"
+                        or (hub.status_cache.get(iid) or {}).get("state") in (None, "STOPPED")):
+                    continue
+                context = _proxy_context(iid)
+                if context is not None:
+                    contexts.setdefault(hub.proxy_health.key(context), (iid, context))
+            hub.proxy_health.prune(context for _, context in contexts.values())
+            if contexts:
+                before = [hub.proxy_health.snapshot(context) for _, context in contexts.values()]
+                await asyncio.gather(*(hub.proxy_health.refresh(
+                    context, lambda iid=iid: _proxy_context(iid))
+                    for iid, context in contexts.values()))
+                if before != [hub.proxy_health.snapshot(context) for _, context in contexts.values()]:
+                    hub.status_wakeup.set()
+        except Exception as exc:
+            log.debug("proxy health collector failed: %s", type(exc).__name__)
+        await asyncio.sleep(5)
+
+
 async def status_poller():
     last_prune = 0.0
     while True:
@@ -2613,8 +2653,8 @@ async def _poll_instance_status(inst: dict) -> None:
             asyncio.create_task(_verify_ims_msisdn(iid, inst))
         if st["state"] == "OK":
             asyncio.create_task(_maybe_run_keepalive(iid, inst))
-        st = _with_status_activity(
-            iid, apply_health(iid, inst, st, runtime.get("container_id")))
+        st = _with_status_activity(iid, _with_proxy_health(
+            inst, apply_health(iid, inst, st, runtime.get("container_id"))))
         hub.status_cache[iid] = st
         if held_previous and previous_sampled_at is not None:
             # apply_health(OK) clears health and its related cache bookkeeping. Restore the
@@ -2637,7 +2677,7 @@ def _cached_line_status(inst: dict) -> dict:
     # nothing about it now. Serving that cache is what left a device reading "no SIM card"
     # after VoWiFi was switched off, until the next poll happened to overwrite it.
     if cached and (inst.get("enabled", True) or cached.get("state") == "STOPPED"):
-        return dict(cached)
+        return _with_status_activity(iid, _with_proxy_health(inst, cached))
     if not inst.get("enabled", True):
         return _with_status_activity(iid, {
             "state": "STOPPED", "label": status_mod.LABELS["STOPPED"],
@@ -2668,6 +2708,9 @@ def _with_status_activity(iid: str, st: dict) -> dict:
         next_action = ("Verify the SIM PIN before automatic setup can continue."
                        if str(st.get("reason_code") or "").startswith("pin_")
                        else "Restart the line after resolving the reported problem.")
+    elif state == "OK" and (st.get("proxy_health") or {}).get("state") == "failed":
+        current = proxy_health.REASON
+        next_action = "Check or change the proxy, then run the connectivity check again."
     elif state == "OK":
         current = "IMS is registered and the line is being monitored"
         next_action = "Automatic recovery will run if the connection is lost."
@@ -3083,6 +3126,7 @@ async def lifespan(app: FastAPI):
     monitor = asyncio.create_task(card_monitor())
     sms_poller = asyncio.create_task(cellular_sms_poller())
     host_poller = asyncio.create_task(host_health_poller())
+    proxy_poller = asyncio.create_task(proxy_health_poller())
     segment_reaper = asyncio.create_task(sms_segment_reaper())
     mms_runner = asyncio.create_task(mms_worker())
     update_poller = asyncio.create_task(update_automation_poller())
@@ -3094,6 +3138,7 @@ async def lifespan(app: FastAPI):
     monitor.cancel()
     sms_poller.cancel()
     host_poller.cancel()
+    proxy_poller.cancel()
     segment_reaper.cancel()
     mms_runner.cancel()
     update_poller.cancel()
@@ -3101,8 +3146,9 @@ async def lifespan(app: FastAPI):
     # Reap the cancelled tasks (the monitor may be parked in a to_thread wait for up to
     # its timeout; awaiting keeps shutdown deterministic instead of leaking the error).
     await asyncio.gather(poller, monitor, sms_poller, host_poller,
-                         segment_reaper, mms_runner, update_poller, media_task,
+                         segment_reaper, mms_runner, update_poller, media_task, proxy_poller,
                          return_exceptions=True)
+    await hub.proxy_health.close()
     await hub.runtime.close()
     for c in hub.ami.values():
         await c.close()
@@ -4447,7 +4493,10 @@ def _vowifi_capability(desired: bool, observed: dict, running: bool,
     else:
         raw = str((line_status or {}).get("state") or (line_status or {}).get("label") or "").lower()
         if raw in {"ok", "working", "registered"}:
-            actual = "on"
+            warning = (line_status or {}).get("proxy_health") or {}
+            actual = "degraded" if warning.get("state") == "failed" else "on"
+            if actual == "degraded":
+                error = proxy_health.REASON
         elif raw in {"error", "failed", "stopped"}:
             actual = "error"
             error = str((line_status or {}).get("reason") or (line_status or {}).get("detail") or "")
@@ -6231,6 +6280,21 @@ async def api_instance_status(iid: str, request: Request):
     if not inst:
         raise HTTPException(404, "no such instance")
     return authz.status_for(gate.current(request), _cached_line_status(inst))
+
+
+@app.post("/api/instances/{iid}/proxy-health/check")
+async def api_proxy_health_check(iid: str):
+    inst = cfg.get_instance(str(iid))
+    if not inst:
+        raise HTTPException(404, "no such instance")
+    if not inst.get("enabled", True) or _cached_line_status(inst).get("state") == "STOPPED":
+        raise HTTPException(409, "The VoWiFi line is stopped")
+    context = _proxy_context(iid)
+    if context is None:
+        raise HTTPException(409, "This line does not use a proxy")
+    await hub.proxy_health.refresh(context, lambda: _proxy_context(iid), force=True)
+    hub.status_wakeup.set()
+    return {"proxy_health": hub.proxy_health.snapshot(_proxy_context(iid))}
 
 
 def _availability_window(now: int, recorded_since: int | None) -> int:

@@ -161,8 +161,8 @@ SWU_EGRESS_PROXY = os.environ.get("SWU_EGRESS_PROXY", "").strip()
 # The userspace ESP dataplane reads inner IP packets off the tun (ipsec0), wraps each in
 # ESP(+UDP for NAT-T)+outer-IPv4, and sends it out toward the ePDG. Design goals:
 #   * The tun (ipsec0) MTU is FIXED and stable so the IMS/pjsip layer is unaware of any path
-#     constraint (SWU_TUN_MTU, default 1400 -> a 1400 inner + ~81 ESP overhead = ~1481 outer,
-#     which still fits the common 1500/1480 uplinks with no fragmentation at all).
+#     constraint. SWU_TUN_MTU defaults to 1280 so TCP advertises a smaller MSS to peers;
+#     local outbound fragmentation alone cannot protect incoming signalling from large-packet loss.
 #   * Fragmentation is done ENTIRELY by the tunnel client, transparently: when the real outer
 #     path MTU cannot carry inner+overhead, swu splits the inner packet (RFC 791 for IPv4, an
 #     RFC 8200 Fragment header for IPv6) so every ESP datagram on the wire is COMPLETE and never
@@ -171,13 +171,19 @@ SWU_EGRESS_PROXY = os.environ.get("SWU_EGRESS_PROXY", "").strip()
 #     the route-cached PMTU, so a WireGuard/1280 (or any constrained) hop on the HOST outside the
 #     container — common when bypassing carrier IP restrictions — is picked up via PMTU discovery.
 # Env knobs:
-#   SWU_TUN_MTU     fixed ipsec0 MTU (default 1400)
+#   SWU_TUN_MTU     fixed ipsec0 MTU (default 1280; supported range 1280-1500)
 #   SWU_OUTER_MTU   override the sensed outer path MTU (0 = autodetect via route + egress NIC)
 #   SWU_MTU_MARGIN  extra bytes shaved off the fragmentation threshold (default 0)
 #   SWU_INNER_FRAG  1 = swu fragments oversized inner packets (default 1)
 #   SWU_ICMP_PTB    1 = also signal the local source with an ICMP PTB (default 0 — keep the IMS
 #                       layer unaware; inner fragmentation already makes everything fit)
-SWU_TUN_MTU_ENV   = int(os.environ.get("SWU_TUN_MTU", "1400") or 1400)
+DEFAULT_TUN_MTU = 1280
+try:
+    SWU_TUN_MTU_ENV = int(os.environ.get("SWU_TUN_MTU", "") or DEFAULT_TUN_MTU)
+except ValueError:
+    SWU_TUN_MTU_ENV = DEFAULT_TUN_MTU
+if not DEFAULT_TUN_MTU <= SWU_TUN_MTU_ENV <= 1500:
+    SWU_TUN_MTU_ENV = DEFAULT_TUN_MTU
 SWU_OUTER_MTU_ENV = int(os.environ.get("SWU_OUTER_MTU", "0") or 0)
 SWU_MTU_MARGIN    = int(os.environ.get("SWU_MTU_MARGIN", "0") or 0)
 SWU_INNER_FRAG    = os.environ.get("SWU_INNER_FRAG", "1") not in ("0", "", "no")
@@ -2667,9 +2673,9 @@ class swu():
         the sensed outer path MTU (NOT the device MTU). The encapsulation worker refreshes the
         threshold periodically (PMTUD may lower it after traffic starts).
 
-        - ipsec0 MTU = SWU_TUN_MTU (default 1400): 1400 + ESP overhead (~81) = ~1481, still inside
-          the common 1500/1480 uplinks, so a normal deployment fragments NOTHING while giving the
-          IMS layer a fixed MTU.
+        - ipsec0 MTU = SWU_TUN_MTU (default 1280): a conservative fixed value also reduces
+          the TCP MSS advertised to peers. The outer packet still has encapsulation overhead;
+          the interface value is not a measurement of the outer path MTU.
         - inner_mtu (fragmentation threshold) = sensed_outer_mtu - ESP overhead. Only inner packets
           larger than this are split by swu (transparently) so every ESP datagram is complete.
         Best-effort; on error ipsec0 keeps its default and inner_mtu is left unset (no fragmenting)."""
@@ -2677,7 +2683,7 @@ class swu():
             outer_mtu = self._sense_outer_mtu()
             overhead = self._esp_overhead()
             inner_mtu = self._inner_mtu_from(outer_mtu)
-            tun_mtu = SWU_TUN_MTU_ENV or 1400
+            tun_mtu = SWU_TUN_MTU_ENV
             self.outer_mtu = outer_mtu
             self.inner_mtu = inner_mtu
             self.tun_mtu = tun_mtu
@@ -3208,7 +3214,7 @@ class swu():
         below by 68 (min IPv4 datagram). Returns the new inner_mtu."""
         overhead = self._esp_overhead()
         outer = hint_outer_mtu or self._outer_path_mtu()
-        cur = getattr(self, "inner_mtu", 0) or (SWU_TUN_MTU_ENV or 1400)
+        cur = getattr(self, "inner_mtu", 0) or SWU_TUN_MTU_ENV
         new_inner = None
         if outer:
             candidate = outer - overhead - self.proxy_udp_overhead - SWU_MTU_MARGIN

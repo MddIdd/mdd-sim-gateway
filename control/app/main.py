@@ -5354,6 +5354,10 @@ def api_get_settings():
 def api_put_settings(body: dict):
     # Ignore the legacy field from older cached clients. Product identity is fixed.
     body.pop("system_name", None)
+    if "vowifi_mtu" in body:
+        mtu = body["vowifi_mtu"]
+        if type(mtu) is not int or not cfg.MIN_VOWIFI_MTU <= mtu <= cfg.MAX_VOWIFI_MTU:
+            raise HTTPException(400, "VoWiFi MTU must be an integer from 1280 to 1500.")
     proxy = body.get("proxy")
     if proxy is not None:
         if not isinstance(proxy, dict) or not isinstance(proxy.get("profiles", {}), dict) \

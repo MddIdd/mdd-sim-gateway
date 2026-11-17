@@ -51,6 +51,21 @@ RUNTIME_ONLY_INSTANCE_FIELDS = frozenset({
 DEFAULT_USER_AGENT = "MDD-Sim-Gateway"
 MAX_USER_AGENT_LEN = 64
 
+DEFAULT_VOWIFI_MTU = 1280
+MIN_VOWIFI_MTU, MAX_VOWIFI_MTU = 1280, 1500
+
+
+def vowifi_mtu(settings: dict) -> int:
+    """Saved settings win; older deployments may still set SWU_TUN_MTU on Control."""
+    if "vowifi_mtu" in settings:
+        value = settings["vowifi_mtu"]
+    else:
+        raw = os.environ.get("SWU_TUN_MTU", "").strip()
+        value = int(raw) if re.fullmatch(r"[0-9]{1,4}", raw) else DEFAULT_VOWIFI_MTU
+    if type(value) is int and MIN_VOWIFI_MTU <= value <= MAX_VOWIFI_MTU:
+        return value
+    return DEFAULT_VOWIFI_MTU
+
 
 class LineLimitError(ValueError):
     pass
@@ -96,6 +111,8 @@ DEFAULTS = {
         # gives up and CANCELs. 35 covers a normal answer window; most carriers roll to
         # voicemail by ~30s. Shorter = the callee is re-alerted fewer times when unanswered.
         "ring_timeout": 35,
+        # vowifi_mtu is resolved on load (default 1280). Keep it absent here so existing
+        # deployments using SWU_TUN_MTU retain their value until Settings saves one.
         # What happens to an SMS object on the modem/SIM once its message is in the database:
         # "delete" (default), "when_full" or "keep". Deliberately absent from these defaults:
         # an unset key defers to MDD_CELLULAR_SMS_STORAGE, so a deployment can choose the
@@ -358,6 +375,7 @@ def load() -> dict:
         # merge defaults (shallow for settings)
         out = deepcopy(DEFAULTS)
         out["settings"].update(data.get("settings", {}))
+        out["settings"]["vowifi_mtu"] = vowifi_mtu(data.get("settings", {}))
         if "tls" in data.get("settings", {}):
             out["settings"]["tls"] = {**DEFAULTS["settings"]["tls"], **data["settings"]["tls"]}
         out["settings"]["retry"] = {**DEFAULTS["settings"]["retry"],

@@ -4,6 +4,25 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.14.2] - 2026-11-18
+
+Stable release. Automatic update targets remain v1.14.0. Includes the per-line
+incoming-call recorder, proxy-health warnings, IKE envelope validation and compressed
+IPv6 address fix introduced in rc1/rc2.
+
+### Added
+
+- Settings → Calls & VoWiFi now lets users choose a tunnel MTU from 1280 to 1500 bytes.
+  Saving keeps existing calls running; restart the desired VoWiFi lines to apply it.
+  Existing `SWU_TUN_MTU` deployment values remain effective until a value is saved in Settings.
+
+### Fixed
+
+- Unconfigured VoWiFi tunnels now use MTU 1280 instead of 1400, reducing the TCP segment
+  sizes advertised to carriers. This mitigates incoming signalling lost on paths that carry
+  small packets but drop larger ones. Explicit MTU settings remain in effect; this does not
+  establish two-way audio or guarantee every proxy path can carry calls.
+
 ## [1.14.2-rc2] - 2026-11-09
 
 Manual diagnostic prerelease; automatic update targets remain v1.14.0 and the latest

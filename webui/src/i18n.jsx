@@ -3,6 +3,9 @@ import React, { createContext, useContext, useEffect, useMemo, useState } from '
 const STORAGE_KEY = 'mdd-language'
 
 const zh = {
+  'VoWiFi tunnel MTU (bytes)': 'VoWiFi 隧道 MTU（字节）',
+  'Default: 1280. Allowed: 1280–1500. A smaller MTU can help when incoming calls fail on a registered line. After saving, restart the VoWiFi lines that should use this value.': '默认 1280，允许范围 1280–1500。线路已注册但呼入失败时，较小的 MTU 可能有帮助。保存后，重启需要应用此值的 VoWiFi 线路。',
+  'VoWiFi MTU must be an integer from 1280 to 1500.': 'VoWiFi MTU 必须是 1280–1500 之间的整数。',
   'IMS registration is active.': 'IMS 已注册。',
   'Proxy status awaiting check': '代理状态待检测',
   'Checking proxy UDP connectivity…': '正在检测代理 UDP 连通性…',
@@ -388,7 +391,7 @@ const zh = {
   'Ring before answering (seconds)': '应答前响铃（秒）',
   'Maximum message length (seconds)': '单条留言上限（秒）',
   'Record a message when an incoming call goes unanswered — including when no browser is open. Recordings stay on the gateway and are played from the call log.': '来电无人接听时（包括浏览器未打开）录下对方留言。录音保存在网关本机，可在通话记录中收听。',
-  'A call you decline on the softphone is never recorded. Changing these restarts the engine of each running line, which reconnects briefly.': '在软电话上主动拒接的来电不会留言。修改这些设置会重启运行中线路的引擎，线路会短暂重连。',
+  'A call you decline on the softphone is never recorded. Restart VoWiFi lines after saving to apply these settings.': '在软电话上主动拒接的来电不会留言。保存后需重启 VoWiFi 线路，才会应用这些设置。',
   'Run once now': '立即执行一次', Done: '已完成',
   'Send one chargeable SMS on this line right now?': '立即在该线路上发送一条计费短信？',
   'Query this line’s balance right now?': '立即查询该线路的余额？',

@@ -1129,7 +1129,18 @@ export function SystemPage({ showToast, openUpdateDialog }) {
   const buildCacheReclaimable = status?.host?.project_storage?.build_cache_reclaimable_bytes
   const oldImagesReclaimable = status?.host?.project_storage?.mdd_old_images_reclaimable_bytes
   const hostRestartAvailable = status?.deployment?.host_restart_available !== false
-  const save = async () => { try { const saved = await api.saveSettings(s); setS(saved); showToast(t('Saved')) } catch (e) { showToast(e.message) } }
+  const save = async () => {
+    const mtu = s.vowifi_mtu ?? 1280
+    if (!Number.isInteger(mtu) || mtu < 1280 || mtu > 1500) {
+      showToast(t('VoWiFi MTU must be an integer from 1280 to 1500.'))
+      return
+    }
+    try {
+      const saved = await api.saveSettings({ ...s, vowifi_mtu: mtu })
+      setS(saved)
+      showToast(t('Saved'))
+    } catch (e) { showToast(t(e.message)) }
+  }
   const action = async name => { try { const result = name === 'backup' ? await api.createBackup() : await api.maintenance(name); showToast(name === 'backup' && result.missing_attachments ? t('Backup created, but {count} attachment(s) were already missing', { count: result.missing_attachments }) : result.ok ? t('Operation completed') : t('Operation completed with errors')); loadStatus() } catch (e) { showToast(e.message) } }
   const pruneBuildCache = async () => {
     if (!window.confirm(t('Clear dangling Docker build cache? Images, containers and volumes are kept.'))) return
@@ -1172,6 +1183,15 @@ export function SystemPage({ showToast, openUpdateDialog }) {
     {tab === 'web' && <><h2>{t('Web access')}</h2><label><input type="checkbox" className="u-toggle" checked={!!s.tls?.self_signed} onChange={e => setS({ ...s, tls: { ...s.tls, self_signed: e.target.checked } })} />{t('Use self-signed certificate')}</label><div className="u-form-grid"><div><label>{t('Bind address')}</label><input value={s.bind || ''} onChange={e => setS({ ...s, bind: e.target.value })} /></div><div><label>{t('HTTPS port')}</label><input type="number" value={s.http_port || 8443} onChange={e => setS({ ...s, http_port: +e.target.value })} /></div><div><label>{t('Domain')}</label><input value={s.tls?.domain || ''} onChange={e => setS({ ...s, tls: { ...s.tls, domain: e.target.value } })} /></div><div><label>{t('Certificate path')}</label><input value={s.tls?.cert_path || ''} onChange={e => setS({ ...s, tls: { ...s.tls, cert_path: e.target.value } })} /></div><div><label>{t('Private key path')}</label><input value={s.tls?.key_path || ''} onChange={e => setS({ ...s, tls: { ...s.tls, key_path: e.target.value } })} /></div></div></>}
     {tab === 'voice' && <><h2>{t('Calls & VoWiFi')}</h2><MediaModePanel /><div className="u-form-grid"><div><label>{t('Ring timeout (seconds)')}</label><input type="number" value={s.ring_timeout ?? 35} onChange={e => setS({ ...s, ring_timeout: +e.target.value })} /></div><div><label>{t('Max retries')}</label><input type="number" value={s.retry?.max ?? 3} onChange={e => setS({ ...s, retry: { ...s.retry, max: +e.target.value } })} /></div><div><label>{t('Seconds per attempt')}</label><input type="number" value={s.retry?.interval ?? 30} onChange={e => setS({ ...s, retry: { ...s.retry, interval: +e.target.value } })} /></div><div><label>{t('Data channel rekey interval (minutes, 0 = not initiated by the gateway)')}</label><input type="number" value={s.rekey?.minutes ?? 30} onChange={e => setS({ ...s, rekey: { ...s.rekey, minutes: +e.target.value } })} /></div><div><label>{t('Control channel rekey interval (minutes, 0 = off)')}</label><input type="number" value={s.rekey?.ike_minutes ?? 150} onChange={e => setS({ ...s, rekey: { ...s.rekey, ike_minutes: +e.target.value } })} /></div></div>
       <p className="u-hint" style={{ margin: '4px 0 0' }}>{t('Some carriers silently expire a VoWiFi session on a fixed clock (observed: ~2h50m). The control channel (IKE) rekey renews the session before that clock fires; keep it below the shortest carrier interval. 0 disables it.')}</p>
+      <div className="u-form-grid">
+        <div>
+          <label htmlFor="vowifi-mtu">{t('VoWiFi tunnel MTU (bytes)')}</label>
+          <input id="vowifi-mtu" type="number" min="1280" max="1500" step="1"
+            aria-describedby="vowifi-mtu-hint" value={s.vowifi_mtu ?? 1280}
+            onChange={e => setS({ ...s, vowifi_mtu: e.target.value === '' ? '' : Number(e.target.value) })} />
+        </div>
+      </div>
+      <p id="vowifi-mtu-hint" className="u-hint">{t('Default: 1280. Allowed: 1280–1500. A smaller MTU can help when incoming calls fail on a registered line. After saving, restart the VoWiFi lines that should use this value.')}</p>
       <h3 style={{ marginBottom: 4 }}>{t('Voicemail')}</h3>
       <p className="u-hint" style={{ margin: '0 0 8px' }}>{t('Record a message when an incoming call goes unanswered — including when no browser is open. Recordings stay on the gateway and are played from the call log.')}</p>
       <label><input type="checkbox" className="u-toggle" checked={!!s.vm_enabled} onChange={e => setS({ ...s, vm_enabled: e.target.checked })} />{t('Enable voicemail (default for new lines)')}</label>
@@ -1179,7 +1199,7 @@ export function SystemPage({ showToast, openUpdateDialog }) {
         <div><label>{t('Ring before answering (seconds)')}</label><input type="number" min="5" max="55" value={s.vm_ring_seconds ?? 25} onChange={e => setS({ ...s, vm_ring_seconds: +e.target.value })} /></div>
         <div><label>{t('Maximum message length (seconds)')}</label><input type="number" min="30" max="300" value={s.vm_max_seconds ?? 120} onChange={e => setS({ ...s, vm_max_seconds: +e.target.value })} /></div>
       </div>
-      <p className="u-hint">{t('A call you decline on the softphone is never recorded. Changing these restarts the engine of each running line, which reconnects briefly.')}</p></>}
+      <p className="u-hint">{t('A call you decline on the softphone is never recorded. Restart VoWiFi lines after saving to apply these settings.')}</p></>}
     {tab === 'security' && <><h2>{t('Security')}</h2><div className="u-detail"><span>{t('HTTPS')}</span><b>{status?.security?.https ? t('Enabled') : t('Disabled')}</b></div><div className="u-detail"><span>{t('Certificate mode')}</span><b>{status?.security?.certificate_mode ? t(status.security.certificate_mode) : '—'}</b></div><h3>{t('Change administrator password')}</h3><div className="u-form-grid"><div><label>{t('Current password')}</label><input type="password" autoComplete="current-password" value={passwordForm.current} onChange={e=>setPasswordForm({...passwordForm,current:e.target.value})}/></div><div><label>{t('New password (at least 10 characters)')}</label><input type="password" autoComplete="new-password" minLength="10" value={passwordForm.next} onChange={e=>setPasswordForm({...passwordForm,next:e.target.value})}/></div><div><label>{t('Confirm password')}</label><input type="password" autoComplete="new-password" minLength="10" value={passwordForm.confirm} onChange={e=>setPasswordForm({...passwordForm,confirm:e.target.value})}/></div></div><button className="btn btn-ghost" disabled={!passwordForm.current||passwordForm.next.length<10||!passwordForm.confirm} onClick={changePassword}>{t('Change password')}</button><p className="u-hint">{t('Changing the password also signs out every app.')}</p><label><input type="checkbox" className="u-toggle" checked={s.security?.audit_enabled !== false} onChange={e => setS({ ...s, security: { ...s.security, audit_enabled: e.target.checked } })} />{t('Record administrative operations')}</label><label>{t('Trusted reverse proxies (comma-separated)')}</label><input value={(s.security?.trusted_proxies || []).join(', ')} onChange={e => setS({ ...s, security: { ...s.security, trusted_proxies: e.target.value.split(',').map(x => x.trim()).filter(Boolean) } })} /><h3>{t('Signed-in apps')}</h3><p className="u-hint">{t('Apps signed in with the administrator account. Revoking one signs it out at once; changing the password signs out all of them.')}</p>{!authClients && <p className={authClientsError?'u-error':'u-muted'}>{t(authClientsError?'Loading failed':'Loading')}{!authClientsError&&'…'}</p>}{authClients && !authClients.length && <p className="u-muted">{t('No apps are signed in.')}</p>}{authClients?.map(c=><div className="u-detail" key={c.id}><div><span>{c.name}</span><b>{[c.platform,c.app_version].filter(Boolean).join(' · ')}</b> · <small>{t('Last used')}: {new Date(c.last_seen*1000).toLocaleString()}</small></div><button className="btn btn-danger-outline" onClick={()=>revokeAuthClient(c.id)}>{t('Sign out')}</button></div>)}</>}
     {tab === 'backup' && <div className="u-settings-stack">
       <div className="u-settings-grid">

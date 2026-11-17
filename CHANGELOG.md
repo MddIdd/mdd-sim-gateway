@@ -4,6 +4,12 @@ All notable changes follow Keep a Changelog and Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.14.2] - 2026-11-18
+
+Stable release. Automatic update targets remain v1.14.0. Includes the per-line
+incoming-call recorder, proxy-health warnings, IKE envelope validation and compressed
+IPv6 address fix introduced in rc1/rc2.
+
 ### Added
 
 - Settings → Calls & VoWiFi now lets users choose a tunnel MTU from 1280 to 1500 bytes.
